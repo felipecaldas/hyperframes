@@ -659,6 +659,25 @@ function studioManualEditsRenderRuntime(
     }
     return applied;
   };
+  // `applyManifest` is redefined on every re-run of this script (each studio
+  // edit / soft reload injects a fresh copy of this whole runtime). Route the
+  // wrapped seek functions through this single mutable, window-scoped slot —
+  // rather than closing over `applyManifest` directly — so that if a wrapper
+  // installed by an EARLIER generation is still active (e.g. `isWrapped`
+  // below finds the current seek already marked and skips re-wrapping), it
+  // keeps calling the CURRENT manifest logic instead of a stale closure.
+  //
+  // This also means a stale wrapper's own closure no longer needs to retain
+  // that generation's `applyManifest` (and everything IT closed over —
+  // manifestEdits, resolveTarget, every apply* helper) for the wrapper's
+  // lifetime: once a newer generation overwrites this slot, the OLD
+  // `applyManifest` becomes collectible even if the old wrapper function
+  // object itself is still reachable (e.g. still wrapped-around by another
+  // studio seek-wrapping subsystem — see studioPositionSeekReapplyRuntime's
+  // installSeekTrap above, which wraps the same two functions independently).
+  // Confirmed via a DevTools retainer trace rooted at
+  // `__hfStudioManualEditsApply` during a long editing session that this
+  // closure chain was what stayed alive across repeated re-runs.
   runtimeWindow.__hfStudioManualEditsApply = applyManifest;
 
   const markWrapped = (fn: (time: number) => unknown): void => {
@@ -688,18 +707,22 @@ function studioManualEditsRenderRuntime(
     if (!fn) return false;
     const seek = fn as (time: number) => unknown;
     if (isWrapped(seek)) {
-      applyManifest();
+      runtimeWindow.__hfStudioManualEditsApply?.();
       return true;
     }
 
+    // Calls through the live slot (see above) rather than closing over
+    // `applyManifest` directly, so this wrapper always runs the CURRENT
+    // generation's apply logic even if it's an older wrapper left in place
+    // by a prior script generation.
     const wrappedSeek = function (this: unknown, time: number): unknown {
       const result = seek.call(this, time);
-      applyManifest();
+      runtimeWindow.__hfStudioManualEditsApply?.();
       return result;
     };
     markWrapped(wrappedSeek);
     set(wrappedSeek);
-    applyManifest();
+    runtimeWindow.__hfStudioManualEditsApply?.();
     return true;
   };
 
