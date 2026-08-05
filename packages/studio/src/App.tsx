@@ -57,6 +57,7 @@ import { StoryboardView } from "./components/storyboard/StoryboardView";
 import { FileManagerProvider } from "./contexts/FileManagerContext";
 import { DomEditProvider } from "./contexts/DomEditContext";
 import { StudioSplash } from "./components/StudioSplash";
+import { AgentDrawerHost } from "./components/AgentDrawerHost";
 import { useServerConnection } from "./hooks/useServerConnection";
 import { useStudioSessionStart } from "./hooks/useStudioSessionStart";
 import { useTimelineAddAtPlayhead } from "./hooks/useTimelineAddAtPlayhead";
@@ -482,6 +483,7 @@ export function StudioApp() {
                       })();
                     }}
                   />
+                  <AgentDrawerHost />
                   {previewPersistence.domEditSaveQueuePaused && !externalFileChanges.blocked && (
                     <SaveQueuePausedBanner
                       message={previewPersistence.domEditSaveQueuePaused}
