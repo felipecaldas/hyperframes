@@ -5,6 +5,7 @@ import { useProjectSignaturePoll } from "../../hooks/useProjectSignaturePoll";
 import { copyTextToClipboard } from "../../utils/clipboard";
 import { Button } from "../ui/Button";
 import { StoryboardLoaded } from "./StoryboardLoaded";
+import { openAgentBridge } from "../../utils/agentBridge";
 
 export interface StoryboardViewProps {
   projectId: string;
@@ -128,11 +129,20 @@ function EmptyState({ path }: { path: string }) {
             <span className="font-mono text-xs text-neutral-500">Prompt for your agent</span>
             <Button
               size="sm"
+              variant="primary"
+              onClick={() =>
+                openAgentBridge({ kind: "storyboard-create", prompt, title: "Create storyboard" })
+              }
+            >
+              Create with Agent
+            </Button>
+            <Button
+              size="sm"
               variant="secondary"
               onClick={onCopy}
               icon={copied ? <Check size={14} /> : <Copy size={14} />}
             >
-              {copied ? "Copied" : "Copy prompt"}
+              {copied ? "Copied" : "Copy Prompt"}
             </Button>
           </div>
           <pre className="max-h-64 overflow-auto px-4 py-3 font-mono text-xs leading-relaxed text-neutral-400 whitespace-pre-wrap">

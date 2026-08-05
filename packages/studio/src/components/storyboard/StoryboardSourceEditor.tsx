@@ -3,6 +3,7 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { SourceEditor } from "../editor/SourceEditor";
 import { useFileManagerContext } from "../../contexts/FileManagerContext";
+import { setAgentEditorDirty } from "../../utils/agentBridge";
 
 export interface SourceFile {
   path: string;
@@ -152,7 +153,11 @@ export function StoryboardSourceEditor({
 
   // Surface dirty state to the parent (guards the Board↔Source toggle) and warn
   // on browser-level navigation while there are unsaved edits.
-  useEffect(() => onDirtyChange?.(file.dirty), [onDirtyChange, file.dirty]);
+  useEffect(() => {
+    onDirtyChange?.(file.dirty);
+    setAgentEditorDirty(file.dirty);
+    return () => setAgentEditorDirty(false);
+  }, [onDirtyChange, file.dirty]);
   useEffect(() => {
     if (!file.dirty) return;
     const onBeforeUnload = (event: BeforeUnloadEvent) => {

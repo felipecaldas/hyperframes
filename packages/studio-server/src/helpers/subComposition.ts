@@ -189,6 +189,18 @@ function extractElementAttrs(el: Element): string {
 
 const NON_RENDERED_TAGS = new Set(["SCRIPT", "STYLE", "LINK", "META", "TEMPLATE", "NOSCRIPT"]);
 
+const STANDALONE_PREVIEW_CANVAS_RESET = `<style data-hyperframes-subcomposition-preview-reset>
+html, body {
+  margin: 0 !important;
+  padding: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+  max-height: none !important;
+  overflow: hidden !important;
+}
+</style>`;
+
 /**
  * Carry the `<template>`'s `data-composition-id` onto the content's root
  * rendered element when the author declared it only on the `<template>` tag.
@@ -342,6 +354,14 @@ export function buildSubCompositionHtml(
   // links, and meta tags are preserved. Placed after the project head so
   // the composition's deps take precedence (last-write-wins for scripts).
   if (compHeadContent) headContent += `\n${compHeadContent}`;
+
+  // The borrowed project head may size html/body to the parent composition's
+  // canvas. A standalone sub-composition preview has its own viewport, derived
+  // from the child file's data-width/data-height; leaking the parent box clips
+  // cross-aspect storyboard posters (for example, a 1080×1920 frame inside a
+  // 1920×1080 project). Keep shared dependencies, but make the preview viewport
+  // authoritative for the document canvas.
+  headContent += `\n${STANDALONE_PREVIEW_CANVAS_RESET}`;
 
   // Strip any baked runtime the borrowed index/comp <head> carried, for the same
   // reason as the body above — done before injecting the preview runtime so the

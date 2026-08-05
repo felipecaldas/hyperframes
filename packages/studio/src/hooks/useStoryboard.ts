@@ -5,6 +5,7 @@ import type {
   StoryboardWarning,
 } from "@hyperframes/core/storyboard";
 import { buildProjectApiPath } from "../utils/projectRouting";
+import { subscribeAgentRefresh } from "../utils/agentBridge";
 
 /** A frame as returned by the API: parsed frame + disk-resolution info. */
 export interface StoryboardFrameView extends StoryboardFrame {
@@ -55,6 +56,8 @@ export function useStoryboard(projectId: string | null): UseStoryboardResult {
   const lastProjectRef = useRef<string | null>(null);
 
   const reload = useCallback(() => setReloadKey((k) => k + 1), []);
+
+  useEffect(() => subscribeAgentRefresh(reload), [reload]);
 
   useEffect(() => {
     if (!projectId) return;

@@ -5,6 +5,8 @@ import { FRAME_STATUS_META } from "./frameStatus";
 export interface StoryboardFrameTileProps {
   projectId: string;
   frame: StoryboardFrameView;
+  /** CSS aspect-ratio derived from STORYBOARD.md's global format. */
+  aspectRatio: string;
   /** Open this frame in the full-area focus view. */
   onOpen: (index: number) => void;
   /** This frame's pending comment draft ("" when none). */
@@ -36,6 +38,7 @@ function placeholderMessage(frame: StoryboardFrameView): string {
 export function StoryboardFrameTile({
   projectId,
   frame,
+  aspectRatio,
   onOpen,
   commentDraft,
   onCommentDraftChange,
@@ -52,7 +55,8 @@ export function StoryboardFrameTile({
       <button
         type="button"
         onClick={() => onOpen(frame.index)}
-        className="group relative block aspect-video w-full overflow-hidden rounded-lg border border-neutral-800 bg-neutral-900 text-left transition-colors hover:border-neutral-600"
+        className="group relative block w-full overflow-hidden rounded-lg border border-neutral-800 bg-neutral-900 text-left transition-colors hover:border-neutral-600"
+        style={{ aspectRatio }}
       >
         <div className="absolute left-2 top-2 z-10 flex h-6 min-w-6 items-center justify-center rounded-full bg-black/70 px-1.5 text-xs font-semibold text-neutral-100">
           {frame.number ?? frame.index}

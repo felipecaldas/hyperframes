@@ -5,6 +5,8 @@ import { StoryboardFrameTile } from "./StoryboardFrameTile";
 export interface StoryboardGridProps {
   projectId: string;
   frames: StoryboardFrameView[];
+  /** CSS aspect-ratio derived from STORYBOARD.md's global format. */
+  aspectRatio: string;
   /** Open a frame in the full-area focus view. */
   onOpenFrame: (index: number) => void;
   /** Per-frame comment drafts, keyed by frame index. */
@@ -20,6 +22,7 @@ export interface StoryboardGridProps {
 export function StoryboardGrid({
   projectId,
   frames,
+  aspectRatio,
   onOpenFrame,
   commentDrafts,
   onCommentDraftChange,
@@ -41,6 +44,7 @@ export function StoryboardGrid({
           key={frame.index}
           projectId={projectId}
           frame={frame}
+          aspectRatio={aspectRatio}
           onOpen={onOpenFrame}
           commentDraft={commentDrafts[frame.index] ?? ""}
           onCommentDraftChange={onCommentDraftChange}
