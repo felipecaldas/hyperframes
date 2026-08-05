@@ -6,6 +6,7 @@ import { readStudioFileChangePath } from "../components/editor/manualEdits";
 import { isSelfWriteEcho } from "./sdkSelfWriteRegistry";
 import { trackStudioEvent } from "../utils/studioTelemetry";
 import type { PublishSdkSession } from "../utils/sdkCutover";
+import { shouldSuppressAgentRefresh, subscribeAgentRefresh } from "../utils/agentBridge";
 
 /**
  * Read a project file's content, or undefined on a non-2xx (optional read).
@@ -177,6 +178,7 @@ export function useSdkSession(
     const compPath = activeCompPath;
     const readProjectId = projectId ?? null;
     const handler = (payload?: unknown) => {
+      if (shouldSuppressAgentRefresh()) return;
       if (!shouldReloadSdkSession(payload, compPath)) return;
       const withinWindow =
         !!domEditSaveTimestampRef &&
@@ -205,6 +207,8 @@ export function useSdkSession(
     return () => es.close();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCompPath, projectId]);
+
+  useEffect(() => subscribeAgentRefresh(() => setReloadToken((token) => token + 1)), []);
 
   // ── Open / re-open the session ──
   useEffect(() => {

@@ -263,7 +263,7 @@ function SaveFeedbackAction({ draftCount }: { draftCount: number }) {
         <div className="text-xs font-semibold text-neutral-200">Next: save your feedback</div>
         <p className="mt-0.5 text-[11px] text-neutral-500">
           {draftCount} frame{draftCount === 1 ? " has" : "s have"} feedback ready. Use Save &amp;
-          copy message above to prepare this batch for your agent.
+          Send Feedback above to persist and notify your agent.
         </p>
       </div>
     </div>

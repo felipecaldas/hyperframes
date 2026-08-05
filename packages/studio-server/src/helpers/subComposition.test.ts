@@ -101,6 +101,34 @@ describe("buildSubCompositionHtml", () => {
     expect(html).toContain("<p>Hello</p>");
   });
 
+  it("isolates a portrait child preview from a landscape parent canvas", () => {
+    const parentCanvasCss = "html, body { width: 1920px; height: 1080px; overflow: hidden; }";
+    const dir = makeTempProject({
+      "index.html": `<!doctype html>
+<html><head><style>${parentCanvasCss}</style></head><body></body></html>`,
+      "compositions/frames/portrait.html": `<template>
+  <style>#portrait { width: 1080px; height: 1920px; }</style>
+  <div id="portrait" data-composition-id="portrait" data-width="1080" data-height="1920"></div>
+</template>`,
+    });
+
+    const html = buildSubCompositionHtml(
+      dir,
+      "compositions/frames/portrait.html",
+      "/api/runtime.js",
+    );
+
+    expect(html).not.toBeNull();
+    expect(html).toContain(parentCanvasCss);
+    expect(html).toContain("data-hyperframes-subcomposition-preview-reset");
+    expect(html).toContain("width: 100% !important");
+    expect(html).toContain("height: 100% !important");
+    expect(html).toContain("overflow: hidden !important");
+    expect(html!.indexOf(parentCanvasCss)).toBeLessThan(
+      html!.indexOf("data-hyperframes-subcomposition-preview-reset"),
+    );
+  });
+
   it("rewrites sub-composition asset paths against the project root preview base", () => {
     const dir = makeTempProject({
       "index.html": `<!doctype html>

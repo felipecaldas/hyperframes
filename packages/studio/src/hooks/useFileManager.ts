@@ -191,7 +191,7 @@ export function useFileManager({
 
   // ── Editor save (debounced content change) ──
 
-  const { saveRafRef, handleContentChange } = useEditorSave({
+  const { saveRafRef, handleContentChange, editorDirty, flushPendingSourceSave } = useEditorSave({
     editingPathRef,
     projectIdRef,
     readProjectFile,
@@ -491,6 +491,7 @@ export function useFileManager({
     editingPathRef,
     projectIdRef,
     saveRafRef,
+    editorDirty,
     importedFontAssetsRef,
 
     // Core I/O
@@ -507,6 +508,7 @@ export function useFileManager({
     // Callbacks
     handleFileSelect,
     handleContentChange,
+    flushPendingSourceSave,
     refreshFileTree,
     uploadProjectFiles,
     handleCreateFile,

@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 import { saveProjectFilesWithHistory } from "../utils/studioFileHistory";
 import type { EditHistoryKind } from "../utils/editHistory";
 import { trackStudioEvent } from "../utils/studioTelemetry";
@@ -32,6 +32,10 @@ export function useEditorSave({
   showToast,
 }: UseEditorSaveOptions) {
   const saveRafRef = useRef<number | null>(null);
+  const pendingSaveRef = useRef<Promise<void> | null>(null);
+  const editGenerationRef = useRef(0);
+  const editorDirtyRef = useRef(false);
+  const [editorDirty, setEditorDirty] = useState(false);
   const refreshRafRef = useRef<number | null>(null);
   // One error toast per burst of failures — every keystroke retries the save,
   // and error toasts persist until dismissed, so don't stack duplicates.
@@ -43,11 +47,15 @@ export function useEditorSave({
       if (!pid) return;
       const path = editingPathRef.current;
       if (!path) return;
+      const generation = ++editGenerationRef.current;
+      editorDirtyRef.current = true;
+      setEditorDirty(true);
 
       if (saveRafRef.current != null) cancelAnimationFrame(saveRafRef.current);
       saveRafRef.current = requestAnimationFrame(() => {
+        saveRafRef.current = null;
         domEditSaveTimestampRef.current = Date.now();
-        saveProjectFilesWithHistory({
+        const save = saveProjectFilesWithHistory({
           projectId: pid,
           label: "Edit source",
           kind: "source",
@@ -58,6 +66,10 @@ export function useEditorSave({
           recordEdit,
         })
           .then(() => {
+            if (editGenerationRef.current === generation) {
+              editorDirtyRef.current = false;
+              setEditorDirty(false);
+            }
             if (refreshRafRef.current != null) cancelAnimationFrame(refreshRafRef.current);
             refreshRafRef.current = requestAnimationFrame(() => setRefreshKey((k) => k + 1));
           })
@@ -75,6 +87,7 @@ export function useEditorSave({
               );
             }
           });
+        pendingSaveRef.current = save.then(() => undefined);
       });
     },
     [
@@ -89,8 +102,18 @@ export function useEditorSave({
     ],
   );
 
+  const flushPendingSourceSave = useCallback(async (): Promise<boolean> => {
+    if (saveRafRef.current !== null) {
+      await new Promise<void>((resolveFrame) => requestAnimationFrame(() => resolveFrame()));
+    }
+    await pendingSaveRef.current;
+    return !editorDirtyRef.current;
+  }, []);
+
   return {
     saveRafRef,
     handleContentChange,
+    editorDirty,
+    flushPendingSourceSave,
   };
 }

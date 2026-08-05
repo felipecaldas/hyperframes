@@ -103,6 +103,10 @@ export function createViteAdapter(dataDir: string, server: ViteDevServer): Studi
   };
 
   return {
+    agentBridgeEnabled:
+      server.config.server.host !== true &&
+      [undefined, "localhost", "127.0.0.1", "::1"].includes(server.config.server.host),
+
     // The CLI resolves --proxy/--no-proxy against hyperframes.json before it
     // launches Vite. Direct `bun run dev` keeps the historical default-on
     // behavior when the child environment is absent.

@@ -4,6 +4,7 @@ import { usePlayerStore } from "../store/playerStore";
 import { formatTime } from "../lib/time";
 import { buildPromptCopyText, buildTimelineAgentPrompt } from "./timelineEditing";
 import { copyTextToClipboard } from "../../utils/clipboard";
+import { openAgentBridge } from "../../utils/agentBridge";
 
 interface EditPopoverProps {
   rangeStart: number;
@@ -63,14 +64,17 @@ export function EditPopover({ rangeStart, rangeEnd, anchorX, anchorY, onClose }:
   }, [start, end, elementsInRange, prompt]);
 
   const handleCopy = useCallback(async () => {
-    const copied = await copyTextToClipboard(buildClipboardText());
-    if (!copied) return;
+    openAgentBridge({
+      kind: "timeline",
+      prompt: buildClipboardText(),
+      title: `${formatTime(start)} — ${formatTime(end)}`,
+    });
     setCopiedAgentPrompt(true);
     setTimeout(() => {
       setCopiedAgentPrompt(false);
       onClose();
     }, 800);
-  }, [buildClipboardText, onClose]);
+  }, [buildClipboardText, end, onClose, start]);
 
   const handleCopyPrompt = useCallback(async () => {
     const promptText = buildPromptCopyText(prompt);
@@ -157,7 +161,7 @@ export function EditPopover({ rangeStart, rangeEnd, anchorX, anchorY, onClose }:
                 : "bg-studio-accent/15 text-studio-accent border border-studio-accent/25 hover:bg-studio-accent/25"
             }`}
           >
-            {copiedAgentPrompt ? "Copied!" : "Copy to Agent"}
+            {copiedAgentPrompt ? "Sent!" : "Send to Agent"}
             {!copiedAgentPrompt && (
               <span className="text-[9px] text-studio-accent/50 ml-1.5">Cmd+Enter</span>
             )}

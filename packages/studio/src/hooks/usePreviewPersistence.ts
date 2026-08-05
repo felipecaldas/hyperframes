@@ -12,6 +12,7 @@ import { flushStudioPendingEdits } from "../utils/studioPendingEdits";
 import { trackStudioEvent } from "../utils/studioTelemetry";
 import { applyUndoRestoreToPreview, type UndoRestoreFile } from "../utils/gsapUndoRestore";
 import { usePlayerStore } from "../player";
+import { shouldSuppressAgentRefresh } from "../utils/agentBridge";
 
 /** The restore payload the undo/redo preview-sync consumes (from the history store). */
 interface HistoryPreviewRestore {
@@ -238,6 +239,7 @@ export function usePreviewPersistence({
   // ── Listen for external file changes (HMR / SSE) ──
   useMountEffect(() => {
     const handler = (payload?: unknown) => {
+      if (shouldSuppressAgentRefresh()) return;
       if (
         shouldReloadForStudioFileChange(
           payload,

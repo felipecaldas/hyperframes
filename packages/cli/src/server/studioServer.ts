@@ -315,6 +315,10 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
   });
 
   const adapter: PreviewApiAdapter = {
+    agentBridgeEnabled: ["localhost", "127.0.0.1", "::1"].includes(
+      process.env.HYPERFRAMES_PREVIEW_HOST?.trim().toLowerCase() || "127.0.0.1",
+    ),
+
     // Explicit option wins (preview's resolved --proxy/--no-proxy + config);
     // otherwise honor the project's hyperframes.json media.autoProxy so every
     // createStudioServer caller (e.g. the background preview child) gets the

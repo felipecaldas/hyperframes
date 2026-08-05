@@ -55,6 +55,7 @@ import { StoryboardView } from "./components/storyboard/StoryboardView";
 import { FileManagerProvider } from "./contexts/FileManagerContext";
 import { DomEditProvider } from "./contexts/DomEditContext";
 import { StudioSplash } from "./components/StudioSplash";
+import { AgentDrawerHost } from "./components/AgentDrawerHost";
 import { useServerConnection } from "./hooks/useServerConnection";
 import { useTimelineAddAtPlayhead } from "./hooks/useTimelineAddAtPlayhead";
 import {
@@ -483,6 +484,7 @@ export function StudioApp() {
                       })();
                     }}
                   />
+                  <AgentDrawerHost />
                   {previewPersistence.domEditSaveQueuePaused && (
                     <SaveQueuePausedBanner
                       message={previewPersistence.domEditSaveQueuePaused}
