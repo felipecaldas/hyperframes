@@ -203,7 +203,7 @@ export function StoryboardFrameFocus({
               onClick={onSaveFeedback}
               loading={commentsSubmitState === "saving"}
             >
-              Save &amp; copy message ({commentDraftCount})
+              Save &amp; Send Feedback ({commentDraftCount})
             </Button>
           ) : (
             <AgentChatMessageButton

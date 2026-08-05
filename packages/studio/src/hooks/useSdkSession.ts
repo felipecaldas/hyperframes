@@ -6,6 +6,7 @@ import { isSelfWriteEcho } from "./sdkSelfWriteRegistry";
 import { trackStudioEvent } from "../utils/studioTelemetry";
 import type { PublishSdkSession } from "../utils/sdkCutover";
 import { addExternalFileReloadListener } from "./externalFileReloadBus";
+import { subscribeAgentRefresh } from "../utils/agentBridge";
 
 /**
  * Read a project file's content, or undefined on a non-2xx (optional read).
@@ -161,6 +162,8 @@ export function useSdkSession(
       }),
     [],
   );
+
+  useEffect(() => subscribeAgentRefresh(() => setReloadToken((token) => token + 1)), []);
 
   // ── Open / re-open the session ──
   useEffect(() => {

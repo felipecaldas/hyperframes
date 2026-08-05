@@ -3,6 +3,7 @@ import { readStudioFileChangePath } from "../components/editor/manualEdits";
 import { StudioFileConflictError } from "../utils/studioSaveDiagnostics";
 import type { ExternalConflictSnapshot } from "../utils/externalConflictStorage";
 import { isSelfWriteEcho } from "./sdkSelfWriteRegistry";
+import { shouldSuppressAgentRefresh } from "../utils/agentBridge";
 import { consumeStudioWriteToken } from "../utils/studioFileVersion";
 
 type ExternalChangeDrainResult =
@@ -317,7 +318,15 @@ export function useExternalFileChangeCoordinator({
   );
 
   useEffect(() => {
-    const handler = (payload?: unknown) => processChange(payload);
+    // A local agent run writes the project files itself, so every one of its
+    // writes arrives here as an external change. Reloading mid-run would
+    // clobber the run's own in-flight edits, so suppress while it is active
+    // (and for the short grace window after it finishes) — the agent drawer
+    // refreshes the preview once, on completion.
+    const handler = (payload?: unknown) => {
+      if (shouldSuppressAgentRefresh()) return;
+      return processChange(payload);
+    };
     const adapter = testHotAdapter();
     if (adapter) {
       adapter.on("hf:file-change", handler);

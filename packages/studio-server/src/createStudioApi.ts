@@ -13,6 +13,8 @@ import { registerRegistryRoutes } from "./routes/registry.js";
 import { registerSelectionRoutes } from "./routes/selection.js";
 import { registerMediaRoutes } from "./routes/media.js";
 import { registerGlobalAssetRoutes } from "./routes/globalAssets.js";
+import { AgentRuntime } from "./agent/runtime.js";
+import { registerAgentRoutes, registerAgentWriteLock } from "./routes/agent.js";
 
 /**
  * Create a Hono sub-app with all studio API routes.
@@ -22,6 +24,9 @@ import { registerGlobalAssetRoutes } from "./routes/globalAssets.js";
  */
 export function createStudioApi(adapter: StudioApiAdapter): Hono {
   const api = new Hono();
+  const agentRuntime = new AgentRuntime(adapter);
+
+  registerAgentWriteLock(api, agentRuntime);
 
   registerProjectRoutes(api, adapter);
   registerStoryboardRoutes(api, adapter);
@@ -36,6 +41,7 @@ export function createStudioApi(adapter: StudioApiAdapter): Hono {
   registerFontRoutes(api);
   registerRegistryRoutes(api, adapter);
   registerGlobalAssetRoutes(api);
+  registerAgentRoutes(api, adapter, agentRuntime);
 
   return api;
 }

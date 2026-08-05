@@ -29,7 +29,7 @@ describe("AgentChatMessageButton", () => {
       root.render(<AgentChatMessageButton message="handoff" onCopied={onCopied} />);
     });
 
-    const button = host.querySelector("button");
+    const button = host.querySelectorAll("button")[1];
     if (!button) throw new Error("copy button not rendered");
     await act(async () => {
       button.dispatchEvent(new MouseEvent("click", { bubbles: true }));

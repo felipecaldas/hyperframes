@@ -12,6 +12,8 @@ import {
   APPLY_STORYBOARD_FEEDBACK_MESSAGE,
 } from "./AgentChatMessageButton";
 import { useFrameComments, type CommentsSubmitState } from "./useFrameComments";
+import { storyboardAspectRatio } from "./storyboardAspectRatio";
+import { openAgentBridge } from "../../utils/agentBridge";
 
 type SubView = "board" | "source";
 
@@ -55,12 +57,12 @@ export function StoryboardLoaded({
   const saveFeedbackAndCopyMessage = async () => {
     const saved = await comments.submit();
     if (!saved) return;
-    try {
-      await navigator.clipboard.writeText(APPLY_STORYBOARD_FEEDBACK_MESSAGE);
-      setFeedbackMessageCopied(true);
-    } catch {
-      setFeedbackMessageCopied(false);
-    }
+    openAgentBridge({
+      kind: "storyboard-feedback",
+      prompt: APPLY_STORYBOARD_FEEDBACK_MESSAGE,
+      title: "Apply saved storyboard feedback",
+    });
+    setFeedbackMessageCopied(false);
   };
   const sourceFiles = useMemo<SourceFile[]>(() => {
     const files: SourceFile[] = [{ path: data.path, label: data.path }];
@@ -86,6 +88,7 @@ export function StoryboardLoaded({
 
   const focusedFrame =
     focusedIndex != null ? (data.frames.find((f) => f.index === focusedIndex) ?? null) : null;
+  const frameAspectRatio = storyboardAspectRatio(data.globals.format);
 
   if (focusedFrame) {
     return (
@@ -152,6 +155,7 @@ export function StoryboardLoaded({
             <StoryboardGrid
               projectId={projectId}
               frames={data.frames}
+              aspectRatio={frameAspectRatio}
               onOpenFrame={setFocusedIndex}
               commentDrafts={comments.drafts}
               onCommentDraftChange={comments.setDraft}
@@ -222,7 +226,7 @@ function CommentsSubmitBar({
           disabled={submitState === "saving"}
           onClick={onSave}
         >
-          Save &amp; copy message ({draftCount})
+          Save &amp; Send Feedback ({draftCount})
         </Button>
       )}
     </div>
