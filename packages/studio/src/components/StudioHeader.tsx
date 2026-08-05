@@ -6,6 +6,8 @@ import { usePanelLayoutContext } from "../contexts/PanelLayoutContext";
 import { useViewMode, type StudioViewMode } from "../contexts/ViewModeContext";
 import { trackStudioEvent } from "../utils/studioTelemetry";
 import { Tooltip } from "./ui";
+import { Robot } from "@phosphor-icons/react";
+import { toggleAgentBridge } from "../utils/agentBridge";
 
 export interface StudioHeaderProps {
   captureFrameHref: string;
@@ -244,6 +246,15 @@ export function StudioHeader({
       <ViewModeToggle />
       {/* Right: toolbar buttons */}
       <div className="flex items-center gap-1.5">
+        <Tooltip label="Open local Codex or Claude agent" side="bottom">
+          <button
+            type="button"
+            onClick={toggleAgentBridge}
+            className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
+          >
+            <Robot size={14} /> Agent
+          </button>
+        </Tooltip>
         <Tooltip
           label={
             editHistory.undoLabel

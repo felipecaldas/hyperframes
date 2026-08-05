@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { buildProjectApiPath } from "../utils/projectRouting";
+import { shouldSuppressAgentRefresh } from "../utils/agentBridge";
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -43,6 +44,7 @@ export function useProjectSignaturePoll(
 
     const tick = async () => {
       if (disposed || inFlight || document.hidden) return;
+      if (shouldSuppressAgentRefresh()) return;
       // No baseline yet (initial storyboard fetch still loading, or an older
       // server without the signature field) — nothing to compare against.
       if (signatureRef.current === undefined) return;

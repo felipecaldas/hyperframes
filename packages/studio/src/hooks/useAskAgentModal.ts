@@ -1,9 +1,9 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { copyTextToClipboard } from "../utils/clipboard";
 import { readTagSnippetByTarget } from "../utils/sourcePatcher";
 import { toProjectAbsolutePath, type AgentModalAnchorPoint } from "../utils/studioHelpers";
 import { buildElementAgentPrompt, type DomEditSelection } from "../components/editor/domEditing";
 import { usePlayerStore } from "../player";
+import { openAgentBridge } from "../utils/agentBridge";
 
 // ── Types ──
 
@@ -23,7 +23,6 @@ export function useAskAgentModal({
   activeCompPath,
   projectDir,
   projectIdRef,
-  showToast,
   domEditSelectionRef,
   domEditSelection,
 }: UseAskAgentModalParams) {
@@ -97,11 +96,7 @@ export function useAskAgentModal({
         sourceFilePath: toProjectAbsolutePath(projectDir, targetPath),
       });
 
-      const copied = await copyTextToClipboard(prompt);
-      if (!copied) {
-        showToast("Could not copy prompt to clipboard.", "error");
-        return;
-      }
+      openAgentBridge({ kind: "selection", prompt, title: domEditSelection.label });
 
       setAgentModalOpen(false);
       setAgentPromptSelectionContext(undefined);
@@ -116,7 +111,6 @@ export function useAskAgentModal({
       agentPromptTagSnippet,
       domEditSelection,
       projectDir,
-      showToast,
     ],
   );
 

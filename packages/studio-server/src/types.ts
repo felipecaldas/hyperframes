@@ -95,6 +95,13 @@ export interface StudioSelectionResponse {
  * provides its own implementation.
  */
 export interface StudioApiAdapter {
+  /**
+   * Whether the hosting server is bound exclusively to loopback. Agent routes
+   * remain request-host checked as well; adapters must set this to false for
+   * hosted or LAN-bound instances.
+   */
+  agentBridgeEnabled?: boolean;
+
   /** List all available projects. */
   listProjects(): Promise<ResolvedProject[]> | ResolvedProject[];
 

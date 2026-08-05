@@ -1,4 +1,13 @@
 export { createStudioApi } from "./createStudioApi.js";
+export type {
+  AgentProvider,
+  AgentRequestKind,
+  AgentRunRequest,
+  AgentRunEvent,
+  AgentChangedFile,
+  AgentProviderCapability,
+  AgentThreadSummary,
+} from "./agent/types.js";
 export { createProjectSignature } from "./helpers/projectSignature.js";
 export type {
   StudioApiAdapter,
