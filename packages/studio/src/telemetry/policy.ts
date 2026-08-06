@@ -82,6 +82,34 @@ function isViteDevMode(): boolean {
  * (canary decisions do; the transports intentionally do not).
  */
 export function browserTelemetryAllowed(): boolean {
+  // ── Tabario fork (TAB-697) ────────────────────────────────────────────────
+  // Hard OFF, ahead of every other control.
+  //
+  // Upstream ships Studio as a local developer tool, where anonymous usage
+  // analytics to HeyGen's PostHog project is a reasonable default. This fork
+  // embeds Studio in the Tabario product: the browsers running it belong to
+  // Tabario's CUSTOMERS, and HeyGen is both our presenter supplier and a
+  // competitor in the consumer product. Sending customer usage signal there is
+  // not ours to opt into on their behalf, and undisclosed third-party
+  // analytics in a shipped product is a consent problem regardless of who
+  // receives it.
+  //
+  // Deliberately a constant rather than the existing
+  // VITE_HYPERFRAMES_NO_TELEMETRY build flag: an env var means one
+  // misconfigured build silently resumes sending, with no in-band signal.
+  // `policy.forkEgress.test.ts` fails if this short-circuit is ever lost in a
+  // rebase — that test is the regression guard, so do not delete it.
+  //
+  // This is the single choke point by upstream's own design (every transport
+  // and canary enrolment consults it), so nothing below needs changing.
+  return false;
+  // ──────────────────────────────────────────────────────────────────────────
+}
+
+/** Retained so upstream's control matrix stays reviewable under the fork
+ *  short-circuit above, and so a rebase conflict here is obvious rather than
+ *  silent. Referenced by `policy.forkEgress.test.ts`. */
+export function browserTelemetryAllowedUpstream(): boolean {
   try {
     return allowed();
   } catch {
