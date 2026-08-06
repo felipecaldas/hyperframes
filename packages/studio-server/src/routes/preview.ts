@@ -39,12 +39,17 @@ import {
   resolvePreviewMediaCodecProbeCache,
   type PreviewApiAdapter,
 } from "../helpers/mediaProxyPreview.js";
+import { vendoredGsapScriptTag, vendoredGsapVersion } from "../helpers/vendoredGsap.js";
 
 const PROJECT_SIGNATURE_META = "hyperframes-project-signature";
-const GSAP_CDN_VERSION = "3.15.0";
-const GSAP_CDN_SCRIPT = `<script src="https://cdn.jsdelivr.net/npm/gsap@${GSAP_CDN_VERSION}/dist/gsap.min.js"></script>`;
-const GSAP_CUSTOM_EASE_CDN_SCRIPT = `<script src="https://cdn.jsdelivr.net/npm/gsap@${GSAP_CDN_VERSION}/dist/CustomEase.min.js"></script>`;
-const GSAP_MOTION_PATH_CDN_SCRIPT = `<script src="https://cdn.jsdelivr.net/npm/gsap@${GSAP_CDN_VERSION}/dist/MotionPathPlugin.min.js"></script>`;
+// Tabario fork (TAB-697): served from our own origin, not jsdelivr. The
+// version comes from the installed package via helpers/vendoredGsap.ts, so it
+// cannot drift from the bytes actually served. Names kept (…_CDN_…) so the
+// rest of this file, and future upstream diffs against it, stay recognisable.
+const GSAP_CDN_VERSION = vendoredGsapVersion();
+const GSAP_CDN_SCRIPT = vendoredGsapScriptTag("gsap.min.js");
+const GSAP_CUSTOM_EASE_CDN_SCRIPT = vendoredGsapScriptTag("CustomEase.min.js");
+const GSAP_MOTION_PATH_CDN_SCRIPT = vendoredGsapScriptTag("MotionPathPlugin.min.js");
 
 function injectProjectSignature(html: string, signature: string): string {
   const tag = `<meta name="${PROJECT_SIGNATURE_META}" content="${signature}">`;
@@ -140,7 +145,7 @@ function injectMotionPathPluginIfNeeded(html: string): string {
     // Match the plugin version to the composition's own gsap so the plugin
     // registers cleanly (a minor-version skew triggers a GSAP compatibility warning).
     const version = match[0].match(/gsap@([\d.]+)/)?.[1] ?? GSAP_CDN_VERSION;
-    const pluginTag = `<script src="https://cdn.jsdelivr.net/npm/gsap@${version}/dist/MotionPathPlugin.min.js"></script>`;
+    const pluginTag = `<script src="/api/vendor/gsap@${version}/dist/MotionPathPlugin.min.js"></script>`;
     const end = html.indexOf(match[0]) + match[0].length;
     return html.slice(0, end) + "\n" + pluginTag + html.slice(end);
   }
@@ -178,7 +183,7 @@ function injectStudioMotionScript(
 
 const GSAP_CDN_FALLBACK_SCRIPT = `<script data-hf-gsap-fallback>
 (function(){
-  var cdnBase="https://cdn.jsdelivr.net/npm/gsap@${GSAP_CDN_VERSION}/dist/";
+  var cdnBase="/api/vendor/gsap@${GSAP_CDN_VERSION}/dist/";
   var loaded={};
   function loadFallback(file){
     if(loaded[file])return loaded[file];

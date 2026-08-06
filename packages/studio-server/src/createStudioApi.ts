@@ -15,6 +15,8 @@ import { registerMediaRoutes } from "./routes/media.js";
 import { registerGlobalAssetRoutes } from "./routes/globalAssets.js";
 import { AgentRuntime } from "./agent/runtime.js";
 import { registerAgentRoutes, registerAgentWriteLock } from "./routes/agent.js";
+import { registerVendorRoutes } from "./helpers/vendoredGsap.js";
+import { registerGoogleFontProxyRoutes } from "./helpers/googleFontProxy.js";
 
 /**
  * Create a Hono sub-app with all studio API routes.
@@ -42,6 +44,12 @@ export function createStudioApi(adapter: StudioApiAdapter): Hono {
   registerRegistryRoutes(api, adapter);
   registerGlobalAssetRoutes(api);
   registerAgentRoutes(api, adapter, agentRuntime);
+  // Tabario fork (TAB-697): serves GSAP from our own origin so previews
+  // never depend on a public CDN. See helpers/vendoredGsap.ts.
+  registerVendorRoutes(api);
+  // Tabario fork (TAB-697): proxies Google Fonts so the customer's browser
+  // never connects to Google directly. See helpers/googleFontProxy.ts.
+  registerGoogleFontProxyRoutes(api);
 
   return api;
 }
