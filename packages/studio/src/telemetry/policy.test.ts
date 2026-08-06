@@ -10,8 +10,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const DOCUMENTED_OPT_OUT = "hyperframes-studio:telemetryDisabled";
 const LEGACY_OPT_OUT = "hf-studio-telemetry-opt-out";
 
-describe("browserTelemetryAllowed", () => {
-  let browserTelemetryAllowed: typeof import("./policy").browserTelemetryAllowed;
+// Tabario fork (TAB-697): the shipped `browserTelemetryAllowed()` is hard OFF,
+// so this suite exercises `browserTelemetryAllowedUpstream()` — the same
+// control matrix, preserved verbatim under the fork's short-circuit. Keeping
+// the coverage means a rebase that changes upstream's controls still gets
+// caught here, while `policy.forkEgress.test.ts` guards the override itself.
+describe("browserTelemetryAllowed (upstream control matrix)", () => {
+  let browserTelemetryAllowed: typeof import("./policy").browserTelemetryAllowedUpstream;
 
   beforeEach(async () => {
     localStorage.clear();
@@ -21,7 +26,7 @@ describe("browserTelemetryAllowed", () => {
     vi.stubEnv("DEV", false);
     vi.stubEnv("VITE_HYPERFRAMES_NO_TELEMETRY", "");
     Object.defineProperty(navigator, "doNotTrack", { value: null, configurable: true });
-    ({ browserTelemetryAllowed } = await import("./policy"));
+    ({ browserTelemetryAllowedUpstream: browserTelemetryAllowed } = await import("./policy"));
   });
 
   afterEach(() => {
@@ -52,7 +57,7 @@ describe("browserTelemetryAllowed", () => {
   it("refuses under Vite dev mode", async () => {
     vi.stubEnv("DEV", true);
     vi.resetModules();
-    ({ browserTelemetryAllowed } = await import("./policy"));
+    ({ browserTelemetryAllowedUpstream: browserTelemetryAllowed } = await import("./policy"));
     expect(browserTelemetryAllowed()).toBe(false);
   });
 
@@ -61,7 +66,7 @@ describe("browserTelemetryAllowed", () => {
     async (value) => {
       vi.stubEnv("VITE_HYPERFRAMES_NO_TELEMETRY", value);
       vi.resetModules();
-      ({ browserTelemetryAllowed } = await import("./policy"));
+      ({ browserTelemetryAllowedUpstream: browserTelemetryAllowed } = await import("./policy"));
       expect(browserTelemetryAllowed()).toBe(false);
     },
   );
@@ -69,7 +74,7 @@ describe("browserTelemetryAllowed", () => {
   it("ignores an unset or unrelated VITE_HYPERFRAMES_NO_TELEMETRY value", async () => {
     vi.stubEnv("VITE_HYPERFRAMES_NO_TELEMETRY", "0");
     vi.resetModules();
-    ({ browserTelemetryAllowed } = await import("./policy"));
+    ({ browserTelemetryAllowedUpstream: browserTelemetryAllowed } = await import("./policy"));
     expect(browserTelemetryAllowed()).toBe(true);
   });
 

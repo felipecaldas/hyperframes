@@ -21,12 +21,17 @@ type IframeWindow = Window & {
 };
 
 /**
- * CDN URL for the GSAP MotionPathPlugin. Shared between the one-time preview
+ * URL for the GSAP MotionPathPlugin. Shared between the one-time preview
  * bootstrap (ensureMotionPathPluginLoaded) and the soft-reload fallback so the
  * version is pinned in a single place.
+ *
+ * Tabario fork (TAB-697): same-origin, not jsdelivr. Studio ships inside the
+ * Tabario product, so a preview that silently fails to animate because a
+ * public CDN is blocked or slow is a broken customer-facing feature. The
+ * studio-server route resolves the version from the installed package, and
+ * accepts any version segment, so this URL does not need to track it.
  */
-const MOTION_PATH_PLUGIN_CDN =
-  "https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/MotionPathPlugin.min.js";
+const MOTION_PATH_PLUGIN_CDN = "/api/vendor/gsap@3/dist/MotionPathPlugin.min.js";
 
 /**
  * Pre-load + register MotionPathPlugin ONCE in the preview iframe so

@@ -91,15 +91,12 @@ function loadGoogleFontStylesheet(family: string): void {
   if (!trimmed) return;
   const id = `studio-google-font-${trimmed.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
   if (document.getElementById(id)) return;
-  const preconnect = document.querySelector('link[data-studio-google-font-preconnect="true"]');
-  if (!preconnect) {
-    const el = document.createElement("link");
-    el.setAttribute("data-studio-google-font-preconnect", "true");
-    el.rel = "preconnect";
-    el.href = "https://fonts.gstatic.com";
-    el.crossOrigin = "anonymous";
-    document.head.appendChild(el);
-  }
+  // Tabario fork (TAB-697): the `<link rel="preconnect" href="fonts.gstatic.com">`
+  // that stood here is deliberately gone. A preconnect OPENS the connection —
+  // it disclosed the customer's IP to Google before any font was even
+  // requested, which is precisely the egress this ticket removes. It is also
+  // now pointless: the stylesheet and its font binaries are both served from
+  // our own origin, which the browser is already connected to.
   const link = document.createElement("link");
   link.id = id;
   link.rel = "stylesheet";

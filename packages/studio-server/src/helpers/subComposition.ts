@@ -7,6 +7,7 @@ import {
   rewriteInlineStyleAssetUrls,
 } from "@hyperframes/core";
 import { stripEmbeddedRuntimeScripts } from "@hyperframes/core/compiler";
+import { vendoredGsapScriptTag } from "./vendoredGsap.js";
 
 /**
  * Detect whether `html` is a full document (has `<html>`, `<head>`, or
@@ -378,7 +379,11 @@ export function buildSubCompositionHtml(
 
   // Fallback: if no index.html head was found, add minimal deps
   if (!headContent.includes("gsap")) {
-    headContent += `\n<script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>`;
+    // Tabario fork (TAB-697): was a jsdelivr URL pinned to a FLOATING `gsap@3`
+    // range, so the CDN could hand a sub-composition a different GSAP build
+    // from one render to the next. Now the same single vendored version every
+    // other injection site uses, served from our own origin.
+    headContent += `\n${vendoredGsapScriptTag("gsap.min.js")}`;
   }
 
   const htmlOpen = htmlAttrs ? `<html ${htmlAttrs}>` : "<html>";
