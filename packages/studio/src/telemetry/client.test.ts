@@ -33,9 +33,13 @@ describe("studio client shouldTrack", () => {
     vi.unstubAllGlobals();
   });
 
-  it("returns true when not in dev mode and no opt-outs", async () => {
+  // Tabario fork (TAB-697): was `toBe(true)`. This transport delegates to
+  // `browserTelemetryAllowed()`, which the fork holds hard OFF because Studio
+  // ships to Tabario's customers. Upstream's control matrix is still covered
+  // in full by policy.test.ts against `browserTelemetryAllowedUpstream()`.
+  it("returns false with no opt-outs and no dev mode — the case that would otherwise send", async () => {
     const shouldTrack = await loadShouldTrack();
-    expect(shouldTrack()).toBe(true);
+    expect(shouldTrack()).toBe(false);
   });
 
   it("returns false when user has opted out via localStorage", async () => {
@@ -65,10 +69,14 @@ describe("studio client shouldTrack", () => {
     },
   );
 
-  it("does not opt out for an explicit false value", async () => {
+  // Tabario fork (TAB-697): was `toBe(true)`. VITE_HYPERFRAMES_NO_TELEMETRY=false
+  // is upstream's "measure me" spelling; under the fork it must NOT re-enable
+  // sending — that env var is exactly the misconfiguration the hard-off
+  // constant exists to survive.
+  it("stays off even for an explicit VITE_HYPERFRAMES_NO_TELEMETRY=false", async () => {
     setNoTelemetry("false");
     const shouldTrack = await loadShouldTrack();
-    expect(shouldTrack()).toBe(true);
+    expect(shouldTrack()).toBe(false);
   });
 
   it("returns false in vite dev mode", async () => {
@@ -82,9 +90,13 @@ describe("studio client shouldTrack", () => {
   // mid-session opt-out takes effect at once — but this transport cached on
   // first call, so a user who opted out in DevTools after one event kept
   // sending `studio_*` and render events while `studio:*` correctly stopped.
-  it("re-reads the policy, so a mid-session opt-out takes effect immediately", async () => {
+  // Tabario fork (TAB-697): the first assertion was `toBe(true)`. The property
+  // under test is that the transport re-asks the policy per call rather than
+  // memoizing the first answer — preserved here so a future rebase that
+  // reintroduces caching is still caught, even though both reads are now off.
+  it("re-reads the policy on every call rather than memoizing the first answer", async () => {
     const shouldTrack = await loadShouldTrack();
-    expect(shouldTrack()).toBe(true);
+    expect(shouldTrack()).toBe(false);
     localStorage.setItem(OPT_OUT_KEY, "1");
     expect(shouldTrack()).toBe(false);
   });

@@ -127,7 +127,17 @@ export function renderAliasFor(family: string): string | undefined {
   return display;
 }
 
+/**
+ * Stylesheet URL for a Google font family.
+ *
+ * Tabario fork (TAB-697): resolves to our own origin, not
+ * fonts.googleapis.com. Studio ships inside the Tabario product, so the direct
+ * link made the CUSTOMER's browser connect to Google and disclose its IP — the
+ * pattern GDPR rulings have targeted. studio-server fetches the stylesheet and
+ * rewrites the font-binary URLs inside it, so the browser talks only to us.
+ * The weight/display query now lives server-side in helpers/googleFontProxy.ts
+ * so both hops agree on one definition.
+ */
 export function googleFontStylesheetUrl(family: string): string {
-  const encodedFamily = encodeURIComponent(family.trim()).replace(/%20/g, "+");
-  return `https://fonts.googleapis.com/css2?family=${encodedFamily}:wght@300;400;500;600;700;800;900&display=swap`;
+  return `/api/vendor/fonts/css?family=${encodeURIComponent(family.trim())}`;
 }
