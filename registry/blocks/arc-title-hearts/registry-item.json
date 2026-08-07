@@ -1,0 +1,20 @@
+{
+  "$schema": "https://hyperframes.heygen.com/schema/registry-item.json",
+  "name": "arc-title-hearts",
+  "type": "hyperframes:block",
+  "title": "Arc Title Hearts",
+  "description": "Two-line headline arced letter by letter, built in with a per-character reveal, with hearts rising and fading above it. Vertical set-piece title card.",
+  "tags": ["title", "kinetic", "typography", "vertical", "social", "hearts"],
+  "dimensions": {
+    "width": 1080,
+    "height": 1920
+  },
+  "duration": 4,
+  "files": [
+    {
+      "path": "arc-title-hearts.html",
+      "target": "compositions/arc-title-hearts.html",
+      "type": "hyperframes:composition"
+    }
+  ]
+}
