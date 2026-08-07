@@ -706,6 +706,10 @@
     {
       "name": "beat-freeze-cut",
       "type": "hyperframes:block"
+    },
+    {
+      "name": "arc-title-hearts",
+      "type": "hyperframes:block"
     }
   ]
 }
