@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <title>Arc Title Hearts</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@800&display=swap"
+      rel="stylesheet"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 1080px;
+        height: 1920px;
+        margin: 0;
+        overflow: hidden;
+        background: #101014;
+      }
+
+      /* Stand-in for your own footage — the card is an overlay, so replace this
+         with a <video> or delete it and mount the card over an existing scene. */
+      .arc-demo-backdrop {
+        position: absolute;
+        inset: 0;
+        background: radial-gradient(circle at 50% 34%, #3a3f52 0%, #101014 70%);
+      }
+
+        /* A true per-letter arc, not a whole-line tilt: both lines bow upward
+           like a gentle rainbow, each letter rotated to stay tangent to the
+           curve. .hf-arc-line is a zero-size anchor at left:50% that every
+           .hf-arc-char positions itself against — an arbitrary curve is not
+           expressible in a handful of static rules the way a flat line is. */
+        /* White on a heavy black outline, deliberately un-tokenised (TAB-721).
+           This pairing is the mechanic's legibility device, not a brand choice:
+           the card floats over arbitrary presenter footage, and the outline is
+           what keeps it readable against a bright wall and dark hair in the same
+           frame. Bound to --brand-primary/--brand-ink it rendered cyan-on-cyan
+           for the first client that used it. The typeface and the accent stay
+           brand-driven; the contrast pair does not. */
+        .hf-arc-line {
+          position: absolute; inset: 0; z-index: 22;
+          font-family: "Baloo 2", sans-serif; font-weight: 800; font-size: 64px;
+          line-height: 1; color: #fff;
+          -webkit-text-stroke: 5px #000; paint-order: stroke fill;
+        }
+        .hf-arc-char { position: absolute; white-space: nowrap; }
+        .hf-arc-glyph { display: inline-block; }
+        .hf-arc-heart {
+          position: absolute; top: 14%; width: 34px; height: 31px; z-index: 23;
+          transform-origin: 50% 100%;
+        }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="arc-title-hearts"
+      data-start="0"
+      data-duration="4"
+      data-width="1080"
+      data-height="1920"
+    >
+      <div class="arc-demo-backdrop"></div>
+<div id="arc-title-hearts-line0" class="clip hf-arc-line hf-arc-line-0" data-start="0.200" data-duration="3.500" data-track-index="2"><span class="hf-arc-char" style="left:calc(50% + -297.0px);top:calc(19% + 59.4px);transform:translate(-50%,-50%) rotate(-20.00deg)"><span id="arc-title-hearts-line0-c0" class="hf-arc-glyph">C</span></span><span class="hf-arc-char" style="left:calc(50% + -243.0px);top:calc(19% + 39.8px);transform:translate(-50%,-50%) rotate(-16.36deg)"><span id="arc-title-hearts-line0-c1" class="hf-arc-glyph">R</span></span><span class="hf-arc-char" style="left:calc(50% + -189.0px);top:calc(19% + 24.1px);transform:translate(-50%,-50%) rotate(-12.73deg)"><span id="arc-title-hearts-line0-c2" class="hf-arc-glyph">A</span></span><span class="hf-arc-char" style="left:calc(50% + -135.0px);top:calc(19% + 12.3px);transform:translate(-50%,-50%) rotate(-9.09deg)"><span id="arc-title-hearts-line0-c3" class="hf-arc-glyph">F</span></span><span class="hf-arc-char" style="left:calc(50% + -81.0px);top:calc(19% + 4.4px);transform:translate(-50%,-50%) rotate(-5.45deg)"><span id="arc-title-hearts-line0-c4" class="hf-arc-glyph">T</span></span><span class="hf-arc-char" style="left:calc(50% + -27.0px);top:calc(19% + 0.5px);transform:translate(-50%,-50%) rotate(-1.82deg)"><span id="arc-title-hearts-line0-c5" class="hf-arc-glyph">E</span></span><span class="hf-arc-char" style="left:calc(50% + 27.0px);top:calc(19% + 0.5px);transform:translate(-50%,-50%) rotate(1.82deg)"><span id="arc-title-hearts-line0-c6" class="hf-arc-glyph">D</span></span><span class="hf-arc-char" style="left:calc(50% + 81.0px);top:calc(19% + 4.4px);transform:translate(-50%,-50%) rotate(5.45deg)">&nbsp;</span><span class="hf-arc-char" style="left:calc(50% + 135.0px);top:calc(19% + 12.3px);transform:translate(-50%,-50%) rotate(9.09deg)"><span id="arc-title-hearts-line0-c8" class="hf-arc-glyph">W</span></span><span class="hf-arc-char" style="left:calc(50% + 189.0px);top:calc(19% + 24.1px);transform:translate(-50%,-50%) rotate(12.73deg)"><span id="arc-title-hearts-line0-c9" class="hf-arc-glyph">I</span></span><span class="hf-arc-char" style="left:calc(50% + 243.0px);top:calc(19% + 39.8px);transform:translate(-50%,-50%) rotate(16.36deg)"><span id="arc-title-hearts-line0-c10" class="hf-arc-glyph">T</span></span><span class="hf-arc-char" style="left:calc(50% + 297.0px);top:calc(19% + 59.4px);transform:translate(-50%,-50%) rotate(20.00deg)"><span id="arc-title-hearts-line0-c11" class="hf-arc-glyph">H</span></span></div>
+<div id="arc-title-hearts-line1" class="clip hf-arc-line hf-arc-line-1" data-start="1.075" data-duration="2.625" data-track-index="3"><span class="hf-arc-char" style="left:calc(50% + -324.0px);top:calc(27% + 59.4px);transform:translate(-50%,-50%) rotate(-20.00deg)"><span id="arc-title-hearts-line1-c0" class="hf-arc-glyph">A</span></span><span class="hf-arc-char" style="left:calc(50% + -270.0px);top:calc(27% + 41.3px);transform:translate(-50%,-50%) rotate(-16.67deg)">&nbsp;</span><span class="hf-arc-char" style="left:calc(50% + -216.0px);top:calc(27% + 26.4px);transform:translate(-50%,-50%) rotate(-13.33deg)"><span id="arc-title-hearts-line1-c2" class="hf-arc-glyph">L</span></span><span class="hf-arc-char" style="left:calc(50% + -162.0px);top:calc(27% + 14.8px);transform:translate(-50%,-50%) rotate(-10.00deg)"><span id="arc-title-hearts-line1-c3" class="hf-arc-glyph">O</span></span><span class="hf-arc-char" style="left:calc(50% + -108.0px);top:calc(27% + 6.6px);transform:translate(-50%,-50%) rotate(-6.67deg)"><span id="arc-title-hearts-line1-c4" class="hf-arc-glyph">T</span></span><span class="hf-arc-char" style="left:calc(50% + -54.0px);top:calc(27% + 1.6px);transform:translate(-50%,-50%) rotate(-3.33deg)">&nbsp;</span><span class="hf-arc-char" style="left:calc(50% + 0.0px);top:calc(27% + 0.0px);transform:translate(-50%,-50%) rotate(0.00deg)"><span id="arc-title-hearts-line1-c6" class="hf-arc-glyph">O</span></span><span class="hf-arc-char" style="left:calc(50% + 54.0px);top:calc(27% + 1.6px);transform:translate(-50%,-50%) rotate(3.33deg)"><span id="arc-title-hearts-line1-c7" class="hf-arc-glyph">F</span></span><span class="hf-arc-char" style="left:calc(50% + 108.0px);top:calc(27% + 6.6px);transform:translate(-50%,-50%) rotate(6.67deg)">&nbsp;</span><span class="hf-arc-char" style="left:calc(50% + 162.0px);top:calc(27% + 14.8px);transform:translate(-50%,-50%) rotate(10.00deg)"><span id="arc-title-hearts-line1-c9" class="hf-arc-glyph">L</span></span><span class="hf-arc-char" style="left:calc(50% + 216.0px);top:calc(27% + 26.4px);transform:translate(-50%,-50%) rotate(13.33deg)"><span id="arc-title-hearts-line1-c10" class="hf-arc-glyph">O</span></span><span class="hf-arc-char" style="left:calc(50% + 270.0px);top:calc(27% + 41.3px);transform:translate(-50%,-50%) rotate(16.67deg)"><span id="arc-title-hearts-line1-c11" class="hf-arc-glyph">V</span></span><span class="hf-arc-char" style="left:calc(50% + 324.0px);top:calc(27% + 59.4px);transform:translate(-50%,-50%) rotate(20.00deg)"><span id="arc-title-hearts-line1-c12" class="hf-arc-glyph">E</span></span></div>
+<div id="arc-title-hearts-heart0" class="clip hf-arc-heart" style="left:30.0%" data-start="1.950" data-duration="0.900" data-track-index="4" data-layout-allow-overflow="true"><svg viewBox="0 0 32 29" width="100%" height="100%" aria-hidden="true"><path d="M16 28.5 2.6 16.2C-2.9 11.1 1 2 8.4 2c3.1 0 6 1.6 7.6 4.2C17.6 3.6 20.5 2 23.6 2 31 2 34.9 11.1 29.4 16.2L16 28.5z" fill="#E8112D" stroke="#8c0018" stroke-width="1"/></svg></div>
+<div id="arc-title-hearts-heart1" class="clip hf-arc-heart" style="left:46.0%" data-start="2.130" data-duration="0.900" data-track-index="5" data-layout-allow-overflow="true"><svg viewBox="0 0 32 29" width="100%" height="100%" aria-hidden="true"><path d="M16 28.5 2.6 16.2C-2.9 11.1 1 2 8.4 2c3.1 0 6 1.6 7.6 4.2C17.6 3.6 20.5 2 23.6 2 31 2 34.9 11.1 29.4 16.2L16 28.5z" fill="#E8112D" stroke="#8c0018" stroke-width="1"/></svg></div>
+<div id="arc-title-hearts-heart2" class="clip hf-arc-heart" style="left:50.0%" data-start="2.310" data-duration="0.900" data-track-index="6" data-layout-allow-overflow="true"><svg viewBox="0 0 32 29" width="100%" height="100%" aria-hidden="true"><path d="M16 28.5 2.6 16.2C-2.9 11.1 1 2 8.4 2c3.1 0 6 1.6 7.6 4.2C17.6 3.6 20.5 2 23.6 2 31 2 34.9 11.1 29.4 16.2L16 28.5z" fill="#E8112D" stroke="#8c0018" stroke-width="1"/></svg></div>
+<div id="arc-title-hearts-heart3" class="clip hf-arc-heart" style="left:66.0%" data-start="2.490" data-duration="0.900" data-track-index="7" data-layout-allow-overflow="true"><svg viewBox="0 0 32 29" width="100%" height="100%" aria-hidden="true"><path d="M16 28.5 2.6 16.2C-2.9 11.1 1 2 8.4 2c3.1 0 6 1.6 7.6 4.2C17.6 3.6 20.5 2 23.6 2 31 2 34.9 11.1 29.4 16.2L16 28.5z" fill="#E8112D" stroke="#8c0018" stroke-width="1"/></svg></div>
+    </div>
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+        tl.fromTo('#arc-title-hearts-line0 .hf-arc-glyph', { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.080, stagger: 0.0450, ease: 'power1.out' }, 0.200);
+        tl.fromTo('#arc-title-hearts-line1 .hf-arc-glyph', { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.080, stagger: 0.0450, ease: 'power1.out' }, 1.075);
+        tl.fromTo('#arc-title-hearts-heart0', { opacity: 0, y: 0, scale: 0.6 }, { opacity: 1, y: -60, scale: 1, duration: 0.350, ease: 'power1.out' }, 1.950);
+        tl.to('#arc-title-hearts-heart0', { opacity: 0, y: -110, duration: 0.450, ease: 'power1.in' }, 2.400);
+        tl.fromTo('#arc-title-hearts-heart1', { opacity: 0, y: 0, scale: 0.6 }, { opacity: 1, y: -60, scale: 1, duration: 0.350, ease: 'power1.out' }, 2.130);
+        tl.to('#arc-title-hearts-heart1', { opacity: 0, y: -110, duration: 0.450, ease: 'power1.in' }, 2.580);
+        tl.fromTo('#arc-title-hearts-heart2', { opacity: 0, y: 0, scale: 0.6 }, { opacity: 1, y: -60, scale: 1, duration: 0.350, ease: 'power1.out' }, 2.310);
+        tl.to('#arc-title-hearts-heart2', { opacity: 0, y: -110, duration: 0.450, ease: 'power1.in' }, 2.760);
+        tl.fromTo('#arc-title-hearts-heart3', { opacity: 0, y: 0, scale: 0.6 }, { opacity: 1, y: -60, scale: 1, duration: 0.350, ease: 'power1.out' }, 2.490);
+        tl.to('#arc-title-hearts-heart3', { opacity: 0, y: -110, duration: 0.450, ease: 'power1.in' }, 2.940);
+      window.__timelines["arc-title-hearts"] = tl;
+    </script>
+  </body>
+</html>
