@@ -38,6 +38,7 @@
     "esbuild": "^0.25.12",
     "fontkit": "^2.0.4",
     "giget": "^3.2.0",
+    "gsap": "^3.15.0",
     "hono": "^4.0.0",
     "ignore": "^5.3.2",
     "onnxruntime-node": "1.21.1",

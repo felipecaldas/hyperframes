@@ -142,3 +142,39 @@ describe("Tabario fork: customer-facing Studio does not egress to third parties"
     }
   });
 });
+
+/**
+ * TAB-747. Vendoring a file instead of fetching it from a CDN trades a network
+ * dependency for a *module-resolution* dependency, and a bundler cannot see the
+ * second one.
+ *
+ * `vendoredGsap.ts` resolves `gsap/package.json` through `createRequire` at run
+ * time. `packages/cli` BUNDLES this package into `dist/cli.js` via tsup, so
+ * studio-server's own `dependencies` are never installed when the CLI is packed
+ * and installed on its own — only `packages/cli`'s are. Declaring `gsap` here
+ * and nowhere else produced a packed CLI that died on startup with
+ * `Cannot find module 'gsap/package.json'`, while every test in this repo
+ * passed: inside the workspace, bun hoists `gsap` to the root `node_modules`
+ * and the resolution walks up to it.
+ *
+ * The bug was therefore invisible to the monorepo by construction. This test is
+ * the only thing that makes the packaged shape visible from inside it.
+ */
+describe("runtime-resolved packages are declared where they get installed", () => {
+  it("declares gsap on packages/cli, not only on studio-server", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, join } = await import("node:path");
+
+    const here = dirname(fileURLToPath(import.meta.url));
+    const cliPkg = JSON.parse(
+      readFileSync(join(here, "..", "..", "..", "cli", "package.json"), "utf-8"),
+    ) as { dependencies?: Record<string, string> };
+
+    expect(
+      cliPkg.dependencies?.gsap,
+      "packages/cli must declare gsap: it is the package that actually gets installed, " +
+        "and vendoredGsap.ts resolves it at runtime through createRequire",
+    ).toBeDefined();
+  });
+});
