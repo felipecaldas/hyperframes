@@ -21,7 +21,28 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PACKAGES_DIR = join(HERE, "..", "..", "..");
-const SCANNED = [join(PACKAGES_DIR, "studio", "src"), join(PACKAGES_DIR, "studio-server", "src")];
+/**
+ * TAB-746 added `player/src`, and the reason is the whole point of this guard.
+ *
+ * The original two entries name the customer-facing *packages*. But what ships
+ * to a customer's browser is whatever `packages/studio/vite.config.ts` pulls
+ * in, and it aliases `@hyperframes/player` to that package's **source**:
+ *
+ *   "@hyperframes/player": resolve(__dirname, "../player/src/hyperframes-player.ts")
+ *
+ * So `player/src` is compiled into the Studio bundle while sitting outside a
+ * scan set defined by package name. A `cdn.jsdelivr.net` URL lived in
+ * `player/src/composition-probe.ts` through the whole of TAB-697 with this test
+ * passing on every run — the guard was measuring a boundary the bundler does
+ * not use.
+ *
+ * Anything the alias list reaches belongs here.
+ */
+const SCANNED = [
+  join(PACKAGES_DIR, "studio", "src"),
+  join(PACKAGES_DIR, "studio-server", "src"),
+  join(PACKAGES_DIR, "player", "src"),
+];
 
 /**
  * Hosts that may appear in a network position. Every entry needs a reason —

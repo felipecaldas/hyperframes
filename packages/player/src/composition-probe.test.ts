@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { readCompositionSizeFromDocument, runtimeCdnUrlForVersion } from "./composition-probe.js";
+import {
+  readCompositionSizeFromDocument,
+  runtimeUrlForFallbackInjection,
+} from "./composition-probe.js";
 
 describe("readCompositionSizeFromDocument", () => {
   it("reads dimensions from the composition root", () => {
@@ -25,14 +28,18 @@ describe("readCompositionSizeFromDocument", () => {
   });
 });
 
-describe("runtimeCdnUrlForVersion", () => {
-  it("pins the injected core runtime to the Player-compatible version", () => {
-    expect(runtimeCdnUrlForVersion("1.2.3")).toBe(
-      "https://cdn.jsdelivr.net/npm/@hyperframes/core@1.2.3/dist/hyperframe.runtime.iife.js",
-    );
+// Tabario fork (TAB-746). Replaces upstream's `runtimeCdnUrlForVersion` tests:
+// the fallback no longer builds a versioned CDN URL, so there is no version to
+// pin and no malformed-version case to reject.
+describe("fallback runtime injection", () => {
+  it("injects from our own origin when no build define is applied", () => {
+    // No define is applied here, exactly as in the Studio bundle — the case
+    // that previously resolved to @hyperframes/core@0.0.0-dev on jsdelivr, a
+    // version that does not exist.
+    expect(runtimeUrlForFallbackInjection()).toBe("/api/runtime.js");
   });
 
-  it("rejects values that could create an unversioned or malformed URL", () => {
-    expect(() => runtimeCdnUrlForVersion("latest")).toThrow("Invalid HyperFrames runtime version");
+  it("never points at a third-party host", () => {
+    expect(runtimeUrlForFallbackInjection()).not.toMatch(/^https?:\/\//);
   });
 });
