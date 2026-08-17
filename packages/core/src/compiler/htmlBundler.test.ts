@@ -3,8 +3,10 @@ import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseHTML } from "linkedom";
-import { describe, it, expect, vi } from "vitest";
-import { bundleToSingleHtml } from "./htmlBundler";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+import { bundleToSingleHtml, emitRootCompositionVariableStyles } from "./htmlBundler";
+import { resetUnknownEnumWarnings } from "../runtime/getVariables";
+import { sanitizeCssValue } from "../runtime/applyVariableBindings";
 import { getHyperframeRuntimeScript } from "../generated/runtime-inline";
 
 function makeTempProject(files: Record<string, string>): string {
@@ -1386,5 +1388,198 @@ describe("bundleToSingleHtml", () => {
     } finally {
       warnSpy.mockRestore();
     }
+  });
+});
+
+/**
+ * A sub-composition given a value outside a declared enum's `options` falls
+ * back silently. The runtime guard in getVariables.ts cannot see it: the
+ * bundler bakes the per-instance values into `window.__hfVariablesByComp` at
+ * compile time and the sub-comp's scoped `getVariables` shim only reads that
+ * table. Compile time is therefore the only place the defect is observable on
+ * this path, so the same warning is emitted here.
+ */
+describe("bundleToSingleHtml unknown enum values", () => {
+  let warnings: string[];
+
+  beforeEach(() => {
+    resetUnknownEnumWarnings();
+    warnings = [];
+    vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetUnknownEnumWarnings();
+  });
+
+  const enumWarnings = () => warnings.filter((w) => w.includes("runtime_unknown_enum_value"));
+
+  const ACCENT_ENUM =
+    '[{"id":"accent","type":"enum","label":"Accent","default":"green","options":["green","blue","violet"]}]';
+
+  function makeSubCompProject(variableValues: string, declaration = ACCENT_ENUM): string {
+    return makeTempProject({
+      "index.html": `<!doctype html>
+<html><head></head><body>
+  <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+    <div
+      data-composition-id="card"
+      data-composition-src="compositions/card.html"
+      data-variable-values='${variableValues}'></div>
+  </div>
+  <script>window.__timelines={};</script>
+</body></html>`,
+      "compositions/card.html": `<!doctype html>
+<html data-composition-variables='${declaration}'>
+  <body>
+    <div data-composition-id="card" data-width="1920" data-height="1080"></div>
+  </body>
+</html>`,
+    });
+  }
+
+  it("warns when a sub-composition instance value is not a declared option", async () => {
+    await bundleToSingleHtml(makeSubCompProject('{"accent":"orange"}'));
+
+    expect(enumWarnings()).toEqual([
+      '[hyperframes] runtime_unknown_enum_value: card variable "accent" got "orange", ' +
+        "which is not a declared option (green, blue, violet). " +
+        'Rendering "green" instead.',
+    ]);
+  });
+
+  it("is silent when the instance value is a declared option", async () => {
+    await bundleToSingleHtml(makeSubCompProject('{"accent":"violet"}'));
+
+    expect(enumWarnings()).toEqual([]);
+  });
+
+  it("never inspects a variable declared without options", async () => {
+    const declaration = '[{"id":"accent","type":"string","label":"Accent","default":"green"}]';
+    await bundleToSingleHtml(makeSubCompProject('{"accent":"orange"}', declaration));
+
+    expect(enumWarnings()).toEqual([]);
+  });
+
+  it("is silent for a declared enum absent from the instance values", async () => {
+    await bundleToSingleHtml(makeSubCompProject('{"unrelated":"whatever"}'));
+
+    expect(enumWarnings()).toEqual([]);
+  });
+
+  it("passes the unknown value through to the bundle unrewritten", async () => {
+    const bundled = await bundleToSingleHtml(makeSubCompProject('{"accent":"orange"}'));
+
+    expect(bundled).toContain("window.__hfVariablesByComp = Object.assign({}, ");
+    expect(bundled).toContain('{ "card": { "accent": "orange" } }');
+    expect(bundled).toMatch(/\[data-composition-id="card"\]\s*\{[^}]*--accent:\s*orange/);
+    expect(bundled).not.toContain("--accent: green");
+  });
+
+  it("warns once for the same composition, variable and value across bundles", async () => {
+    const dir = makeSubCompProject('{"accent":"orange"}');
+    await bundleToSingleHtml(dir);
+    await bundleToSingleHtml(dir);
+
+    expect(enumWarnings()).toHaveLength(1);
+  });
+
+  it("warns for a <template>-mounted composition too", async () => {
+    const dir = makeTempProject({
+      "index.html": `<!doctype html>
+<html><head></head><body>
+  <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+    <div data-composition-id="card" data-variable-values='{"accent":"orange"}'></div>
+  </div>
+  <template id="card-template">
+    <div data-composition-id="card" data-width="1920" data-height="1080"
+      data-composition-variables='${ACCENT_ENUM}'></div>
+  </template>
+  <script>window.__timelines={};</script>
+</body></html>`,
+    });
+
+    await bundleToSingleHtml(dir);
+
+    expect(enumWarnings()).toEqual([
+      '[hyperframes] runtime_unknown_enum_value: card variable "accent" got "orange", ' +
+        "which is not a declared option (green, blue, violet). " +
+        'Rendering "green" instead.',
+    ]);
+  });
+});
+
+/**
+ * Composition variable values are emitted as CSS declarations inside a `<style>`
+ * element. `<style>` is a RAW TEXT element: HTML serialization does not escape its
+ * content and the tokenizer closes it at the first `</style`. An unescaped value could
+ * therefore close the element and have the remainder parsed as markup.
+ */
+describe("emitRootCompositionVariableStyles — <style> breakout", () => {
+  /**
+   * The payload leads with a benign `<` before its `</style`, so escaping or
+   * stripping only the first match does not pass: that pins the `/g` flag rather
+   * than merely "something ran". A lone `<` in a value (`a < b`) is the common case.
+   */
+  const BREAKOUT = "x<y</style><script>window.__pwned=1</script><style>";
+
+  /** Emit into a document, serialize it the way the compilers do, then re-parse. */
+  function scriptsAfterRoundTrip(
+    variablesByComp: Record<string, Record<string, unknown>>,
+    body = "x",
+  ) {
+    const { document } = parseHTML(`<!doctype html><html><head></head><body>${body}</body></html>`);
+    emitRootCompositionVariableStyles(document, variablesByComp);
+    const { document: reparsed } = parseHTML(document.toString());
+    return {
+      scripts: [...reparsed.querySelectorAll("script")].map((s) => s.textContent ?? ""),
+      css: [...reparsed.querySelectorAll("style")].map((s) => s.textContent ?? "").join("\n"),
+      reparsed,
+    };
+  }
+
+  it("does not let a variable VALUE close the style element", () => {
+    const { scripts } = scriptsAfterRoundTrip({ "comp-a": { brand: BREAKOUT } });
+    expect(scripts).toEqual([]);
+  });
+
+  it("does not let a COMP ID close the style element through the generated selector", () => {
+    // The comp id reaches the stylesheet as an attribute selector, which is escaped
+    // for selector-string syntax but says nothing about element termination.
+    const { scripts, css } = scriptsAfterRoundTrip(
+      { [`comp-a${BREAKOUT}`]: { brand: "#fff" } },
+      '<div data-composition-id="comp-a"></div>',
+    );
+    expect(scripts).toEqual([]);
+    expect(css).not.toContain("</style");
+  });
+
+  it("strips the characters that smuggle a sibling rule, matching the runtime", () => {
+    // `sanitizeCssValue` is the runtime contract for a scalar folded into
+    // `background: var(--x)`; the compile path has to reach the same result, or a
+    // rendered MP4 diverges from the preview it was approved from.
+    const smuggle = "red; } body { background-image: url(//evil?data=1) } x { y:z";
+    const { css } = scriptsAfterRoundTrip({ "comp-a": { brand: smuggle } });
+
+    expect(css).not.toContain("body {");
+    // One rule, one declaration: with no `;{}` left in the value there is nothing to
+    // close the declaration with, so no sibling rule can be opened.
+    expect(css.match(/\}/g) ?? []).toHaveLength(1);
+    expect(css).toContain(`--brand: ${sanitizeCssValue(smuggle)};`);
+  });
+
+  it("strips '<' from a value the way the runtime does", () => {
+    const { css, scripts } = scriptsAfterRoundTrip({ "comp-a": { brand: "a<b" } });
+    expect(scripts).toEqual([]);
+    expect(css).not.toContain("a<b");
+    expect(css).toContain("ab");
+  });
+
+  it("leaves values without '<' untouched", () => {
+    const { css } = scriptsAfterRoundTrip({ "comp-a": { brand: "#ff0066" } });
+    expect(css).toContain("#ff0066");
   });
 });

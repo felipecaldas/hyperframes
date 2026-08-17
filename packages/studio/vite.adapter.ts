@@ -25,7 +25,7 @@ import { createRetryingModuleLoader, ensureProducerDist } from "./vite.producer"
 import { createStudioDevRenderBodyScripts } from "./vite.studioMotion";
 import { generateThumbnail, findSystemChrome } from "./vite.browser";
 
-export function isPathWithin(parentDir: string, childPath: string): boolean {
+function isPathWithin(parentDir: string, childPath: string): boolean {
   const childRelativePath = relative(resolve(parentDir), resolve(childPath));
   return (
     childRelativePath === "" ||

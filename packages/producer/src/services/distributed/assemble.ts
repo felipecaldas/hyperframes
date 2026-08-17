@@ -34,7 +34,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { applyFaststart, muxVideoWithAudio, runFfmpeg } from "@hyperframes/engine";
+import {
+  appendRenderProvenanceArgs,
+  applyFaststart,
+  MIXED_AUDIO_FILENAME,
+  muxVideoWithAudio,
+  runFfmpeg,
+} from "@hyperframes/engine";
 import { fpsToFfmpegArg } from "@hyperframes/core";
 import { defaultLogger, type ProducerLogger } from "../../logger.js";
 import { formatExportFrameName } from "../../utils/paths.js";
@@ -78,7 +84,7 @@ interface PlanJsonForAssemble {
  * @param chunkPaths — ordered chunk outputs, length === `chunks.json` length.
  *   For mp4/mov each entry is a path to an encoded chunk file; for
  *   png-sequence each entry is a path to a directory of frames.
- * @param audioPath — `<planDir>/audio.aac` for mux'd formats. Pass `null`
+ * @param audioPath — `<planDir>/<MIXED_AUDIO_FILENAME>` for mux'd formats. Pass `null`
  *   when the composition has no audio (or `assemble` is being called for a
  *   format whose audio is muxed elsewhere). `assemble` always normalizes
  *   audio length against the assembled video's frame count when
@@ -172,7 +178,9 @@ export async function assemble(
     // touching the encoded stream. Multi-chunk renders continue through
     // the concat demuxer where the existing `-r` input flag works.
     if (chunkPaths.length === 1) {
-      const remuxArgs = ["-i", chunkPaths[0]!, "-c", "copy", "-r", fpsArg, "-y", concatOutputPath];
+      const remuxArgs = ["-i", chunkPaths[0]!, "-c", "copy", "-r", fpsArg];
+      appendRenderProvenanceArgs(remuxArgs, concatOutputPath);
+      remuxArgs.push("-y", concatOutputPath);
       const remuxResult = await runFfmpeg(remuxArgs, { signal: abortSignal });
       if (!remuxResult.success) {
         throw new Error(
@@ -205,9 +213,9 @@ export async function assemble(
         concatListPath,
         "-c",
         "copy",
-        "-y",
-        concatOutputPath,
       ];
+      appendRenderProvenanceArgs(concatArgs, concatOutputPath);
+      concatArgs.push("-y", concatOutputPath);
       const concatResult = await runFfmpeg(concatArgs, { signal: abortSignal });
       if (!concatResult.success) {
         throw new Error(
@@ -275,9 +283,9 @@ export async function assemble(
         "cfr",
         "-r",
         fpsArg,
-        "-y",
-        cfrOutputPath,
       ];
+      appendRenderProvenanceArgs(cfrArgs, cfrOutputPath);
+      cfrArgs.push("-y", cfrOutputPath);
       const cfrResult = await runFfmpeg(cfrArgs, { signal: abortSignal });
       if (!cfrResult.success) {
         throw new Error(
@@ -385,9 +393,9 @@ export async function assemble(
  * into the merged output so consumers see one continuous numbered sequence.
  *
  * Audio is intentionally NOT muxed here — png-sequence has no container.
- * If `audioPath` is non-null we copy it alongside as `audio.aac` so callers
- * who need to re-mux later (After Effects, Nuke, ffmpeg image2 + audio) can
- * find it.
+ * If `audioPath` is non-null we copy it alongside under the engine's mixed-audio
+ * filename so callers who need to re-mux later (After Effects, Nuke, ffmpeg
+ * image2 + audio) can find it.
  */
 function mergePngFrameDirs(
   chunkPaths: readonly string[],
@@ -435,7 +443,7 @@ function mergePngFrameDirs(
   // containers); png-sequence has no encoder, so we copy the audio
   // verbatim. The sidecar matches the in-process png-sequence convention.
   if (audioPath !== null && existsSync(audioPath)) {
-    const sidecar = join(outputPath, "audio.aac");
+    const sidecar = join(outputPath, MIXED_AUDIO_FILENAME);
     cpSync(audioPath, sidecar);
   }
 

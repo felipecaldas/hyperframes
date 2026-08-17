@@ -33,6 +33,7 @@ import {
   readErrorResponseBody,
 } from "./useDomEditCommitsHelpers";
 import { cutoverCommittedOrThrow, type CutoverResult } from "../utils/sdkCutover";
+import { studioWriteHeaders } from "../utils/studioFileVersion";
 interface RecordEditInput {
   label: string;
   kind: EditHistoryKind;
@@ -201,7 +202,7 @@ export function useDomEditCommits({
         `/api/projects/${pid}/file-mutations/patch-element/${encodeURIComponent(targetPath)}`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...studioWriteHeaders() },
           body: JSON.stringify(patchBody),
         },
       );
@@ -374,9 +375,11 @@ export function useDomEditCommits({
     handleDomStyleCommit,
     handleDomAttributeCommit,
     handleDomAttributeLiveCommit,
+    handleDomAttributeQuietCommit,
     handleDomHtmlAttributeCommit,
     handleDomAttributesCommit,
     handleDomTextCommit,
+    handleDomRichTextCommit,
     commitDomTextFields,
     handleDomTextFieldStyleCommit,
     handleDomAddTextField,
@@ -437,9 +440,11 @@ export function useDomEditCommits({
     handleDomStyleCommit,
     handleDomAttributeCommit,
     handleDomAttributeLiveCommit,
+    handleDomAttributeQuietCommit,
     handleDomHtmlAttributeCommit,
     handleDomAttributesCommit,
     handleDomTextCommit,
+    handleDomRichTextCommit,
     commitDomTextFields,
     handleDomTextFieldStyleCommit,
     handleDomAddTextField,

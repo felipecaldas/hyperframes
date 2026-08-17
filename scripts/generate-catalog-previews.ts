@@ -31,21 +31,18 @@ import {
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
-import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { createCatalogPreviewTempDir } from "./catalog-preview-temp.js";
 // Import from source — bun workspace linking doesn't resolve for scripts outside packages/.
 import {
-  createFileServer,
-  createCaptureSession,
-  initializeSession,
   captureFrame,
-  getCompositionDuration,
   closeCaptureSession,
   createRenderJob,
   executeRenderJob,
 } from "../packages/producer/src/index.js";
 import { compileForRender } from "../packages/producer/src/services/htmlCompiler.js";
 import { resolveContainedCopies } from "./registry-target-paths.mjs";
+import { openOpaqueCapture } from "./preview-capture.js";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "..");
@@ -60,9 +57,9 @@ if (!process.env.PRODUCER_HYPERFRAME_MANIFEST_PATH) {
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-type ItemKind = "block" | "component";
+export type ItemKind = "block" | "component";
 
-interface CatalogItem {
+export interface CatalogItem {
   name: string;
   kind: ItemKind;
   /** Directory containing the item's files in the registry. */
@@ -73,7 +70,10 @@ interface CatalogItem {
 
 // ── Discovery ──────────────────────────────────────────────────────────────
 
-function discoverItems(kindFilter: ItemKind | null, nameFilter: string | null): CatalogItem[] {
+export function discoverItems(
+  kindFilter: ItemKind | null,
+  nameFilter: string | null,
+): CatalogItem[] {
   const items: CatalogItem[] = [];
 
   // Blocks and components only — examples use the existing generate-template-previews.ts.
@@ -152,9 +152,25 @@ function mirrorRegistryTargets(projectDir: string): void {
   }
 }
 
-async function prepareProjectDir(item: CatalogItem): Promise<string> {
-  const tmpDir = join(tmpdir(), `hf-catalog-${item.name}-${Date.now()}`);
-  mkdirSync(tmpDir, { recursive: true });
+export interface PrepareOptions {
+  /**
+   * Inline sub-compositions ahead of time. On by default, because a render
+   * needs one self-contained document.
+   *
+   * The interactive preview turns it off: compiling resolves each mounted
+   * component's variables into the markup and CSS, so nothing is left for a
+   * reader to change. Left uncompiled, the mount survives and the runtime
+   * loads it live, which is the only state where `data-variable-values` still
+   * means anything.
+   */
+  compile?: boolean;
+}
+
+export async function prepareProjectDir(
+  item: CatalogItem,
+  options: PrepareOptions = {},
+): Promise<string> {
+  const tmpDir = createCatalogPreviewTempDir(item.name);
   cpSync(item.sourceDir, tmpDir, { recursive: true });
   mirrorRegistryTargets(tmpDir);
 
@@ -269,12 +285,18 @@ async function prepareProjectDir(item: CatalogItem): Promise<string> {
 
   const indexPath = join(tmpDir, "index.html");
   const indexHtml = readFileSync(indexPath, "utf-8");
-  if (indexHtml.includes("data-composition-src")) {
+  if (options.compile !== false && indexHtml.includes("data-composition-src")) {
     const compiled = await compileForRender(tmpDir, indexPath, join(tmpDir, "_downloads"));
     writeFileSync(indexPath, compiled.html, "utf-8");
   }
 
   return tmpDir;
+}
+
+/** Pull a `data-<attr>` pixel value out of the wrapper markup, or fall back. */
+function wrapperDimension(html: string, attr: "width" | "height", fallback: number): number {
+  const match = html.match(new RegExp(`data-${attr}="(\\d+)"`))?.[1];
+  return match ? parseInt(match, 10) : fallback;
 }
 
 async function generateThumbnail(item: CatalogItem, projectDir: string): Promise<void> {
@@ -283,46 +305,13 @@ async function generateThumbnail(item: CatalogItem, projectDir: string): Promise
 
   // Read dimensions from the wrapper index.html (which may differ from native
   // dimensions for portrait overlays that are scaled to fit landscape).
-  let width = 1920;
-  let height = 1080;
-  const wrapperPath = join(projectDir, "index.html");
-  const wrapperHtml = readFileSync(wrapperPath, "utf-8");
-  const wMatch = wrapperHtml.match(/data-width="(\d+)"/);
-  const hMatch = wrapperHtml.match(/data-height="(\d+)"/);
-  if (wMatch) width = parseInt(wMatch[1], 10);
-  if (hMatch) height = parseInt(hMatch[1], 10);
+  const wrapperHtml = readFileSync(join(projectDir, "index.html"), "utf-8");
+  const width = wrapperDimension(wrapperHtml, "width", 1920);
+  const height = wrapperDimension(wrapperHtml, "height", 1080);
 
   const framesDir = join(projectDir, "_thumb_frames");
-  mkdirSync(framesDir, { recursive: true });
-
-  const fileServer = await createFileServer({
-    projectDir,
-    port: 0,
-    fps: { num: 30, den: 1 },
-  });
+  const { fileServer, session, duration } = await openOpaqueCapture({ projectDir, width, height });
   try {
-    // `format: "png"` is the engine's TRANSPARENT capture mode: it forces
-    // `background-image: none !important` on every `[data-composition-id]`, so
-    // any block whose scene paints its own backdrop (the VS Code snippets sit
-    // on a desktop wallpaper) loses it and the poster comes out empty. These
-    // posters are opaque page images, never a compositing layer — capture
-    // opaque and transcode to the .png the catalog pages reference.
-    const session = await createCaptureSession(fileServer.url, framesDir, {
-      width,
-      height,
-      fps: { num: 30, den: 1 },
-      format: "jpeg",
-      quality: 95,
-    });
-    await initializeSession(session);
-
-    let duration: number;
-    try {
-      duration = await getCompositionDuration(session);
-    } catch {
-      duration = 5;
-    }
-
     // Capture after the treatment appears, capped for long compositions.
     const captureTime = Math.min(3.0, duration * 0.6);
     const result = await captureFrame(session, 0, captureTime);
@@ -460,7 +449,12 @@ async function main(): Promise<void> {
   console.log("\nDone.");
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// Only render when run as a command. This module also exports discoverItems
+// and prepareProjectDir for the payload generator, and an unguarded main()
+// would render every preview the moment that script imported them.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

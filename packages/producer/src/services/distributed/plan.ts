@@ -10,7 +10,7 @@
  *     ├── plan.json
  *     ├── compiled/                # compileForRender output (self-contained)
  *     ├── video-frames/            # per-video JPEG sequences (dereferenced)
- *     ├── audio.aac                # only when composition has audio
+ *     ├── audio.m4a                # only when composition has audio
  *     └── meta/
  *         ├── composition.json
  *         ├── encoder.json         # LockedRenderConfig
@@ -1063,6 +1063,8 @@ export async function buildLocalExecutionPlan(
     workDir,
     compiledDir,
     duration: job.duration,
+    ffmpegProcessTimeout: cfg.ffmpegProcessTimeout,
+    audioGain: cfg.audioGain,
     audios: composition.audios,
     abortSignal,
     assertNotAborted,

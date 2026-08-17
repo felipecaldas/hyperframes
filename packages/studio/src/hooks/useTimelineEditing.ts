@@ -36,6 +36,7 @@ import { serializeZLaneGesture } from "../components/nle/zLaneGesture";
 import { cutoverCommittedOrThrow, sdkTimingPersist } from "../utils/sdkCutover";
 import type { UseTimelineEditingOptions } from "./useTimelineEditingTypes";
 import { getStudioSaveErrorMessage } from "../utils/studioSaveDiagnostics";
+import { studioWriteHeaders } from "../utils/studioFileVersion";
 
 type TimelineMoveUpdates = Pick<TimelineElement, "start" | "track"> & {
   stackingReorder?: TimelineStackingReorderIntent | null;
@@ -412,7 +413,7 @@ export function useTimelineEditing({
           `/api/projects/${pid}/file-mutations/remove-element/${encodeURIComponent(targetPath)}`,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", ...studioWriteHeaders() },
             body: JSON.stringify({ target: patchTarget }),
           },
         );
@@ -448,6 +449,9 @@ export function useTimelineEditing({
             kind: "timeline",
             files: { [targetPath]: patchedContent },
             readFile: async () => originalContent,
+            // remove-element already wrote the removal, so disk holds THAT — not the
+            // content read at the top. Undo still goes back to the original.
+            diskContent: { [targetPath]: removedContent },
             writeFile: writeProjectFile,
             recordEdit,
           });

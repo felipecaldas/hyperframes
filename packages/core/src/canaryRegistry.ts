@@ -80,26 +80,14 @@ export const CANARIES: readonly CanaryDefinition[] = [
     owner: "vance",
     sunsetAfter: "2026-09-15",
   },
-  // ── Real rollouts ────────────────────────────────────────────────────────
+  // ── Audio FX ─────────────────────────────────────────────────────────────
   {
-    name: "de-parallel-router",
-    // Ramp 5 -> 25 -> 100. This gates the DEFAULT-ON behaviour (uncapped, no
-    // telemetry precondition), not the old capped trial — so 0 means the
-    // router is off for everyone and is a full revert without a release.
-    //
-    // Calibration validated the bucketer first: 9.62%/49.76% against 10%/50%
-    // targets at n=13,547, overrides and CI both attributable, sustained
-    // cohort flips at 0.10% — an order of magnitude under this feature's own
-    // ~2.79% revert rate.
-    //
-    // At each step split revert rate by cpu_count and is_docker. Hold at 5
-    // until PRINFRA-372 is resolved: `--workers auto` crashes every worker on
-    // macOS arm64 while `--workers 1` is clean, and the router forces 3.
-    percentage: 5,
+    name: "audio-fx-rack",
+    percentage: 0,
     description:
-      "Route auto multi-worker renders to verified parallel drawElement streaming (HF_DE_PARALLEL_ROUTER). Ramp only alongside the per-install circuit breaker.",
+      "Show the Audio FX rack on audio tracks in Studio — effects, presets, the voiceover carve and levelling. Gates the AUTHORING surface only: a composition that already carries data-fx-chain still plays and renders it, because a canary should stage who can reach a feature, not make a written attribute silently inert.",
     owner: "vance",
-    sunsetAfter: "2026-10-01",
+    sunsetAfter: "2026-11-15",
   },
 ] as const;
 

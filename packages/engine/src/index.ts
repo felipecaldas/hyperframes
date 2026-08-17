@@ -53,6 +53,7 @@ export {
   scaleProtocolTimeoutForComposition,
   shouldClampToScreenshotForConcreteGpu,
   applyConcreteGpuScreenshotClamp,
+  explainDrawElementDisabled,
   resolveExtractCacheDir,
   defaultExtractCacheDir,
   EXTRACT_CACHE_DIR_DISABLED_ALIASES,
@@ -212,7 +213,11 @@ export {
 
 export { createVideoFrameInjector } from "./services/videoFrameInjector.js";
 
-export { parseAudioElements, processCompositionAudio } from "./services/audioMixer.js";
+export {
+  MIXED_AUDIO_FILENAME,
+  parseAudioElements,
+  processCompositionAudio,
+} from "./services/audioMixer.js";
 export { cloneCaptureWarning, cloneCaptureWarnings } from "./services/captureWarning.js";
 export type {
   AudioElement,
@@ -388,3 +393,13 @@ export {
   type HdrMasteringMetadata,
 } from "./utils/hdr.js";
 export type { VideoColorSpace } from "./utils/ffprobe.js";
+export {
+  renderProvenanceArgs,
+  appendRenderProvenanceArgs,
+  readRenderProvenance,
+  PROVENANCE_RENDERER_TAG,
+  PROVENANCE_VERSION_TAG,
+  PROVENANCE_RENDERER_NAME,
+  PROVENANCE_VERSION,
+  type RenderProvenance,
+} from "./utils/renderProvenance.js";

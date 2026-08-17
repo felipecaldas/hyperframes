@@ -4,6 +4,7 @@ import { useMountEffect } from "../../hooks/useMountEffect";
 import { usePlaybackKeyboard } from "./usePlaybackKeyboard";
 import { useTimelineSyncCallbacks } from "./useTimelineSyncCallbacks";
 import { useTimelinePlayerLoop } from "./useTimelinePlayerLoop";
+import { logReload } from "../../utils/reloadDebug";
 
 export type { ClipManifestClip } from "../lib/playbackTypes";
 export { createStaticSeekPlaybackAdapter } from "../lib/playbackAdapter";
@@ -37,7 +38,11 @@ import {
   parseTimelineFromDOM,
 } from "../lib/timelineDOM";
 import { normalizeToZones } from "../components/timelineZones";
-import { setPreviewMediaMuted, setPreviewPlaybackRate } from "../lib/timelineIframeHelpers";
+import {
+  setPreviewMediaMuted,
+  setPreviewMediaVolume,
+  setPreviewPlaybackRate,
+} from "../lib/timelineIframeHelpers";
 import { scrubMusicAtSeek, stopScrubPreviewAudio } from "../lib/playbackScrub";
 import { hasTimelinePerformanceFixtureLease } from "../lib/timelinePerformanceFixture";
 import { applyCachedSourceDurations, probeMissingSourceDurations } from "../lib/mediaProbe";
@@ -230,8 +235,9 @@ export function useTimelinePlayer() {
     } catch {}
   }, []);
   const applyPreviewAudioState = useCallback(() => {
-    const { audioMuted } = usePlayerStore.getState();
+    const { audioMuted, audioVolume } = usePlayerStore.getState();
     setPreviewMediaMuted(iframeRef.current, audioMuted);
+    setPreviewMediaVolume(iframeRef.current, audioVolume);
   }, []);
   const play = useCallback(() => {
     stopRAFLoop();
@@ -388,8 +394,20 @@ export function useTimelinePlayer() {
         seek(state.requestedSeekTime);
         usePlayerStore.getState().clearSeekRequest();
       }
+      // Play or stop from outside the loop — the FX rack auditioning a preset
+      // while paused, which is silent otherwise. `returnTo` puts the playhead
+      // back where the request found it: hovering is not an edit.
+      const request = state.playbackRequest;
+      if (request && request.nonce !== prev.playbackRequest?.nonce) {
+        if (request.playing) play();
+        else {
+          pause();
+          if (request.returnTo !== null) seek(request.returnTo);
+        }
+        usePlayerStore.getState().clearPlaybackRequest();
+      }
     });
-  }, [seek]);
+  }, [seek, play, pause]);
   const { playbackKeyDownRef, playbackKeyUpRef, attachIframeShortcutListeners, togglePlay } =
     usePlaybackKeyboard({
       iframeRef,
@@ -445,6 +463,7 @@ export function useTimelinePlayer() {
   const refreshPlayer = useCallback(() => {
     const iframe = iframeRef.current;
     if (!iframe) return;
+    logReload("refreshPlayer", () => ({ stack: new Error("refreshPlayer").stack }));
     saveSeekPosition();
     // Hide the iframe across the full reload so the user never sees the reloading
     // document's RAW DOM (every clip stacked and visible) in the window between the
@@ -556,7 +575,8 @@ export function useTimelinePlayer() {
     return usePlayerStore.subscribe((state, prev) => {
       const playbackRateChanged = state.playbackRate !== prev.playbackRate;
       const audioMutedChanged = state.audioMuted !== prev.audioMuted;
-      if (!playbackRateChanged && !audioMutedChanged) return;
+      const audioVolumeChanged = state.audioVolume !== prev.audioVolume;
+      if (!playbackRateChanged && !audioMutedChanged && !audioVolumeChanged) return;
 
       if (playbackRateChanged) {
         applyPlaybackRate(state.playbackRate);
