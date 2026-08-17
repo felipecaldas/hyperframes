@@ -848,7 +848,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>HyperFrames Studio unavailable</title>
+    <title>Tabario Studio unavailable</title>
     <style>
       body {
         margin: 0;

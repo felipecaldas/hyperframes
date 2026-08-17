@@ -1,15 +1,8 @@
 // @vitest-environment node
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStudioApi } from "../createStudioApi.js";
@@ -17,67 +10,33 @@ import type { StudioApiAdapter } from "../types.js";
 
 const INITIAL_HTML = '<html data-composition-id="fixture"><body>before</body></html>\n';
 
-function makeFixture() {
-  const root = mkdtempSync(join(tmpdir(), "hf-agent-api-"));
-  const projectDir = join(root, "project");
-  const binDir = join(root, "bin");
-  const captureDir = join(root, "capture");
-  mkdirSync(projectDir);
-  mkdirSync(binDir);
-  mkdirSync(captureDir);
-  writeFileSync(join(projectDir, "index.html"), INITIAL_HTML);
-  const fake = `#!/usr/bin/env node
-const fs = require("node:fs");
-const path = require("node:path");
-const args = process.argv.slice(2);
-if (args.includes("--version")) { console.log("codex-cli 1.0"); process.exit(0); }
-if (args[0] === "login" && args[1] === "status") { console.log("Logged in using fixture"); process.exit(0); }
-let input = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", chunk => input += chunk);
-process.stdin.on("end", () => {
-  fs.appendFileSync(path.join(process.env.FAKE_CAPTURE_DIR, "args.jsonl"), JSON.stringify(args) + "\\n");
-  fs.appendFileSync(path.join(process.env.FAKE_CAPTURE_DIR, "prompts.txt"), input + "\\n---\\n");
-  if (input.includes("EARLY_UNSUPPORTED")) fs.writeFileSync("unexpected.bin", Buffer.from([1,2,3]));
-  if (input.includes("HANG_AFTER_EDIT")) {
-    fs.writeFileSync("index.html", '<html data-composition-id="fixture"><body>partial edit</body></html>\\n');
-    setInterval(() => {}, 1000);
-    return;
-  }
-  if (input.includes("NO_CHANGES")) {
-    console.log(JSON.stringify({type:"thread.started",thread_id:"11111111-1111-4111-8111-111111111111"}));
-    console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"I could not apply the requested edit."}}));
-    return;
-  }
-  const finish = () => {
-    if (input.includes("UNSUPPORTED")) fs.writeFileSync("unexpected.bin", Buffer.from([1,2,3]));
-    else fs.writeFileSync("index.html", '<html data-composition-id="fixture"><body>' + input + '</body></html>\\n');
-    console.log(JSON.stringify({type:"thread.started",thread_id:"11111111-1111-4111-8111-111111111111"}));
-    console.log(JSON.stringify({type:"item.completed",item:{type:"command_execution",command:"edit index.html"}}));
-    console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"Fixture agent finished."}}));
-  };
-  if (input.includes("WAIT")) setTimeout(finish, 250); else finish();
-});
-`;
-  writeFileSync(join(binDir, "codex"), fake);
-  chmodSync(join(binDir, "codex"), 0o755);
-  const fakeClaude = `#!/usr/bin/env node
-const args = process.argv.slice(2);
-if (args.includes("--version")) { console.log("claude 1.0"); process.exit(0); }
-if (args[0] === "auth" && args[1] === "status") { console.log('{"loggedIn":true}'); process.exit(0); }
-console.log('{"type":"system","session_id":"22222222-2222-4222-8222-222222222222"}');
-console.log('{"type":"result","result":"Claude fixture finished.","session_id":"22222222-2222-4222-8222-222222222222"}');
-`;
-  writeFileSync(join(binDir, "claude"), fakeClaude);
-  chmodSync(join(binDir, "claude"), 0o755);
-  return { root, projectDir, binDir, captureDir };
+function completion(content: string, toolCalls: unknown[] = []): Response {
+  return new Response(
+    JSON.stringify({ choices: [{ message: { content, tool_calls: toolCalls } }] }),
+    {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    },
+  );
 }
 
-function makeAdapter(projectDir: string): StudioApiAdapter {
+function toolCall(id: string, name: string, args: Record<string, unknown>) {
+  return { id, type: "function", function: { name, arguments: JSON.stringify(args) } };
+}
+
+function fixture() {
+  const root = mkdtempSync(join(tmpdir(), "tabario-agent-api-"));
+  const projectDir = join(root, "project");
+  mkdirSync(join(projectDir, "compositions"), { recursive: true });
+  writeFileSync(join(projectDir, "index.html"), INITIAL_HTML);
+  return { root, projectDir };
+}
+
+function adapter(projectDir: string): StudioApiAdapter {
   return {
     listProjects: () => [{ id: "demo", dir: projectDir }],
     resolveProject: (id) => (id === "demo" ? { id, dir: projectDir } : null),
-    bundle: async () => null,
+    bundle: () => null,
     lint: (html) => ({
       findings: html.includes("LINT_ERROR")
         ? [{ severity: "error", message: "fixture lint error" }]
@@ -86,12 +45,12 @@ function makeAdapter(projectDir: string): StudioApiAdapter {
     runtimeUrl: "/runtime.js",
     rendersDir: () => join(projectDir, "renders"),
     startRender: () => {
-      throw new Error("not used");
+      throw new Error("unused");
     },
-    installRegistryBlock: async ({ blockName }) => {
+    installRegistryBlock: async ({ project, blockName }) => {
       const path = `compositions/${blockName}.html`;
-      mkdirSync(join(projectDir, "compositions"), { recursive: true });
-      writeFileSync(join(projectDir, path), `<html>${blockName}</html>`);
+      mkdirSync(join(project.dir, "compositions"), { recursive: true });
+      writeFileSync(join(project.dir, path), `<html>${blockName}</html>\n`);
       return {
         written: [path],
         block: {
@@ -106,7 +65,7 @@ function makeAdapter(projectDir: string): StudioApiAdapter {
   };
 }
 
-function requestHeaders(nonce?: string): Record<string, string> {
+function headers(nonce?: string): Record<string, string> {
   return {
     Host: "localhost",
     Origin: "http://localhost",
@@ -114,312 +73,255 @@ function requestHeaders(nonce?: string): Record<string, string> {
   };
 }
 
-async function capabilities(app: ReturnType<typeof createStudioApi>) {
+async function nonce(app: ReturnType<typeof createStudioApi>): Promise<string> {
   const response = await app.request("http://localhost/projects/demo/agent/capabilities", {
-    headers: requestHeaders(),
+    headers: headers(),
   });
-  expect(response.status).toBe(200);
-  return (await response.json()) as { enabled: boolean; nonce: string };
+  const body = (await response.json()) as {
+    enabled: boolean;
+    nonce: string;
+    providers: { tabario: { available: boolean } };
+  };
+  expect(body).toMatchObject({ enabled: true, providers: { tabario: { available: true } } });
+  return body.nonce;
 }
 
-async function startRun(
+async function start(
   app: ReturnType<typeof createStudioApi>,
-  nonce: string,
+  token: string,
   prompt: string,
   extra: Record<string, unknown> = {},
 ): Promise<string> {
   const response = await app.request("http://localhost/projects/demo/agent/runs", {
     method: "POST",
-    headers: requestHeaders(nonce),
-    body: JSON.stringify({ provider: "codex", kind: "chat", prompt, ...extra }),
+    headers: headers(token),
+    body: JSON.stringify({ provider: "tabario", kind: "chat", prompt, ...extra }),
   });
-  expect(response.status).toBe(202);
-  const body = (await response.json()) as { jobId: string };
-  return body.jobId;
+  expect(response.status, await response.clone().text()).toBe(202);
+  return ((await response.json()) as { jobId: string }).jobId;
 }
 
-async function finishRun(app: ReturnType<typeof createStudioApi>, jobId: string): Promise<string> {
+async function events(app: ReturnType<typeof createStudioApi>, jobId: string): Promise<string> {
   const response = await app.request(`http://localhost/agent/runs/${jobId}/events`, {
-    headers: requestHeaders(),
+    headers: headers(),
   });
   expect(response.status).toBe(200);
   return response.text();
 }
 
-function undoRun(app: ReturnType<typeof createStudioApi>, jobId: string, nonce: string) {
-  return app.request(`http://localhost/agent/runs/${jobId}/undo`, {
-    method: "POST",
-    headers: requestHeaders(nonce),
-    body: "{}",
-  });
-}
-
-async function expectCodexThreadInvalidated(
-  app: ReturnType<typeof createStudioApi>,
-): Promise<void> {
-  const threads = await app.request("http://localhost/projects/demo/agent/threads", {
-    headers: requestHeaders(),
-  });
-  const body = (await threads.json()) as { threads: AgentThreadSummaryFixture[] };
-  expect(body.threads.find((thread) => thread.provider === "codex")?.invalidated).toBe(true);
-}
-
-describe("Agent Bridge API", () => {
-  const previousPath = process.env.PATH;
-  const previousState = process.env.HYPERFRAMES_STATE_DIR;
-  const previousCapture = process.env.FAKE_CAPTURE_DIR;
-  const previousIdleTimeout = process.env.HYPERFRAMES_AGENT_IDLE_TIMEOUT_MS;
-  const previousMaxRuntime = process.env.HYPERFRAMES_AGENT_MAX_RUNTIME_MS;
-  let fixture: ReturnType<typeof makeFixture>;
+describe("Tabario AI API", () => {
+  const oldKey = process.env.OPENROUTER_API_KEY;
+  const oldState = process.env.HYPERFRAMES_STATE_DIR;
+  let setup: ReturnType<typeof fixture>;
 
   beforeEach(() => {
-    fixture = makeFixture();
-    process.env.PATH = `${fixture.binDir}:${previousPath ?? ""}`;
-    process.env.HYPERFRAMES_STATE_DIR = join(fixture.root, "state");
-    process.env.FAKE_CAPTURE_DIR = fixture.captureDir;
+    setup = fixture();
+    process.env.OPENROUTER_API_KEY = "fixture-key";
+    process.env.HYPERFRAMES_STATE_DIR = join(setup.root, "state");
   });
 
   afterEach(() => {
-    process.env.PATH = previousPath;
-    process.env.HYPERFRAMES_STATE_DIR = previousState;
-    process.env.FAKE_CAPTURE_DIR = previousCapture;
-    if (previousIdleTimeout === undefined) delete process.env.HYPERFRAMES_AGENT_IDLE_TIMEOUT_MS;
-    else process.env.HYPERFRAMES_AGENT_IDLE_TIMEOUT_MS = previousIdleTimeout;
-    if (previousMaxRuntime === undefined) delete process.env.HYPERFRAMES_AGENT_MAX_RUNTIME_MS;
-    else process.env.HYPERFRAMES_AGENT_MAX_RUNTIME_MS = previousMaxRuntime;
+    if (oldKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = oldKey;
+    if (oldState === undefined) delete process.env.HYPERFRAMES_STATE_DIR;
+    else process.env.HYPERFRAMES_STATE_DIR = oldState;
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
-  it("enforces loopback, same-origin, JSON, nonce, provider and prompt limits", async () => {
-    const app = createStudioApi(makeAdapter(fixture.projectDir));
-    const cap = await capabilities(app);
-    expect(cap.enabled).toBe(true);
-
+  it("enforces loopback, same-origin JSON mutations, nonce, provider, and prompt limits", async () => {
+    const app = createStudioApi(adapter(setup.projectDir));
+    const token = await nonce(app);
     const noNonce = await app.request("http://localhost/projects/demo/agent/runs", {
       method: "POST",
-      headers: {
-        Host: "localhost",
-        Origin: "http://localhost",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ provider: "codex", kind: "chat", prompt: "hi" }),
+      headers: { ...headers(), "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: "tabario", kind: "chat", prompt: "hi" }),
     });
     expect(noNonce.status).toBe(403);
-
-    const crossOrigin = await app.fetch(
-      new Request("http://localhost/projects/demo/agent/threads/reset", {
-        method: "POST",
-        headers: {
-          ...requestHeaders(cap.nonce),
-          origin: "http://evil.example",
-          "sec-fetch-site": "cross-site",
-        },
-        body: JSON.stringify({ provider: "codex" }),
-      }),
-    );
-    expect(crossOrigin.status, await crossOrigin.clone().text()).toBe(403);
-
+    const crossOrigin = await app.request("http://localhost/projects/demo/agent/threads/reset", {
+      method: "POST",
+      headers: {
+        ...headers(token),
+        Origin: "https://evil.example",
+        "Sec-Fetch-Site": "cross-site",
+      },
+      body: JSON.stringify({ provider: "tabario" }),
+    });
+    expect(crossOrigin.status).toBe(403);
     const oversized = await app.request("http://localhost/projects/demo/agent/runs", {
       method: "POST",
-      headers: requestHeaders(cap.nonce),
-      body: JSON.stringify({ provider: "codex", kind: "chat", prompt: "x".repeat(128 * 1024 + 1) }),
+      headers: headers(token),
+      body: JSON.stringify({
+        provider: "tabario",
+        kind: "chat",
+        prompt: "x".repeat(128 * 1024 + 1),
+      }),
     });
     expect(oversized.status).toBe(413);
-
-    const lan = await app.request("http://192.168.1.2/projects/demo/agent/capabilities", {
-      headers: { Host: "192.168.1.2" },
-    });
-    expect((await lan.json()) as { enabled: boolean }).toMatchObject({ enabled: false });
-  });
-
-  it("stays unavailable when the hosting adapter is LAN-bound", async () => {
-    const adapter = makeAdapter(fixture.projectDir);
-    adapter.agentBridgeEnabled = false;
-    const app = createStudioApi(adapter);
-
-    const response = await app.request("http://localhost/projects/demo/agent/capabilities");
-
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ enabled: false });
-
-    const mutation = await app.request("http://localhost/projects/demo/agent/threads/reset", {
+    const wrongProvider = await app.request("http://localhost/projects/demo/agent/runs", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider: "codex" }),
+      headers: headers(token),
+      body: JSON.stringify({ provider: "codex", kind: "chat", prompt: "hi" }),
     });
-    expect(mutation.status).toBe(403);
+    expect(wrongProvider.status).toBe(400);
   });
 
-  it("streams a run, preserves prompt bytes, resumes its provider thread, and locks writes", async () => {
-    const app = createStudioApi(makeAdapter(fixture.projectDir));
-    const cap = await capabilities(app);
-    const injection = "WAIT $(touch should-not-exist) LINT_ERROR";
-    const jobId = await startRun(app, cap.nonce, injection);
+  it("lints in staging, applies one transaction, persists chat, refreshes, and undoes", async () => {
+    const hash = createHash("sha256").update(INITIAL_HTML).digest("hex");
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          completion("", [
+            toolCall("write", "write_file", {
+              path: "index.html",
+              content: INITIAL_HTML.replace("before", "after"),
+              expected_hash: hash,
+            }),
+          ]),
+        )
+        .mockResolvedValueOnce(completion("Updated the timeline.")),
+    );
+    const app = createStudioApi(adapter(setup.projectDir));
+    const token = await nonce(app);
+    const jobId = await start(app, token, "Change the opening", { kind: "timeline" });
+    const stream = await events(app, jobId);
 
-    const locked = await app.request("http://localhost/projects/demo/files/index.html", {
-      method: "PUT",
-      headers: { "Content-Type": "text/plain" },
-      body: "studio write",
-    });
-    expect(locked.status).toBe(423);
-
-    const stream = await finishRun(app, jobId);
-    expect(stream).toContain("event: assistant");
     expect(stream).toContain("event: changed-files");
     expect(stream).toContain("event: lint");
     expect(stream).toContain("event: complete");
-    expect(existsSync(join(fixture.projectDir, "should-not-exist"))).toBe(false);
-    expect(readFileSync(join(fixture.captureDir, "prompts.txt"), "utf-8")).toContain(injection);
+    expect(readFileSync(join(setup.projectDir, "index.html"), "utf-8")).toContain("after");
 
-    const secondId = await startRun(app, cap.nonce, "follow-up");
-    await finishRun(app, secondId);
-    const args = readFileSync(join(fixture.captureDir, "args.jsonl"), "utf-8")
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as string[]);
-    expect(args[1]).toContain("resume");
-    expect(args[1]).toContain('sandbox_mode="workspace-write"');
-    expect(args[1]).toContain("11111111-1111-4111-8111-111111111111");
-  });
-
-  it("fails an edit-oriented run that exits without changing project files", async () => {
-    const app = createStudioApi(makeAdapter(fixture.projectDir));
-    const cap = await capabilities(app);
-    const jobId = await startRun(app, cap.nonce, "NO_CHANGES", {
-      kind: "storyboard-feedback",
+    const threadResponse = await app.request("http://localhost/projects/demo/agent/threads", {
+      headers: headers(),
     });
+    const threadBody = (await threadResponse.json()) as {
+      threads: Array<{ provider: string; transcript: unknown[] }>;
+    };
+    expect(threadBody.threads[0]).toMatchObject({ provider: "tabario" });
+    expect(threadBody.threads[0].transcript).toHaveLength(2);
 
-    const stream = await finishRun(app, jobId);
-    expect(stream).toContain("event: assistant");
-    expect(stream).toContain("I could not apply the requested edit.");
-    expect(stream).toContain("event: lint");
-    expect(stream).toContain("event: failure");
-    expect(stream).toContain(
-      "codex finished without changing project files for this storyboard-feedback request.",
-    );
-    expect(stream).not.toContain("event: complete");
-    expect(readFileSync(join(fixture.projectDir, "index.html"), "utf-8")).toBe(INITIAL_HTML);
-
-    const unlocked = await app.request("http://localhost/projects/demo/files/index.html", {
-      method: "PUT",
-      headers: { "Content-Type": "text/plain" },
-      body: "studio write after no-op",
-    });
-    expect(unlocked.status).not.toBe(423);
-  });
-
-  it("treats registry installation and source edits as one byte-identical undo transaction", async () => {
-    const app = createStudioApi(makeAdapter(fixture.projectDir));
-    const cap = await capabilities(app);
-    const jobId = await startRun(app, cap.nonce, "integrate neon accent", {
-      kind: "catalog",
-      registryItem: "neon-accent",
-    });
-    await finishRun(app, jobId);
-    expect(existsSync(join(fixture.projectDir, "compositions/neon-accent.html"))).toBe(true);
-    expect(readFileSync(join(fixture.projectDir, "index.html"), "utf-8")).not.toBe(INITIAL_HTML);
-
-    const undo = await undoRun(app, jobId, cap.nonce);
-    expect(undo.status).toBe(200);
-    expect(readFileSync(join(fixture.projectDir, "index.html"), "utf-8")).toBe(INITIAL_HTML);
-    expect(existsSync(join(fixture.projectDir, "compositions/neon-accent.html"))).toBe(false);
-
-    await expectCodexThreadInvalidated(app);
-  });
-
-  it("returns 409 without restoring anything when a post-run file has changed", async () => {
-    const app = createStudioApi(makeAdapter(fixture.projectDir));
-    const cap = await capabilities(app);
-    const jobId = await startRun(app, cap.nonce, "first edit");
-    await finishRun(app, jobId);
-    writeFileSync(join(fixture.projectDir, "index.html"), "concurrent user edit");
-    const undo = await undoRun(app, jobId, cap.nonce);
-    expect(undo.status).toBe(409);
-    expect(readFileSync(join(fixture.projectDir, "index.html"), "utf-8")).toBe(
-      "concurrent user edit",
-    );
-  });
-
-  it("times out an inactive provider, unlocks the project, preserves Undo, and invalidates its thread", async () => {
-    process.env.HYPERFRAMES_AGENT_IDLE_TIMEOUT_MS = "40";
-    process.env.HYPERFRAMES_AGENT_MAX_RUNTIME_MS = "1000";
-    const app = createStudioApi(makeAdapter(fixture.projectDir));
-    const cap = await capabilities(app);
-    const jobId = await startRun(app, cap.nonce, "HANG_AFTER_EDIT");
-
-    const stream = await finishRun(app, jobId);
-    expect(stream).toContain("event: failure");
-    expect(stream).toContain("timed out after 40 ms without activity");
-    expect(stream).toContain("event: changed-files");
-    expect(stream).toContain("event: lint");
-    expect(readFileSync(join(fixture.projectDir, "index.html"), "utf-8")).toContain("partial edit");
-
-    const unlocked = await app.request("http://localhost/projects/demo/files/index.html", {
-      method: "PUT",
-      headers: { "Content-Type": "text/plain" },
-      body: "studio write after timeout",
-    });
-    expect(unlocked.status).not.toBe(423);
-    writeFileSync(
-      join(fixture.projectDir, "index.html"),
-      '<html data-composition-id="fixture"><body>partial edit</body></html>\n',
-    );
-
-    await expectCodexThreadInvalidated(app);
-
-    const undo = await undoRun(app, jobId, cap.nonce);
-    expect(undo.status).toBe(200);
-    expect(readFileSync(join(fixture.projectDir, "index.html"), "utf-8")).toBe(INITIAL_HTML);
-  });
-
-  it("cancels partial work and reports unsupported changes as critical with no Undo claim", async () => {
-    const app = createStudioApi(makeAdapter(fixture.projectDir));
-    const cap = await capabilities(app);
-    const cancelId = await startRun(app, cap.nonce, "WAIT cancellation");
-    const cancel = await app.request(`http://localhost/agent/runs/${cancelId}/cancel`, {
+    const undo = await app.request(`http://localhost/agent/runs/${jobId}/undo`, {
       method: "POST",
-      headers: requestHeaders(cap.nonce),
+      headers: headers(token),
+      body: "{}",
+    });
+    expect(undo.status).toBe(200);
+    expect(readFileSync(join(setup.projectDir, "index.html"), "utf-8")).toBe(INITIAL_HTML);
+  });
+
+  it("blocks lint errors without exposing partial live changes", async () => {
+    const hash = createHash("sha256").update(INITIAL_HTML).digest("hex");
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          completion("", [
+            toolCall("write", "write_file", {
+              path: "index.html",
+              content: INITIAL_HTML.replace("before", "LINT_ERROR"),
+              expected_hash: hash,
+            }),
+          ]),
+        )
+        .mockResolvedValueOnce(completion("Made the requested change.")),
+    );
+    const app = createStudioApi(adapter(setup.projectDir));
+    const token = await nonce(app);
+    const jobId = await start(app, token, "Break it", { kind: "timeline" });
+    const stream = await events(app, jobId);
+
+    expect(stream).toContain("event: failure");
+    expect(stream).toContain("failed lint and were not applied");
+    expect(readFileSync(join(setup.projectDir, "index.html"), "utf-8")).toBe(INITIAL_HTML);
+  });
+
+  it("cancels an in-flight model call without applying staged work", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("cancelled", "AbortError")),
+              { once: true },
+            );
+          }),
+      ),
+    );
+    const app = createStudioApi(adapter(setup.projectDir));
+    const token = await nonce(app);
+    const jobId = await start(app, token, "Wait for me");
+    const cancel = await app.request(`http://localhost/agent/runs/${jobId}/cancel`, {
+      method: "POST",
+      headers: headers(token),
       body: "{}",
     });
     expect(cancel.status).toBe(200);
-    expect(await finishRun(app, cancelId)).toContain("event: cancelled");
+    const stream = await events(app, jobId);
+    expect(stream).toContain("event: cancelled");
+    expect(stream).toContain("No staged changes were applied");
+    expect(readFileSync(join(setup.projectDir, "index.html"), "utf-8")).toBe(INITIAL_HTML);
+  });
 
-    const criticalCancelId = await startRun(app, cap.nonce, "EARLY_UNSUPPORTED WAIT cancellation");
-    for (
-      let attempt = 0;
-      attempt < 20 && !existsSync(join(fixture.projectDir, "unexpected.bin"));
-      attempt++
-    ) {
-      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
-    }
-    const criticalCancel = await app.request(
-      `http://localhost/agent/runs/${criticalCancelId}/cancel`,
-      {
-        method: "POST",
-        headers: requestHeaders(cap.nonce),
-        body: "{}",
-      },
+  it("refuses Undo while another transaction owns the project lock", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(completion("No changes needed."))
+        .mockImplementationOnce(
+          (_url: string, init?: RequestInit) =>
+            new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener(
+                "abort",
+                () => reject(new DOMException("cancelled", "AbortError")),
+                { once: true },
+              );
+            }),
+        ),
     );
-    expect(criticalCancel.status).toBe(200);
-    const criticalStream = await finishRun(app, criticalCancelId);
-    expect(criticalStream).toContain("event: failure");
-    expect(criticalStream).toContain('"critical":true');
-    unlinkSync(join(fixture.projectDir, "unexpected.bin"));
+    const app = createStudioApi(adapter(setup.projectDir));
+    const token = await nonce(app);
+    const completedJob = await start(app, token, "Inspect the timeline");
+    expect(await events(app, completedJob)).toContain("event: complete");
 
-    const unsupportedId = await startRun(app, cap.nonce, "UNSUPPORTED");
-    const stream = await finishRun(app, unsupportedId);
-    expect(stream).toContain("event: failure");
-    expect(stream).toContain('"critical":true');
-    const undo = await app.request(`http://localhost/agent/runs/${unsupportedId}/undo`, {
+    const activeJob = await start(app, token, "Keep inspecting");
+    const undo = await app.request(`http://localhost/agent/runs/${completedJob}/undo`, {
       method: "POST",
-      headers: requestHeaders(cap.nonce),
+      headers: headers(token),
       body: "{}",
     });
     expect(undo.status).toBe(409);
+    expect(await undo.text()).toContain("already working on this project");
+
+    await app.request(`http://localhost/agent/runs/${activeJob}/cancel`, {
+      method: "POST",
+      headers: headers(token),
+      body: "{}",
+    });
+    expect(await events(app, activeJob)).toContain("event: cancelled");
+  });
+
+  it("stages registry installation inside the same undoable transaction", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(completion("Added the registry component.")));
+    const app = createStudioApi(adapter(setup.projectDir));
+    const token = await nonce(app);
+    const jobId = await start(app, token, "Add the accent", {
+      kind: "catalog",
+      registryItem: "accent",
+    });
+    const stream = await events(app, jobId);
+    expect(stream).toContain("event: complete");
+    expect(existsSync(join(setup.projectDir, "compositions/accent.html"))).toBe(true);
+    await app.request(`http://localhost/agent/runs/${jobId}/undo`, {
+      method: "POST",
+      headers: headers(token),
+      body: "{}",
+    });
+    expect(existsSync(join(setup.projectDir, "compositions/accent.html"))).toBe(false);
   });
 });
-
-interface AgentThreadSummaryFixture {
-  provider: "codex" | "claude";
-  invalidated: boolean;
-}

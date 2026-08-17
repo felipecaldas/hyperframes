@@ -2,8 +2,10 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -12,14 +14,17 @@ import { dirname, join, resolve } from "node:path";
 import type { ResolvedProject, StudioApiAdapter } from "../types.js";
 import { lintProject } from "../helpers/projectLint.js";
 import {
+  applyStagedAgentFiles,
+  createAgentStagingProject,
   diffAgentFiles,
   readLedger,
   snapshotAgentFiles,
   undoAgentFiles,
   writeLedger,
+  type AgentFileSnapshot,
   type AgentRunLedger,
 } from "./files.js";
-import { detectProvider, startProviderRun, type ProviderProcess } from "./providers.js";
+import { detectProvider, runTabarioModel } from "./providers.js";
 import type {
   AgentProvider,
   AgentProviderCapability,
@@ -31,8 +36,7 @@ import type {
 const MAX_RUN_LEDGERS = 20;
 const DEFAULT_IDLE_TIMEOUT_MS = 3 * 60_000;
 const DEFAULT_MAX_RUNTIME_MS = 15 * 60_000;
-const UNSUPPORTED_FILES_FAILURE =
-  "The agent changed unsupported project files; complete Undo coverage is unavailable.";
+const PROVIDER: AgentProvider = "tabario";
 
 interface PersistedThread extends AgentThreadSummary {
   updatedAt: string;
@@ -45,7 +49,7 @@ interface AgentRunJob {
   ledgerPath: string;
   events: AgentRunEvent[];
   listeners: Set<() => void>;
-  process: ProviderProcess | null;
+  controller: AbortController;
   terminal: boolean;
   cancelled: boolean;
 }
@@ -89,39 +93,30 @@ function readTranscript(value: unknown): AgentThreadSummary["transcript"] {
   return transcript;
 }
 
-function readThread(path: string, provider: AgentProvider): PersistedThread {
+function readThread(path: string): PersistedThread {
   const value = readJsonObject(path);
   return {
-    provider,
-    sessionId: typeof value?.sessionId === "string" ? value.sessionId : null,
-    invalidated: value?.invalidated === true,
+    provider: PROVIDER,
+    sessionId: null,
+    invalidated: false,
     transcript: readTranscript(value?.transcript),
     updatedAt: typeof value?.updatedAt === "string" ? value.updatedAt : new Date(0).toISOString(),
   };
 }
 
-function createLedger(job: AgentRunJob, before: AgentRunLedger["before"]): AgentRunLedger {
+function createLedger(job: AgentRunJob, before: AgentFileSnapshot): AgentRunLedger {
   return {
     version: 1,
     jobId: job.id,
     projectId: job.project.id,
     projectDir: resolve(job.project.dir),
-    provider: job.request.provider,
+    provider: PROVIDER,
     createdAt: new Date().toISOString(),
     status: "running",
     undoCovered: true,
     before,
     changedFiles: [],
   };
-}
-
-/**
- * An edit-oriented request that exits cleanly without touching a file is a
- * failure, not a completed edit. Chat requests are exempt.
- */
-function emptyEditFailure(job: AgentRunJob, changedFileCount: number): string | null {
-  if (job.cancelled || job.request.kind === "chat" || changedFileCount > 0) return null;
-  return `${job.request.provider} finished without changing project files for this ${job.request.kind} request.`;
 }
 
 function errorMessage(error: unknown): string {
@@ -139,13 +134,14 @@ function durationLabel(milliseconds: number): string {
     : `${milliseconds} ms`;
 }
 
+function isEditRequest(job: AgentRunJob): boolean {
+  return job.request.kind !== "chat";
+}
+
 export class AgentRuntime {
   readonly nonce = randomBytes(24).toString("base64url");
   private readonly jobs = new Map<string, AgentRunJob>();
   private readonly locks = new Map<string, string>();
-  private capabilityCache:
-    | { at: number; value: Record<AgentProvider, AgentProviderCapability> }
-    | undefined;
 
   constructor(private readonly adapter: StudioApiAdapter) {}
 
@@ -157,18 +153,12 @@ export class AgentRuntime {
     return this.jobs.get(jobId) ?? null;
   }
 
-  async capabilities(): Promise<Record<AgentProvider, AgentProviderCapability>> {
-    if (this.capabilityCache && Date.now() - this.capabilityCache.at < 10_000) {
-      return this.capabilityCache.value;
-    }
-    const [codex, claude] = await Promise.all([detectProvider("codex"), detectProvider("claude")]);
-    const value = { codex, claude };
-    this.capabilityCache = { at: Date.now(), value };
-    return value;
+  capabilities(): Record<AgentProvider, AgentProviderCapability> {
+    return { tabario: detectProvider() };
   }
 
-  threadPath(projectDir: string, provider: AgentProvider): string {
-    return join(agentStateRoot(), projectKey(projectDir), "threads", `${provider}.json`);
+  threadPath(projectDir: string): string {
+    return join(agentStateRoot(), projectKey(projectDir), "threads", "tabario.json");
   }
 
   ledgerPath(projectDir: string, jobId: string): string {
@@ -176,20 +166,13 @@ export class AgentRuntime {
   }
 
   threads(project: ResolvedProject): AgentThreadSummary[] {
-    return (["codex", "claude"] as const).map((provider) => {
-      const thread = readThread(this.threadPath(project.dir, provider), provider);
-      return {
-        provider,
-        sessionId: thread.sessionId,
-        invalidated: thread.invalidated,
-        transcript: thread.transcript,
-      };
-    });
+    const thread = readThread(this.threadPath(project.dir));
+    return [thread];
   }
 
-  resetThread(project: ResolvedProject, provider: AgentProvider): AgentThreadSummary {
+  resetThread(project: ResolvedProject): AgentThreadSummary {
     const thread: PersistedThread = {
-      provider,
+      provider: PROVIDER,
       sessionId: null,
       invalidated: false,
       transcript: [],
@@ -201,23 +184,22 @@ export class AgentRuntime {
 
   start(project: ResolvedProject, request: AgentRunRequest): AgentRunJob {
     if (this.locks.has(project.id))
-      throw new Error("An agent run is already active for this project.");
-    const jobId = randomUUID();
-    const ledgerPath = this.ledgerPath(project.dir, jobId);
+      throw new Error("Tabario AI is already working on this project.");
+    const id = randomUUID();
     const job: AgentRunJob = {
-      id: jobId,
+      id,
       project,
       request,
-      ledgerPath,
+      ledgerPath: this.ledgerPath(project.dir, id),
       events: [],
       listeners: new Set(),
-      process: null,
+      controller: new AbortController(),
       terminal: false,
       cancelled: false,
     };
-    this.jobs.set(jobId, job);
-    this.locks.set(project.id, jobId);
-    this.emit(job, { type: "status", message: "Snapshotting project sources…" });
+    this.jobs.set(id, job);
+    this.locks.set(project.id, id);
+    this.emit(job, { type: "status", message: "Preparing an isolated project transaction…" });
     void this.execute(job);
     return job;
   }
@@ -226,8 +208,8 @@ export class AgentRuntime {
     const job = this.jobs.get(jobId);
     if (!job || job.terminal) return false;
     job.cancelled = true;
-    this.emit(job, { type: "status", message: "Cancelling agent…" });
-    job.process?.cancel();
+    this.emit(job, { type: "status", message: "Cancelling Tabario AI…" });
+    job.controller.abort();
     return true;
   }
 
@@ -238,42 +220,33 @@ export class AgentRuntime {
     return () => job.listeners.delete(listener);
   }
 
-  async undo(
-    jobId: string,
-  ): Promise<{ conflicts: string[]; findings?: Awaited<ReturnType<typeof lintProject>> }> {
+  async undo(jobId: string) {
     const job = this.jobs.get(jobId);
-    const ledgerPath = job?.ledgerPath;
-    if (!job || !ledgerPath || !job.terminal) throw new Error("Run is not ready to undo.");
-    const ledger = readLedger(ledgerPath);
-    if (!ledger) throw new Error("Run ledger is unavailable.");
-    if (!ledger.undoCovered)
-      throw new Error("Undo is unavailable because unsupported files changed.");
-    const conflicts = undoAgentFiles(job.project.dir, ledger);
-    if (conflicts.length > 0) return { conflicts };
-    ledger.status = "undone";
-    writeLedger(ledgerPath, ledger);
-    this.invalidateThread(job.project.dir, job.request.provider);
-    const findings = await lintProject(this.adapter, job.project.dir);
-    this.emit(job, { type: "lint", findings });
-    this.emit(job, { type: "status", message: "Agent changes were undone." });
-    return { conflicts: [], findings };
+    if (!job || !job.terminal) throw new Error("Run is not ready to undo.");
+    if (this.locks.has(job.project.id))
+      throw new Error("Tabario AI is already working on this project.");
+    const ledger = readLedger(job.ledgerPath);
+    if (!ledger || ledger.status !== "complete")
+      throw new Error("Completed run ledger is unavailable.");
+    this.locks.set(job.project.id, `${job.id}:undo`);
+    try {
+      const conflicts = undoAgentFiles(job.project.dir, ledger);
+      if (conflicts.length > 0) return { conflicts };
+      ledger.status = "undone";
+      writeLedger(job.ledgerPath, ledger);
+      const findings = await lintProject(this.adapter, job.project.dir);
+      this.emit(job, { type: "lint", findings });
+      this.emit(job, { type: "status", message: "Tabario AI changes were undone." });
+      return { conflicts: [], findings };
+    } finally {
+      this.locks.delete(job.project.id);
+    }
   }
 
   private writeThread(projectDir: string, thread: PersistedThread): void {
-    const path = this.threadPath(projectDir, thread.provider);
+    const path = this.threadPath(projectDir);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, `${JSON.stringify(thread, null, 2)}\n`, "utf-8");
-  }
-
-  private invalidateThread(projectDir: string, provider: AgentProvider): void {
-    const path = this.threadPath(projectDir, provider);
-    const thread = readThread(path, provider);
-    this.writeThread(projectDir, {
-      ...thread,
-      sessionId: null,
-      invalidated: true,
-      updatedAt: new Date().toISOString(),
-    });
   }
 
   private emit(job: AgentRunJob, event: Omit<AgentRunEvent, "id" | "at">): void {
@@ -281,264 +254,174 @@ export class AgentRuntime {
     for (const listener of job.listeners) listener();
   }
 
-  private async execute(job: AgentRunJob): Promise<void> {
-    const before = snapshotAgentFiles(job.project.dir);
-    const ledger = createLedger(job, before);
-    writeLedger(job.ledgerPath, ledger);
-
-    const thread = this.prepareThread(job);
-    const run = await this.runProvider(job, thread);
-    const failure = await this.verifyAfterRun(job, before, ledger, run.failure);
-    this.finishRun(job, ledger, failure, run.timedOutMessage);
-  }
-
-  /** Load or reset the provider thread and append this run's user turn. */
   private prepareThread(job: AgentRunJob): PersistedThread {
-    let thread = readThread(
-      this.threadPath(job.project.dir, job.request.provider),
-      job.request.provider,
-    );
-    if (job.request.newThread || thread.invalidated) {
-      thread = this.resetThread(job.project, job.request.provider) as PersistedThread;
-    }
+    let thread = readThread(this.threadPath(job.project.dir));
+    if (job.request.newThread) thread = this.resetThread(job.project) as PersistedThread;
     thread.transcript.push({
       role: "user",
       text: job.request.prompt,
       at: new Date().toISOString(),
       kind: job.request.kind,
     });
+    thread.updatedAt = new Date().toISOString();
     this.writeThread(job.project.dir, thread);
     return thread;
   }
 
-  /**
-   * Idle and absolute-runtime timers for one provider run. A timeout records its
-   * message once, tells Studio the process is stopping, and cancels it; further
-   * timeouts and post-cancellation activity are ignored.
-   */
-  private createRunTimeouts(job: AgentRunJob) {
-    const idleTimeoutMs = timeoutFromEnv(
-      "HYPERFRAMES_AGENT_IDLE_TIMEOUT_MS",
-      DEFAULT_IDLE_TIMEOUT_MS,
-    );
-    const maxRuntimeMs = timeoutFromEnv("HYPERFRAMES_AGENT_MAX_RUNTIME_MS", DEFAULT_MAX_RUNTIME_MS);
-    let idleTimer: ReturnType<typeof setTimeout> | null = null;
-    let maxTimer: ReturnType<typeof setTimeout> | null = null;
-    let timedOutMessage: string | null = null;
-
-    const timeOut = (message: string) => {
-      if (timedOutMessage || job.cancelled) return;
-      timedOutMessage = message;
-      this.emit(job, {
-        type: "status",
-        message: `${job.request.provider} timed out; stopping the process…`,
-      });
-      job.process?.cancel();
-    };
-
-    return {
-      idleTimeoutMs,
-      timedOutMessage: () => timedOutMessage,
-      touchActivity: () => {
-        if (timedOutMessage || job.cancelled) return;
-        if (idleTimer) clearTimeout(idleTimer);
-        idleTimer = setTimeout(
-          () =>
-            timeOut(
-              `${job.request.provider} timed out after ${durationLabel(idleTimeoutMs)} without activity. Supported partial source changes remain visible and can be undone.`,
-            ),
-          idleTimeoutMs,
-        );
-      },
-      startMaxTimer: () => {
-        maxTimer = setTimeout(
-          () =>
-            timeOut(
-              `${job.request.provider} timed out after the ${durationLabel(maxRuntimeMs)} maximum runtime. Supported partial source changes remain visible and can be undone.`,
-            ),
-          maxRuntimeMs,
-        );
-      },
-      clear: () => {
-        if (idleTimer) clearTimeout(idleTimer);
-        if (maxTimer) clearTimeout(maxTimer);
-      },
-    };
-  }
-
-  private async installRegistryItem(job: AgentRunJob): Promise<void> {
-    if (!job.request.registryItem) return;
-    if (!this.adapter.installRegistryBlock) {
-      throw new Error("Registry installation is unavailable.");
-    }
-    this.emit(job, {
-      type: "status",
-      message: `Installing registry item ${job.request.registryItem}…`,
-    });
-    await this.adapter.installRegistryBlock({
-      project: job.project,
-      blockName: job.request.registryItem,
-    });
-  }
-
-  private recordSession(job: AgentRunJob, thread: PersistedThread, sessionId: string): void {
-    thread.sessionId = sessionId;
-    thread.invalidated = false;
-    thread.updatedAt = new Date().toISOString();
-    this.writeThread(job.project.dir, thread);
-  }
-
-  private recordAssistantTurn(job: AgentRunJob, thread: PersistedThread, text: string): void {
+  private recordAssistant(job: AgentRunJob, thread: PersistedThread, text: string): void {
+    if (!text) return;
     this.emit(job, { type: "assistant", text });
     thread.transcript.push({ role: "assistant", text, at: new Date().toISOString() });
     thread.updatedAt = new Date().toISOString();
     this.writeThread(job.project.dir, thread);
   }
 
-  /** Registry install (when requested) plus the provider process itself. */
-  private async runProvider(
-    job: AgentRunJob,
-    thread: PersistedThread,
-  ): Promise<{ failure: string | null; timedOutMessage: string | null }> {
-    const timeouts = this.createRunTimeouts(job);
+  private createTimeouts(job: AgentRunJob) {
+    const idleMs = timeoutFromEnv("HYPERFRAMES_AGENT_IDLE_TIMEOUT_MS", DEFAULT_IDLE_TIMEOUT_MS);
+    const maxMs = timeoutFromEnv("HYPERFRAMES_AGENT_MAX_RUNTIME_MS", DEFAULT_MAX_RUNTIME_MS);
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let reason: string | null = null;
+    const stop = (message: string) => {
+      if (reason || job.cancelled) return;
+      reason = message;
+      job.controller.abort();
+    };
+    const touch = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(
+        () =>
+          stop(
+            `Tabario AI timed out after ${durationLabel(idleMs)} without activity. No staged changes were applied.`,
+          ),
+        idleMs,
+      );
+    };
+    const maxTimer = setTimeout(
+      () =>
+        stop(
+          `Tabario AI exceeded the ${durationLabel(maxMs)} maximum runtime. No staged changes were applied.`,
+        ),
+      maxMs,
+    );
+    touch();
+    return {
+      touch,
+      reason: () => reason,
+      clear: () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        clearTimeout(maxTimer);
+      },
+    };
+  }
+
+  private async installRegistryItem(job: AgentRunJob, stagingDir: string): Promise<void> {
+    if (!job.request.registryItem) return;
+    if (!this.adapter.installRegistryBlock)
+      throw new Error("Registry installation is unavailable.");
+    this.emit(job, { type: "status", message: `Staging ${job.request.registryItem}…` });
+    await this.adapter.installRegistryBlock({
+      project: { ...job.project, dir: stagingDir },
+      blockName: job.request.registryItem,
+    });
+  }
+
+  private async execute(job: AgentRunJob): Promise<void> {
+    const before = snapshotAgentFiles(job.project.dir);
+    const ledger = createLedger(job, before);
+    writeLedger(job.ledgerPath, ledger);
+    const thread = this.prepareThread(job);
+    const stagingRoot = join(agentStateRoot(), projectKey(job.project.dir), "staging");
+    mkdirSync(stagingRoot, { recursive: true });
+    const stagingDir = mkdtempSync(join(stagingRoot, `${job.id}-`));
     let failure: string | null = null;
+    let assistantText = "";
+    const timeouts = this.createTimeouts(job);
+
     try {
-      await this.installRegistryItem(job);
-      if (!job.cancelled) {
-        failure = await this.runProviderProcess(job, thread, timeouts);
+      createAgentStagingProject(job.project.dir, stagingDir);
+      await this.installRegistryItem(job, stagingDir);
+      this.emit(job, { type: "status", message: "Tabario AI is inspecting the timeline…" });
+      const result = await runTabarioModel({
+        adapter: this.adapter,
+        stagingDir,
+        kind: job.request.kind,
+        transcript: thread.transcript,
+        signal: job.controller.signal,
+        onAssistant: (text) => {
+          assistantText = text;
+        },
+        onTool: (message) => this.emit(job, { type: "tool", message }),
+        onActivity: timeouts.touch,
+      });
+      assistantText ||= result.assistantText;
+      if (!job.cancelled && !timeouts.reason()) {
+        failure = await this.validateAndApply(job, before, ledger, stagingDir);
       }
     } catch (error) {
-      failure = errorMessage(error);
+      if (!job.cancelled) failure = timeouts.reason() ?? errorMessage(error);
+    } finally {
+      timeouts.clear();
+      rmSync(stagingDir, { recursive: true, force: true });
     }
-    return { failure, timedOutMessage: timeouts.timedOutMessage() };
+
+    this.recordAssistant(job, thread, assistantText);
+    this.finishRun(job, ledger, failure, timeouts.reason());
   }
 
-  private async runProviderProcess(
+  private async validateAndApply(
     job: AgentRunJob,
-    thread: PersistedThread,
-    timeouts: ReturnType<AgentRuntime["createRunTimeouts"]>,
+    before: AgentFileSnapshot,
+    ledger: AgentRunLedger,
+    stagingDir: string,
   ): Promise<string | null> {
-    this.emit(job, { type: "status", message: `Starting ${job.request.provider}…` });
-    job.process = startProviderRun({
-      provider: job.request.provider,
-      projectDir: job.project.dir,
-      prompt: job.request.prompt,
-      sessionId: thread.sessionId,
-      onSession: (sessionId) => {
-        timeouts.touchActivity();
-        this.recordSession(job, thread, sessionId);
-      },
-      onAssistant: (text) => {
-        timeouts.touchActivity();
-        this.recordAssistantTurn(job, thread, text);
-      },
-      onTool: (message) => {
-        timeouts.touchActivity();
-        this.emit(job, { type: "tool", message });
-      },
-      onDiagnostic: (message) => {
-        timeouts.touchActivity();
-        this.emit(job, { type: "status", message });
-      },
-    });
-    timeouts.touchActivity();
-    timeouts.startMaxTimer();
-    this.emit(job, {
-      type: "status",
-      message: `${job.request.provider} will stop after ${durationLabel(timeouts.idleTimeoutMs)} without activity.`,
-    });
-    const result = await job.process.done;
-    timeouts.clear();
-
-    const timedOut = timeouts.timedOutMessage();
-    if (timedOut) {
-      this.invalidateThread(job.project.dir, job.request.provider);
-      return timedOut;
+    const staged = diffAgentFiles(stagingDir, before);
+    if (!staged.undoCovered)
+      return "Tabario AI staged an unsupported file change; nothing was applied.";
+    if (isEditRequest(job) && staged.changedFiles.length === 0) {
+      return `Tabario AI finished without changing project files for this ${job.request.kind} request.`;
     }
-    if (!job.cancelled && result.code !== 0) {
-      return result.stderr.trim() || `${job.request.provider} exited with code ${result.code}.`;
+    this.emit(job, { type: "status", message: "Linting the staged project…" });
+    const findings = await lintProject(this.adapter, stagingDir);
+    this.emit(job, { type: "lint", findings });
+    if (findings.some((finding) => finding.severity.toLowerCase() === "error")) {
+      return "Staged changes failed lint and were not applied.";
     }
+    if (job.cancelled || job.controller.signal.aborted) return null;
+    if (staged.changedFiles.length === 0) return null;
+    this.emit(job, { type: "status", message: "Applying the validated timeline transaction…" });
+    const conflicts = applyStagedAgentFiles(
+      job.project.dir,
+      stagingDir,
+      before,
+      staged.changedFiles,
+    );
+    if (conflicts.length > 0)
+      return `Project changed while Tabario AI was working: ${conflicts.join(", ")}`;
+    ledger.changedFiles = staged.changedFiles;
+    ledger.completedAt = new Date().toISOString();
+    this.emit(job, { type: "changed-files", files: staged.changedFiles });
     return null;
-  }
-
-  /**
-   * Diff the project against its pre-run snapshot, then lint. Returns the
-   * failure that should be reported — an unsupported-file change always wins,
-   * and an edit request that changed nothing is itself a failure.
-   */
-  private async verifyAfterRun(
-    job: AgentRunJob,
-    before: AgentRunLedger["before"],
-    ledger: AgentRunLedger,
-    runFailure: string | null,
-  ): Promise<string | null> {
-    let failure = runFailure;
-    try {
-      const diff = diffAgentFiles(job.project.dir, before);
-      ledger.changedFiles = diff.changedFiles;
-      ledger.undoCovered = diff.undoCovered;
-      ledger.completedAt = new Date().toISOString();
-      if (diff.changedFiles.length > 0) {
-        this.emit(job, { type: "changed-files", files: diff.changedFiles });
-      }
-      failure ??= emptyEditFailure(job, diff.changedFiles.length);
-      if (!diff.undoCovered) failure = UNSUPPORTED_FILES_FAILURE;
-      this.emit(job, {
-        type: "status",
-        message: diff.changedFiles.length > 0 ? "Linting changed project…" : "Linting project…",
-      });
-      const findings = await lintProject(this.adapter, job.project.dir);
-      this.emit(job, { type: "lint", findings });
-      return failure;
-    } catch (error) {
-      return failure ?? `Post-run verification failed: ${errorMessage(error)}`;
-    }
-  }
-
-  private emitTerminalEvent(
-    job: AgentRunJob,
-    ledger: AgentRunLedger,
-    failure: string | null,
-    timedOutMessage: string | null,
-  ): void {
-    if (!ledger.undoCovered) {
-      ledger.status = "failed";
-      this.emit(job, {
-        type: "failure",
-        message: failure ?? UNSUPPORTED_FILES_FAILURE,
-        critical: true,
-      });
-      return;
-    }
-    if (timedOutMessage) {
-      ledger.status = "failed";
-      this.emit(job, { type: "failure", message: timedOutMessage });
-      return;
-    }
-    if (job.cancelled) {
-      ledger.status = "cancelled";
-      this.emit(job, {
-        type: "cancelled",
-        message: "Agent cancelled; partial changes remain undoable.",
-      });
-      return;
-    }
-    if (failure) {
-      ledger.status = "failed";
-      this.emit(job, { type: "failure", message: failure, critical: !ledger.undoCovered });
-      return;
-    }
-    ledger.status = "complete";
-    this.emit(job, { type: "complete", message: "Agent run complete." });
   }
 
   private finishRun(
     job: AgentRunJob,
     ledger: AgentRunLedger,
     failure: string | null,
-    timedOutMessage: string | null,
+    timeout: string | null,
   ): void {
-    this.emitTerminalEvent(job, ledger, failure, timedOutMessage);
+    if (job.cancelled) {
+      ledger.status = "cancelled";
+      this.emit(job, {
+        type: "cancelled",
+        message: "Tabario AI cancelled. No staged changes were applied.",
+      });
+    } else if (timeout || failure) {
+      ledger.status = "failed";
+      this.emit(job, { type: "failure", message: timeout ?? failure ?? "Tabario AI failed." });
+    } else {
+      ledger.status = "complete";
+      this.emit(job, { type: "complete", message: "Tabario AI finished." });
+    }
     writeLedger(job.ledgerPath, ledger);
     job.terminal = true;
     this.locks.delete(job.project.id);
@@ -551,13 +434,13 @@ export class AgentRuntime {
     if (!existsSync(dir)) return;
     const ledgers = readdirSync(dir)
       .filter((file) => file.endsWith(".json"))
-      .map((file) => ({ file, path: join(dir, file), ledger: readLedger(join(dir, file)) }))
+      .map((file) => ({ path: join(dir, file), ledger: readLedger(join(dir, file)) }))
       .sort((a, b) => (b.ledger?.createdAt ?? "").localeCompare(a.ledger?.createdAt ?? ""));
     for (const old of ledgers.slice(MAX_RUN_LEDGERS)) {
       try {
         unlinkSync(old.path);
       } catch {
-        // Retention cleanup is best effort.
+        /* best effort */
       }
     }
   }

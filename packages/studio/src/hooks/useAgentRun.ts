@@ -1,6 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { AgentChangedFile, AgentProvider, AgentRunEvent } from "@hyperframes/studio-server";
-import { copyTextToClipboard } from "../utils/clipboard";
 import { finishAgentRun, setAgentRunActive, type StudioAgentRequest } from "../utils/agentBridge";
 
 const EVENT_TYPES = [
@@ -71,7 +70,6 @@ export function useAgentRun(options: UseAgentRunOptions) {
   const [changedFiles, setChangedFiles] = useState<AgentChangedFile[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
 
   const activity = useMemo(
@@ -98,13 +96,6 @@ export function useAgentRun(options: UseAgentRunOptions) {
     }),
     [],
   );
-
-  /** Fall back to Copy Prompt when no provider is usable. */
-  const copyPromptFallback = useCallback(async () => {
-    await copyTextToClipboard(generatedPrompt);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
-  }, [generatedPrompt]);
 
   const subscribeToRun = useCallback(
     (id: string) => {
@@ -153,7 +144,7 @@ export function useAgentRun(options: UseAgentRunOptions) {
   const startRun = useCallback(async () => {
     if (!generatedPrompt || busy) return;
     if (!available || !capabilities?.nonce) {
-      await copyPromptFallback();
+      setError("Tabario AI is unavailable. Please try again shortly.");
       return;
     }
     const ready = await beforeRun();
@@ -182,7 +173,6 @@ export function useAgentRun(options: UseAgentRunOptions) {
     beforeRun,
     busy,
     capabilities,
-    copyPromptFallback,
     generatedPrompt,
     onPromptConsumed,
     submitRun,
@@ -229,7 +219,6 @@ export function useAgentRun(options: UseAgentRunOptions) {
     busy,
     changedFiles,
     closeStream,
-    copied,
     error,
     events,
     jobId,

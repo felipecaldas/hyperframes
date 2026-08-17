@@ -38,6 +38,13 @@ const runtimeEnv =
     : {};
 const env = { ...(import.meta.env ?? {}), ...runtimeEnv } as StudioFeatureFlagEnv;
 
+/** Hosted Tabario sessions expose return navigation that also closes the exact session. */
+export const TABARIO_STUDIO_HOSTED = resolveStudioBooleanEnvFlag(
+  env,
+  ["VITE_STUDIO_TABARIO_HOSTED"],
+  false,
+);
+
 // Stage 7 Step 3c: SDK cutover — routes inline-style ops through SDK dispatch
 // instead of the server patch-element API. Default false; enable via
 // VITE_STUDIO_SDK_CUTOVER_ENABLED=true. Requires SDK session to be open.

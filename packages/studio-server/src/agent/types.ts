@@ -1,4 +1,4 @@
-export type AgentProvider = "codex" | "claude";
+export type AgentProvider = "tabario";
 
 export type AgentRequestKind =
   | "catalog"
@@ -71,7 +71,7 @@ export interface AgentThreadSummary {
   }>;
 }
 
-const AGENT_PROVIDERS: readonly AgentProvider[] = ["codex", "claude"];
+const AGENT_PROVIDERS: readonly AgentProvider[] = ["tabario"];
 const AGENT_REQUEST_KINDS: readonly AgentRequestKind[] = [
   "catalog",
   "selection",

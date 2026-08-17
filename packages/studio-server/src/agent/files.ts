@@ -1,5 +1,8 @@
 import {
+  constants,
   existsSync,
+  copyFileSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -7,6 +10,7 @@ import {
   statSync,
   unlinkSync,
   writeFileSync,
+  renameSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -50,7 +54,7 @@ export interface AgentRunLedger {
   jobId: string;
   projectId: string;
   projectDir: string;
-  provider: "codex" | "claude";
+  provider: "tabario";
   createdAt: string;
   completedAt?: string;
   status: "running" | "complete" | "cancelled" | "failed" | "undone";
@@ -65,7 +69,7 @@ function normalizedRelative(projectDir: string, path: string): string | null {
   return rel.split(sep).join("/");
 }
 
-function isSupportedSource(path: string): boolean {
+export function isSupportedAgentSource(path: string): boolean {
   if (path === ".hyperframes/frame-comments.json") return true;
   const dot = path.lastIndexOf(".");
   return dot >= 0 && SOURCE_EXTENSIONS.has(path.slice(dot).toLowerCase());
@@ -99,11 +103,30 @@ export function snapshotAgentFiles(projectDir: string): AgentFileSnapshot {
   const sourceContents: AgentFileSnapshot["sourceContents"] = {};
   for (const path of walkProject(projectDir)) {
     const buffer = readFileSync(join(projectDir, path));
-    const supported = isSupportedSource(path);
+    const supported = isSupportedAgentSource(path);
     files[path] = { hash: hashBuffer(buffer), supported };
     if (supported) sourceContents[path] = buffer.toString("base64");
   }
   return { files, sourceContents };
+}
+
+/** Build an isolated project copy, using copy-on-write cloning when the filesystem supports it. */
+export function createAgentStagingProject(projectDir: string, stagingDir: string): void {
+  mkdirSync(stagingDir, { recursive: true });
+  for (const path of walkProject(projectDir)) {
+    const source = join(projectDir, path);
+    if (lstatSync(source).isSymbolicLink()) continue;
+    const destination = join(stagingDir, path);
+    mkdirSync(dirname(destination), { recursive: true });
+    if (isSupportedAgentSource(path)) {
+      copyFileSync(source, destination);
+      continue;
+    }
+    // COPYFILE_FICLONE attempts a cheap copy-on-write clone and safely falls
+    // back to a regular copy. A hard link would let an in-place staging write
+    // mutate the live project before the transaction commits.
+    copyFileSync(source, destination, constants.COPYFILE_FICLONE);
+  }
 }
 
 export function diffAgentFiles(
@@ -138,7 +161,11 @@ function currentHash(path: string): string | null {
 
 export function undoAgentFiles(projectDir: string, ledger: AgentRunLedger): string[] {
   const conflicts = ledger.changedFiles
-    .filter((file) => currentHash(join(projectDir, file.path)) !== file.afterHash)
+    .filter(
+      (file) =>
+        hasSymlinkInPath(projectDir, file.path) ||
+        currentHash(join(projectDir, file.path)) !== file.afterHash,
+    )
     .map((file) => file.path);
   if (conflicts.length > 0) return conflicts;
 
@@ -150,13 +177,110 @@ export function undoAgentFiles(projectDir: string, ledger: AgentRunLedger): stri
       continue;
     }
     mkdirSync(dirname(abs), { recursive: true });
-    writeFileSync(abs, Buffer.from(before, "base64"));
+    replaceFileAtomically(abs, Buffer.from(before, "base64"));
   }
   removeEmptyDirectories(
     projectDir,
     ledger.changedFiles.map((file) => dirname(file.path)),
   );
   return [];
+}
+
+/**
+ * Commit a validated staging tree to the live project. Every destination is
+ * hash-checked first, individual replacements use same-directory rename, and
+ * a mid-commit filesystem failure restores the pre-run snapshot.
+ */
+export function applyStagedAgentFiles(
+  projectDir: string,
+  stagingDir: string,
+  before: AgentFileSnapshot,
+  changedFiles: AgentChangedFile[],
+): string[] {
+  const conflicts = changedFiles
+    .filter(
+      (file) =>
+        hasSymlinkAncestor(projectDir, file.path) ||
+        currentHash(join(projectDir, file.path)) !== file.beforeHash,
+    )
+    .map((file) => file.path);
+  if (conflicts.length > 0) return conflicts;
+
+  const applied: AgentChangedFile[] = [];
+  try {
+    for (const file of changedFiles) {
+      if (!file.supported) throw new Error(`unsupported staged file: ${file.path}`);
+      const destination = join(projectDir, file.path);
+      if (file.change === "deleted") {
+        if (existsSync(destination)) unlinkSync(destination);
+      } else {
+        mkdirSync(dirname(destination), { recursive: true });
+        replaceFileAtomically(destination, readFileSync(join(stagingDir, file.path)));
+      }
+      applied.push(file);
+    }
+  } catch (error) {
+    restoreSnapshotFiles(projectDir, before, applied);
+    throw error;
+  }
+  return [];
+}
+
+function hasSymlinkAncestor(projectDir: string, relativePath: string): boolean {
+  const parts = relativePath.split("/");
+  let current = resolve(projectDir);
+  for (const part of parts.slice(0, -1)) {
+    current = join(current, part);
+    try {
+      if (lstatSync(current).isSymbolicLink()) return true;
+    } catch {
+      // A missing path component is not a symlink.
+    }
+  }
+  return false;
+}
+
+function hasSymlinkInPath(projectDir: string, relativePath: string): boolean {
+  const parts = relativePath.split("/");
+  let current = resolve(projectDir);
+  for (const part of parts) {
+    current = join(current, part);
+    try {
+      if (lstatSync(current).isSymbolicLink()) return true;
+    } catch {
+      // A missing path component is not a symlink.
+    }
+  }
+  return false;
+}
+
+function replaceFileAtomically(destination: string, content: Buffer): void {
+  const temporary = `${destination}.tabario-${process.pid}-${Date.now()}-${Math.random()
+    .toString(16)
+    .slice(2)}.tmp`;
+  try {
+    writeFileSync(temporary, content);
+    renameSync(temporary, destination);
+  } finally {
+    if (existsSync(temporary)) unlinkSync(temporary);
+  }
+}
+
+function restoreSnapshotFiles(
+  projectDir: string,
+  before: AgentFileSnapshot,
+  files: AgentChangedFile[],
+): void {
+  for (const file of [...files].reverse()) {
+    const destination = join(projectDir, file.path);
+    const content = before.sourceContents[file.path];
+    if (content === undefined) {
+      if (existsSync(destination)) unlinkSync(destination);
+      continue;
+    }
+    mkdirSync(dirname(destination), { recursive: true });
+    replaceFileAtomically(destination, Buffer.from(content, "base64"));
+  }
 }
 
 function removeEmptyDirectories(projectDir: string, dirs: string[]): void {

@@ -58,10 +58,7 @@ afterEach(() => {
 });
 
 describe("AgentDrawer", () => {
-  it("restores provider selection, inspects exact context, and keeps Copy Prompt fallback", async () => {
-    localStorage.setItem("hyperframes:agent-provider:demo", "claude");
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  it("shows one Tabario AI interface, preserves exact context, and has no local-provider fallback", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
@@ -71,13 +68,12 @@ describe("AgentDrawer", () => {
               enabled: true,
               nonce: "nonce",
               providers: {
-                codex: {
-                  installed: false,
+                tabario: {
+                  installed: true,
                   authenticated: false,
                   available: false,
-                  guidance: "Install Codex",
+                  guidance: "Tabario AI is not configured",
                 },
-                claude: { installed: true, authenticated: true, available: true },
               },
             }),
           );
@@ -99,16 +95,17 @@ describe("AgentDrawer", () => {
     });
     await settle();
     act(() => toggleAgentBridge());
-    expect(buttonByText(host, "claude").className).toContain("bg-neutral-200");
+    expect(host.textContent).toContain("Tabario AI");
+    expect(host.textContent).toContain("Tabario AI is not configured");
+    expect(host.textContent).not.toContain("Codex");
+    expect(host.textContent).not.toContain("Claude");
 
     const prompt = "context\nUser addition stays exact";
     act(() => openAgentBridge({ kind: "catalog", prompt, title: "Neon", registryItem: "neon" }));
     expect(host.textContent).toContain("Generated context · Neon");
     expect(host.textContent).toContain(prompt);
-    act(() => buttonByText(host, "codex").click());
-    expect(localStorage.getItem("hyperframes:agent-provider:demo")).toBe("codex");
-    await act(async () => buttonByText(host, "Copy Prompt").click());
-    expect(writeText).toHaveBeenCalledWith(prompt);
+    await act(async () => buttonByText(host, "Unavailable").click());
+    expect(host.textContent).toContain("Tabario AI is unavailable");
     act(() => root.unmount());
   });
 
@@ -121,8 +118,7 @@ describe("AgentDrawer", () => {
             enabled: true,
             nonce: "nonce",
             providers: {
-              codex: { installed: true, authenticated: true, available: true },
-              claude: { installed: true, authenticated: true, available: true },
+              tabario: { installed: true, authenticated: true, available: true },
             },
           }),
         );
@@ -149,8 +145,10 @@ describe("AgentDrawer", () => {
     await settle();
     act(() => toggleAgentBridge());
     act(() => openAgentBridge({ kind: "chat", prompt: "change the title" }));
-    await act(async () => buttonByText(host, "Send to codex").click());
+    await act(async () => buttonByText(host, "Send").click());
     expect(beforeRun).toHaveBeenCalledOnce();
+    const runCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/agent/runs"));
+    expect(JSON.parse(String(runCall?.[1]?.body))).toMatchObject({ provider: "tabario" });
     const source = FakeEventSource.instances[0];
     if (!source) throw new Error("event source missing");
     await act(async () => {

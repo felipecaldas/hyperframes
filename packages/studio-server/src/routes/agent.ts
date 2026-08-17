@@ -48,13 +48,16 @@ function mutationGuard(
   runtime: AgentRuntime,
 ): Response | null {
   if (!isAgentBridgeEnabled(c, adapter))
-    return c.json({ error: "Agent Bridge is available only on loopback Preview." }, 403);
+    return c.json(
+      { error: "Tabario AI is available only through the secured Studio server." },
+      403,
+    );
   if (!isSameOrigin(c)) return c.json({ error: "Cross-origin agent request rejected." }, 403);
   if (!c.req.header("content-type")?.toLowerCase().startsWith("application/json")) {
     return c.json({ error: "Agent mutations require application/json." }, 415);
   }
   if (c.req.header(NONCE_HEADER) !== runtime.nonce) {
-    return c.json({ error: "Invalid Agent Bridge nonce." }, 403);
+    return c.json({ error: "Invalid Tabario AI session nonce." }, 403);
   }
   return null;
 }
@@ -124,7 +127,7 @@ export function registerAgentRoutes(
     if (!isAgentBridgeEnabled(c, adapter) || !isSameOrigin(c)) {
       return c.json({
         enabled: false,
-        reason: "Agent Bridge is disabled for hosted or LAN-bound Studio instances.",
+        reason: "Tabario AI is disabled when Studio is not behind its secured loopback server.",
         providers: {},
       });
     }
@@ -133,7 +136,7 @@ export function registerAgentRoutes(
 
   api.get("/projects/:id/agent/threads", async (c) => {
     if (!isAgentBridgeEnabled(c, adapter) || !isSameOrigin(c))
-      return c.json({ error: "Agent Bridge unavailable." }, 403);
+      return c.json({ error: "Tabario AI unavailable." }, 403);
     const project = await adapter.resolveProject(c.req.param("id"));
     if (!project) return c.json({ error: "Project not found" }, 404);
     return c.json({ threads: runtime.threads(project) });
@@ -144,7 +147,7 @@ export function registerAgentRoutes(
     if (!guarded.ok) return guarded.response;
     const record = asRecord(guarded.body);
     if (!isAgentProvider(record?.provider)) return c.json({ error: "Invalid provider" }, 400);
-    return c.json({ thread: runtime.resetThread(guarded.project, record.provider) });
+    return c.json({ thread: runtime.resetThread(guarded.project) });
   });
 
   api.post("/projects/:id/agent/runs", async (c) => {
@@ -176,7 +179,7 @@ export function registerAgentRoutes(
 
   api.get("/agent/runs/:jobId/events", (c) => {
     if (!isAgentBridgeEnabled(c, adapter) || !isSameOrigin(c))
-      return c.json({ error: "Agent Bridge unavailable." }, 403);
+      return c.json({ error: "Tabario AI unavailable." }, 403);
     const job = runtime.getJob(c.req.param("jobId"));
     if (!job) return c.json({ error: "Run not found" }, 404);
     const lastId = Number(c.req.header("last-event-id") ?? "0");

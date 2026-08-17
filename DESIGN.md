@@ -1,5 +1,16 @@
 # HyperFrames Design System & Style Guide
 
+## Tabario Studio fork contract
+
+- Hosted product name and browser title: **Tabario Studio**.
+- Preserve HyperFrames' existing dark, flat editor chrome, compact typography, borders, keyboard behavior, and visible focus treatment.
+- The header exposes one clearly labeled **Tabario AI** action; hosted users never choose or configure local Codex/Claude providers.
+- The AI drawer keeps the chat transcript primary and collapses technical activity and lint detail behind disclosure controls.
+- Busy AI runs replace Send with Cancel. A successful source transaction exposes Undo and refreshes the project once.
+- Hosted sessions show **Go to Tabario** beside project identity. It stops the session before returning to the exact initiating Tabario page; local preview hides it.
+- Use native buttons and text labels for all three critical actions: Send, Cancel/Undo, and Go to Tabario.
+- Errors remain in context and never imply that staged changes reached the live timeline when lint, conflict, cancellation, or timeout blocked apply.
+
 Use this guide to configure Mintlify docs or any other platform to match the HyperFrames brand.
 
 ---

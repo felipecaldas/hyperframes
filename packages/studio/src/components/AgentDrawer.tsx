@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Robot, X, Copy, ArrowCounterClockwise, Stop, Plus } from "@phosphor-icons/react";
+import { Robot, X, ArrowCounterClockwise, Stop, Plus } from "@phosphor-icons/react";
 import type {
   AgentChangedFile,
   AgentProvider,
@@ -139,7 +139,7 @@ function AgentNotices({
   available: boolean;
 }) {
   if (!capabilities?.enabled) {
-    return <Notice>{capabilities?.reason ?? "Checking local agents…"}</Notice>;
+    return <Notice>{capabilities?.reason ?? "Checking Tabario AI…"}</Notice>;
   }
   if (available) return null;
   return (
@@ -153,8 +153,6 @@ interface AgentComposerProps {
   onChatChange: (value: string) => void;
   busy: boolean;
   available: boolean;
-  copied: boolean;
-  provider: AgentProvider;
   generatedPrompt: string;
   showUndo: boolean;
   onStart: () => void;
@@ -162,14 +160,9 @@ interface AgentComposerProps {
   onClearRequest: () => void;
 }
 
-function sendLabel(copied: boolean, available: boolean, provider: AgentProvider): string {
-  if (copied) return "Copied";
-  return available ? `Send to ${provider}` : "Copy Prompt";
-}
-
 /** Prompt composer plus the run/cancel/undo actions. */
 function AgentComposer(props: AgentComposerProps) {
-  const { request, chat, onChatChange, busy, available, copied, provider } = props;
+  const { request, chat, onChatChange, busy, available } = props;
   return (
     <footer className="space-y-2 border-t border-neutral-800 p-3">
       {!request && (
@@ -194,8 +187,7 @@ function AgentComposer(props: AgentComposerProps) {
             disabled={!props.generatedPrompt}
             className="flex flex-1 items-center justify-center gap-1 rounded bg-studio-accent py-2 text-xs font-medium text-neutral-950 disabled:opacity-40"
           >
-            {available ? <Robot size={13} /> : <Copy size={13} />}{" "}
-            {sendLabel(copied, available, provider)}
+            <Robot size={13} /> {available ? "Send" : "Unavailable"}
           </button>
         )}
         {props.showUndo && (
@@ -219,17 +211,9 @@ function AgentComposer(props: AgentComposerProps) {
   );
 }
 
-function providerStorageKey(projectId: string): string {
-  return `hyperframes:agent-provider:${projectId}`;
-}
-
-function readStoredProvider(projectId: string): AgentProvider {
-  return localStorage.getItem(providerStorageKey(projectId)) === "claude" ? "claude" : "codex";
-}
-
 export function AgentDrawer({ projectId, beforeRun, onRefresh }: AgentDrawerProps) {
   const [open, setOpen] = useState(false);
-  const [provider, setProvider] = useState<AgentProvider>(() => readStoredProvider(projectId));
+  const provider: AgentProvider = "tabario";
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
   const [threads, setThreads] = useState<AgentThreadSummary[]>([]);
   const [request, setRequest] = useState<StudioAgentRequest | null>(null);
@@ -243,7 +227,6 @@ export function AgentDrawer({ projectId, beforeRun, onRefresh }: AgentDrawerProp
   }, [projectId]);
 
   useEffect(() => {
-    setProvider(readStoredProvider(projectId));
     setCapabilities(null);
     setThreads([]);
     fetch(`/api/projects/${encodeURIComponent(projectId)}/agent/capabilities`)
@@ -252,7 +235,7 @@ export function AgentDrawer({ projectId, beforeRun, onRefresh }: AgentDrawerProp
       .catch(() =>
         setCapabilities({
           enabled: false,
-          reason: "Agent Bridge server unavailable.",
+          reason: "Tabario AI server unavailable.",
           providers: {},
         }),
       );
@@ -273,7 +256,6 @@ export function AgentDrawer({ projectId, beforeRun, onRefresh }: AgentDrawerProp
     busy,
     changedFiles,
     closeStream,
-    copied,
     error,
     events,
     jobId,
@@ -307,17 +289,12 @@ export function AgentDrawer({ projectId, beforeRun, onRefresh }: AgentDrawerProp
   );
   useEffect(() => closeStream, [closeStream]);
 
-  const selectProvider = (next: AgentProvider) => {
-    setProvider(next);
-    localStorage.setItem(providerStorageKey(projectId), next);
-  };
-
   if (!open) return null;
   return (
     <aside className="fixed right-0 top-10 bottom-0 z-[95] flex w-[400px] flex-col border-l border-neutral-800 bg-neutral-950 shadow-2xl">
       <header className="flex items-center gap-2 border-b border-neutral-800 px-3 py-2">
         <Robot size={17} className="text-studio-accent" />
-        <strong className="text-xs text-neutral-200">Agent</strong>
+        <strong className="text-xs text-neutral-200">Tabario AI</strong>
         <div className="ml-auto flex items-center gap-1">
           <button
             className="rounded p-1 text-neutral-500 hover:bg-neutral-800"
@@ -335,17 +312,6 @@ export function AgentDrawer({ projectId, beforeRun, onRefresh }: AgentDrawerProp
           </button>
         </div>
       </header>
-      <div className="flex gap-1 border-b border-neutral-800 p-2">
-        {(["codex", "claude"] as const).map((item) => (
-          <button
-            key={item}
-            onClick={() => selectProvider(item)}
-            className={`flex-1 rounded px-2 py-1.5 text-[11px] capitalize ${provider === item ? "bg-neutral-200 text-neutral-950" : "bg-neutral-900 text-neutral-400"}`}
-          >
-            {item}
-          </button>
-        ))}
-      </div>
       <div className="flex-1 space-y-3 overflow-y-auto p-3">
         <AgentNotices capabilities={capabilities} provider={provider} available={available} />
         <AgentTranscript thread={thread} events={events} />
@@ -373,8 +339,6 @@ export function AgentDrawer({ projectId, beforeRun, onRefresh }: AgentDrawerProp
         onChatChange={setChat}
         busy={busy}
         available={available}
-        copied={copied}
-        provider={provider}
         generatedPrompt={generatedPrompt}
         showUndo={Boolean(jobId) && !busy && changedFiles.length > 0}
         onStart={() => void startRun()}

@@ -60,6 +60,11 @@ const ALLOWED_HOSTS = new Set([
   "github.com",
   "docs.hyperframes.com",
   "hyperframes.com",
+  // First-party Studio UI plus the server-side LLM endpoint. Neither URL is
+  // fetched by customer project code; OpenRouter is called only by Studio's
+  // constrained server-side Tabario AI provider.
+  "studio.tabario.com",
+  "openrouter.ai",
   // Test-only sentinels that are never fetched.
   "media.invalid",
   "studio.local",

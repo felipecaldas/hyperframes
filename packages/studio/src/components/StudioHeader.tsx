@@ -1,4 +1,4 @@
-import { useRef, type MouseEvent } from "react";
+import { useRef, useState, type MouseEvent } from "react";
 import { RotateCcw, RotateCw, Camera } from "../icons/SystemIcons";
 import { getHistoryShortcutLabel } from "../utils/studioHelpers";
 import { useStudioShellContext } from "../contexts/StudioContext";
@@ -6,8 +6,9 @@ import { usePanelLayoutContext } from "../contexts/PanelLayoutContext";
 import { useViewMode, type StudioViewMode } from "../contexts/ViewModeContext";
 import { trackStudioEvent } from "../utils/studioTelemetry";
 import { Tooltip } from "./ui";
-import { Robot } from "@phosphor-icons/react";
+import { ArrowLeft, Robot } from "@phosphor-icons/react";
 import { toggleAgentBridge } from "../utils/agentBridge";
+import { TABARIO_STUDIO_HOSTED } from "./editor/manualEditingAvailability";
 
 export interface StudioHeaderProps {
   captureFrameHref: string;
@@ -231,6 +232,32 @@ export function StudioHeader({
   // the shareable Studio URL, so a dead click would rewrite a link.
   const { effectiveRightCollapsed, setRightCollapsed, setRightPanelTab } = usePanelLayoutContext();
   const isRendering = renderQueue.isRendering;
+  const [returningToTabario, setReturningToTabario] = useState(false);
+  const [returnError, setReturnError] = useState<string | null>(null);
+
+  const returnToTabario = async () => {
+    if (returningToTabario) return;
+    setReturningToTabario(true);
+    setReturnError(null);
+    try {
+      const response = await fetch("/api/tabario/session/exit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const body = (await response.json().catch(() => null)) as {
+        return_url?: string;
+        error?: string;
+      } | null;
+      if (!response.ok || !body?.return_url) {
+        throw new Error(body?.error ?? "Could not return to Tabario.");
+      }
+      window.location.assign(body.return_url);
+    } catch (error) {
+      setReturnError(error instanceof Error ? error.message : "Could not return to Tabario.");
+      setReturningToTabario(false);
+    }
+  };
 
   return (
     <div className="flex items-center justify-between h-10 px-3 bg-neutral-900 border-b border-neutral-800 flex-shrink-0">
@@ -241,18 +268,33 @@ export function StudioHeader({
           |
         </span>
         <span className="text-[11px] font-medium text-neutral-300">{projectId}</span>
+        {TABARIO_STUDIO_HOSTED && (
+          <Tooltip
+            label={returnError ?? "Close this Studio session and return to this video in Tabario"}
+            side="bottom"
+          >
+            <button
+              type="button"
+              onClick={() => void returnToTabario()}
+              disabled={returningToTabario}
+              className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200 disabled:opacity-50"
+            >
+              <ArrowLeft size={13} /> {returningToTabario ? "Returning…" : "Go to Tabario"}
+            </button>
+          </Tooltip>
+        )}
       </div>
       {/* Center: storyboard / preview toggle */}
       <ViewModeToggle />
       {/* Right: toolbar buttons */}
       <div className="flex items-center gap-1.5">
-        <Tooltip label="Open local Codex or Claude agent" side="bottom">
+        <Tooltip label="Ask Tabario AI to change this timeline" side="bottom">
           <button
             type="button"
             onClick={toggleAgentBridge}
             className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
           >
-            <Robot size={14} /> Agent
+            <Robot size={14} /> Tabario AI
           </button>
         </Tooltip>
         <Tooltip
