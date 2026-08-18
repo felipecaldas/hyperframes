@@ -19,52 +19,20 @@ import {
   isRuntimeDurationAdapter,
 } from "./timeline-adapters.js";
 
-declare const __HYPERFRAMES_RUNTIME_CDN_URL__: string;
-
-// ---------------------------------------------------------------------------
-// Tabario fork (TAB-746) — the fallback runtime comes from our own origin.
-//
-// Upstream's fallback was `runtimeCdnUrlForVersion("0.0.0-dev")`, i.e.
-// `https://cdn.jsdelivr.net/npm/@hyperframes/core@0.0.0-dev/...`. Two things
-// were wrong with it, and the second is why the function is gone rather than
-// merely unused:
-//
-//   1. It is third-party egress from a customer's browser, which TAB-697
-//      removed everywhere else in the Studio surface. It is unpinned code with
-//      no `integrity` attribute, injected into the page the customer is
-//      watching.
-//   2. It could never have worked. The `__HYPERFRAMES_RUNTIME_CDN_URL__`
-//      define is set by `packages/player/tsup.config.ts` only. Studio does not
-//      define it — `packages/studio/vite.config.ts` aliases this package to its
-//      SOURCE — so in the Studio bundle the `typeof` check is false and the
-//      fallback resolved to the literal `0.0.0-dev`, which is a dev sentinel
-//      and not a published version. The injected script 404'd every time.
-//
-// `/api/runtime.js` is studio-server's existing route for exactly these bytes
-// (`packages/cli/src/server/studioServer.ts:714`); it is what the preview route
-// already injects into every preview and sub-composition document, and it
-// serves the packed runtime the renderer itself uses. Same version by
-// construction, which a CDN URL cannot promise.
-//
-// The `typeof` branch is kept so the standalone `hyperframes-player.global.js`
-// build (served by `play` / `present`, local developer tools outside this
-// fork's egress scope) keeps upstream's behaviour unchanged.
-// ---------------------------------------------------------------------------
-const SAME_ORIGIN_RUNTIME_URL = "/api/runtime.js";
-
-const RUNTIME_URL =
-  typeof __HYPERFRAMES_RUNTIME_CDN_URL__ === "string"
-    ? __HYPERFRAMES_RUNTIME_CDN_URL__
-    : SAME_ORIGIN_RUNTIME_URL;
+import { RUNTIME_CDN_URL } from "./runtime-url.js";
 
 /**
  * What `_injectRuntime` will actually set as `script.src`, exposed so a test
  * can assert it rather than infer it from the source. Under vitest no define is
  * applied, which is the same condition the Studio bundle builds under — so this
  * asserts precisely the path that used to resolve to a 404'ing CDN URL.
+ *
+ * Tabario fork (TAB-746). The substance moved to `runtime-url.ts` on the v0.8.1
+ * merge (TAB-783), because upstream added a second injection site that reads
+ * the same constant. See that file for the reasoning.
  */
 export function runtimeUrlForFallbackInjection(): string {
-  return RUNTIME_URL;
+  return RUNTIME_CDN_URL;
 }
 
 export interface ProbeResult {
@@ -218,7 +186,7 @@ export class CompositionProbe {
       const doc = this._iframe.contentDocument;
       if (!doc) return;
       const script = doc.createElement("script");
-      script.src = RUNTIME_URL;
+      script.src = RUNTIME_CDN_URL;
       (doc.head || doc.documentElement).appendChild(script);
       this._callbacks.onRuntimeInjected?.();
     } catch {

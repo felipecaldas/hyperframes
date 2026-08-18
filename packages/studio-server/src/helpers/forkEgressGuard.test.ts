@@ -92,6 +92,26 @@ const JUSTIFIED_UNREACHABLE: Record<string, string> = {
     "studio-server only: helpers/googleFontProxy.ts fetches css2 server-side.",
   "fonts.gstatic.com":
     "studio-server only: helpers/googleFontProxy.ts proxies font binaries server-side.",
+  // Added on the v0.8.1 merge (TAB-783). Upstream #3314 added a notice offering
+  // to install FFmpeg before an export fails.
+  //
+  // This one is justified on a different basis than the others, and the
+  // difference matters: it is not a dependency that could be re-pointed at our
+  // origin, so the guard's usual remedy does not apply. It is an
+  // `<a href target="_blank" rel="noreferrer">` in
+  // studio/src/components/renders/FfmpegRequiredNotice.tsx — a hyperlink, not a
+  // subresource. The page fetches no bytes from it; nothing reaches ffmpeg.org
+  // unless the customer clicks, which is ordinary navigation and outside the
+  // scope this guard defends (silent egress from the page).
+  //
+  // Belt and braces: the notice renders only when the server reports no usable
+  // FFmpeg, and the compositor image installs it (Dockerfile `ffmpeg`, verified
+  // as /usr/bin/ffmpeg 5.1.9 in the running container), so the branch is dead
+  // in Tabario's deployment regardless.
+  "ffmpeg.org":
+    "studio only: an <a href> download link in renders/FfmpegRequiredNotice.tsx, not a subresource — " +
+    "no request is made without a user click. Also unreachable in practice: the notice renders only " +
+    "when the server reports no FFmpeg, and the compositor image ships it.",
 };
 
 function sourceFiles(dir: string): string[] {
