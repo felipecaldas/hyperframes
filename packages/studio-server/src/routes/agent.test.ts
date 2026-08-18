@@ -9,6 +9,9 @@ import { createStudioApi } from "../createStudioApi.js";
 import type { StudioApiAdapter } from "../types.js";
 
 const INITIAL_HTML = '<html data-composition-id="fixture"><body>before</body></html>\n';
+/** A project that already fails lint, as every real one does (TAB-780). */
+const INHERITED_HTML =
+  '<html data-composition-id="fixture"><body>INHERITED_ERROR before</body></html>\n';
 
 function completion(content: string, toolCalls: unknown[] = []): Response {
   return new Response(
@@ -32,15 +35,36 @@ function fixture() {
   return { root, projectDir };
 }
 
+/**
+ * Seed the shared fixture project with HTML of our choosing.
+ *
+ * TAB-780's cases need a project that *already* fails lint before the run, which
+ * is the situation in production — sub-compositions are linted without the
+ * parent that supplies their runtime, so every real project starts non-clean.
+ */
+function seedProject(setupDir: string, html: string): string {
+  writeFileSync(join(setupDir, "index.html"), html);
+  return createHash("sha256").update(html).digest("hex");
+}
+
 function adapter(projectDir: string): StudioApiAdapter {
   return {
     listProjects: () => [{ id: "demo", dir: projectDir }],
     resolveProject: (id) => (id === "demo" ? { id, dir: projectDir } : null),
     bundle: () => null,
     lint: (html) => ({
-      findings: html.includes("LINT_ERROR")
-        ? [{ severity: "error", message: "fixture lint error" }]
-        : [],
+      // INHERITED_ERROR stands in for a lint error the project already had —
+      // in production that is every `compositions/scene-N.html`, which reports
+      // "uses GSAP but no GSAP script is loaded" because sub-compositions are
+      // linted without the parent that supplies their runtime.
+      findings: [
+        ...(html.includes("LINT_ERROR")
+          ? [{ severity: "error", message: "fixture lint error" }]
+          : []),
+        ...(html.includes("INHERITED_ERROR")
+          ? [{ severity: "error", message: "pre-existing fixture error" }]
+          : []),
+      ],
     }),
     runtimeUrl: "/runtime.js",
     rendersDir: () => join(projectDir, "renders"),
@@ -234,8 +258,93 @@ describe("Tabario AI API", () => {
     const stream = await events(app, jobId);
 
     expect(stream).toContain("event: failure");
-    expect(stream).toContain("failed lint and were not applied");
+    expect(stream).toContain("introduced lint errors and were not applied");
+    // The message names what it introduced, so the user is not left to guess
+    // which of the project's errors stopped their edit.
+    expect(stream).toContain("fixture lint error");
     expect(readFileSync(join(setup.projectDir, "index.html"), "utf-8")).toBe(INITIAL_HTML);
+  });
+
+  /**
+   * TAB-780. The gate compared the staged tree against nothing, so any error the
+   * project already carried held it permanently shut. In production that was six
+   * of them on an untouched project — Tabario AI could not apply anything, ever.
+   */
+  it("applies an edit to a project that already fails lint", async () => {
+    const hash = seedProject(setup.projectDir, INHERITED_HTML);
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          completion("", [
+            toolCall("write", "write_file", {
+              path: "index.html",
+              content: INHERITED_HTML.replace("before", "after"),
+              expected_hash: hash,
+            }),
+          ]),
+        )
+        .mockResolvedValueOnce(completion("Made the requested change.")),
+    );
+    const app = createStudioApi(adapter(setup.projectDir));
+    const token = await nonce(app);
+    const jobId = await start(app, token, "Change it", { kind: "timeline" });
+    const stream = await events(app, jobId);
+
+    expect(stream).not.toContain("event: failure");
+    expect(readFileSync(join(setup.projectDir, "index.html"), "utf-8")).toContain("after");
+  });
+
+  it("still refuses an edit that adds a new error to an already-failing project", async () => {
+    const hash = seedProject(setup.projectDir, INHERITED_HTML);
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          completion("", [
+            toolCall("write", "write_file", {
+              path: "index.html",
+              content: INHERITED_HTML.replace("before", "LINT_ERROR"),
+              expected_hash: hash,
+            }),
+          ]),
+        )
+        .mockResolvedValueOnce(completion("Made the requested change.")),
+    );
+    const app = createStudioApi(adapter(setup.projectDir));
+    const token = await nonce(app);
+    const jobId = await start(app, token, "Break it", { kind: "timeline" });
+    const stream = await events(app, jobId);
+
+    expect(stream).toContain("event: failure");
+    // Read the failure message itself rather than the whole stream: the `lint`
+    // event legitimately reports every finding it saw, including inherited ones.
+    // What matters is that the *refusal* names only what this run introduced,
+    // so the user is not sent chasing an error that was already there.
+    const failure = stream
+      .split("\n")
+      .filter((line) => line.startsWith("data:") && line.includes('"type":"failure"'))
+      .join("");
+    expect(failure).toContain("fixture lint error");
+    expect(failure).not.toContain("pre-existing fixture error");
+    expect(readFileSync(join(setup.projectDir, "index.html"), "utf-8")).toContain("before");
+  });
+
+  it("does not report a staged-changes failure for a question that stages nothing", async () => {
+    seedProject(setup.projectDir, INHERITED_HTML);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValueOnce(completion("There is no video between 4s and 7s because …")),
+    );
+    const app = createStudioApi(adapter(setup.projectDir));
+    const token = await nonce(app);
+    const jobId = await start(app, token, "Why is there a gap?", { kind: "chat" });
+    const stream = await events(app, jobId);
+
+    expect(stream).not.toContain("were not applied");
+    expect(stream).not.toContain("event: failure");
   });
 
   it("cancels an in-flight model call without applying staged work", async () => {

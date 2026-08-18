@@ -73,9 +73,33 @@ function modelName(): string {
   );
 }
 
+/**
+ * TAB-781: say what the files *are*, not just that they can be read.
+ *
+ * Asked why there was no video between 4s and 7s, the model answered that its
+ * "capabilities are limited to file operations and project validation" and that
+ * it had no access to timeline or media information. Every tool it needed was
+ * already in its hands, and this prompt already told it to answer questions —
+ * but a tool list of read/write/search reads as a *domain* of file management
+ * unless something says otherwise. It declined a question it could have
+ * answered with one `read_file`.
+ *
+ * So the project's structure is stated outright. Nothing here widens what the
+ * agent may write; it only removes the reason it had to believe it could not
+ * look.
+ */
 function systemPrompt(kind: AgentRequestKind): string {
   return `You are Tabario AI inside Tabario Studio. You are editing one isolated HyperFrames project.
 The user's request kind is ${kind}. Inspect the project before changing it. Use only the provided tools.
+
+A HyperFrames project's timeline IS its HTML — reading the files is how you inspect the video:
+- \`index.html\` is the host timeline. Every timed element carries \`data-start\` and \`data-duration\` in seconds, plus \`data-track-index\` for its layer.
+- Scenes are mounted from \`compositions/*.html\` via \`data-composition-src\`; their own timings are relative to where the parent mounts them.
+- Media live in \`assets/\` and are referenced by \`<video>\`, \`<img>\` and \`<audio>\` elements; captions are text elements on their own track.
+- Motion is the GSAP block in \`index.html\`: \`tl.to\`, \`tl.fromTo\` and \`tl.set\` calls, each with a position in seconds.
+
+So questions about what is on screen, when, for how long, or why something is missing are answerable from the source. To answer one, read \`index.html\` and any mounted compositions and reason over those attributes — give concrete element ids and time ranges. Never say you cannot see the timeline or the media; if something genuinely is not in the files, say what you looked at and what was absent.
+
 Never invent file contents or paths. Never embed remote assets, secrets, or network calls in project code.
 Preserve the existing template, media references, duration, captions, and voiceover unless the user asks to change them.
 All edits are staged and linted before Studio applies them. Call validate_project after edits and repair lint errors.
@@ -84,21 +108,32 @@ End with a concise explanation of what changed or what you found.`;
 }
 
 const tools = [
-  tool("list_files", "List editable project source files and their hashes.", {
-    type: "object",
-    properties: { query: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 200 } },
-    additionalProperties: false,
-  }),
-  tool("read_file", "Read an editable source file.", {
-    type: "object",
-    properties: {
-      path: { type: "string" },
-      offset: { type: "integer", minimum: 0 },
-      limit: { type: "integer", minimum: 1, maximum: MAX_READ_CHARS },
+  tool(
+    "list_files",
+    "List editable project source files and their hashes — index.html is the host timeline, compositions/*.html are the scenes it mounts.",
+    {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        limit: { type: "integer", minimum: 1, maximum: 200 },
+      },
+      additionalProperties: false,
     },
-    required: ["path"],
-    additionalProperties: false,
-  }),
+  ),
+  tool(
+    "read_file",
+    "Read an editable source file. This is how you inspect the timeline: element timings, media references, captions and GSAP motion all live in the project HTML.",
+    {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        offset: { type: "integer", minimum: 0 },
+        limit: { type: "integer", minimum: 1, maximum: MAX_READ_CHARS },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+  ),
   tool("search_files", "Search editable source files for literal text.", {
     type: "object",
     properties: { query: { type: "string" }, path: { type: "string" } },

@@ -71,6 +71,49 @@ describe("Tabario AI provider", () => {
     });
   });
 
+  /**
+   * TAB-781. The model refused a timeline question — "my capabilities are
+   * limited to file operations" — while holding every tool needed to answer it.
+   * The prompt permitted questions but never said the HTML *is* the timeline, so
+   * a tool list of read/write/search read as a domain of file management.
+   *
+   * Asserted on the request actually sent, not on a constant, so a refactor that
+   * stops sending the guidance fails here rather than in a user's session.
+   */
+  it("tells the model that the project HTML is the timeline", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(completion("An answer."));
+
+    await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [
+        {
+          role: "user",
+          text: "why is there no video between 4 and 7 seconds?",
+          at: new Date().toISOString(),
+        },
+      ],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    const body = JSON.parse(String((fetchImpl.mock.calls[0]?.[1] as RequestInit)?.body));
+    const system = body.messages.find((message: { role: string }) => message.role === "system");
+    expect(system.content).toContain("timeline IS its HTML");
+    // The attributes a timing question is actually answered from.
+    expect(system.content).toContain("data-start");
+    expect(system.content).toContain("data-duration");
+    expect(system.content).toContain("data-composition-src");
+    // And the explicit instruction not to plead blindness.
+    expect(system.content).toContain("Never say you cannot see the timeline");
+  });
+
   it("edits only through source tools and returns the final assistant response", async () => {
     const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
     writeFileSync(join(root, "index.html"), HTML);

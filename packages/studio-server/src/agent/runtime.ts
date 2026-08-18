@@ -134,6 +134,45 @@ function durationLabel(milliseconds: number): string {
     : `${milliseconds} ms`;
 }
 
+/** A finding's identity for baseline comparison — file, severity and message. */
+function findingKey(finding: { severity: string; message: string; file?: string }): string {
+  return `${finding.file ?? ""}::${finding.severity.toLowerCase()}::${finding.message}`;
+}
+
+/**
+ * The `error` findings present after the run that were not present before it.
+ *
+ * Counted by identity rather than by tally: an edit that fixes one inherited
+ * error and introduces a different one nets to zero, and a count would wave it
+ * through. Duplicates of the same message in one file are matched
+ * one-for-one, so going from one occurrence to three still reports two.
+ */
+async function introducedErrors(
+  adapter: StudioApiAdapter,
+  projectDir: string,
+  staged: Array<{ severity: string; message: string; file?: string }>,
+): Promise<Array<{ severity: string; message: string; file?: string }>> {
+  const stagedErrors = staged.filter((finding) => finding.severity.toLowerCase() === "error");
+  if (stagedErrors.length === 0) return [];
+
+  const baseline = await lintProject(adapter, projectDir);
+  const remaining = new Map<string, number>();
+  for (const finding of baseline) {
+    if (finding.severity.toLowerCase() !== "error") continue;
+    const key = findingKey(finding);
+    remaining.set(key, (remaining.get(key) ?? 0) + 1);
+  }
+
+  const introduced: Array<{ severity: string; message: string; file?: string }> = [];
+  for (const finding of stagedErrors) {
+    const key = findingKey(finding);
+    const left = remaining.get(key) ?? 0;
+    if (left > 0) remaining.set(key, left - 1);
+    else introduced.push(finding);
+  }
+  return introduced;
+}
+
 function isEditRequest(job: AgentRunJob): boolean {
   return job.request.kind !== "chat";
 }
@@ -377,14 +416,37 @@ export class AgentRuntime {
     const staged = diffAgentFiles(stagingDir, before);
     if (!staged.undoCovered)
       return "Tabario AI staged an unsupported file change; nothing was applied.";
-    if (isEditRequest(job) && staged.changedFiles.length === 0) {
-      return `Tabario AI finished without changing project files for this ${job.request.kind} request.`;
+    // Ahead of the lint gate, and for every request kind — not only edits.
+    // A question stages nothing, and falling through from here used to report
+    // "Staged changes failed lint" about changes that did not exist, next to an
+    // answer that had changed nothing. There is also nothing to lint.
+    if (staged.changedFiles.length === 0) {
+      return isEditRequest(job)
+        ? `Tabario AI finished without changing project files for this ${job.request.kind} request.`
+        : null;
     }
     this.emit(job, { type: "status", message: "Linting the staged project…" });
     const findings = await lintProject(this.adapter, stagingDir);
     this.emit(job, { type: "lint", findings });
-    if (findings.some((finding) => finding.severity.toLowerCase() === "error")) {
-      return "Staged changes failed lint and were not applied.";
+    // Gate on what this run *introduced*, never on what it inherited.
+    //
+    // `lintProject` lints each HTML file on its own, so a mounted
+    // sub-composition is judged without the parent that supplies its runtime:
+    // every `compositions/scene-N.html` reports "uses GSAP but no GSAP script is
+    // loaded" while whole-project `hyperframes check` passes with zero errors.
+    // Comparing against nothing therefore held the gate permanently shut — six
+    // inherited errors on an untouched project meant Tabario AI could never
+    // apply anything to any project with scenes.
+    //
+    // The baseline is linted from the pre-run tree rather than recomputed from
+    // the staged one, because the staged tree already contains the change being
+    // judged and would absorb the very error this is meant to catch.
+    const introduced = await introducedErrors(this.adapter, job.project.dir, findings);
+    if (introduced.length > 0) {
+      const summary = introduced
+        .map((finding) => `${finding.file ?? "project"}: ${finding.message}`)
+        .join("; ");
+      return `Staged changes introduced lint errors and were not applied — ${summary}`;
     }
     if (job.cancelled || job.controller.signal.aborted) return null;
     if (staged.changedFiles.length === 0) return null;
