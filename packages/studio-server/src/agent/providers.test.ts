@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { detectProvider, runTabarioModel } from "./providers.js";
@@ -188,5 +188,152 @@ describe("Tabario AI provider", () => {
     );
     expect(JSON.parse(toolMessage.content).error).toMatch(/outside project/);
     expect(readFileSync(join(root, "index.html"), "utf-8")).toBe(HTML);
+  });
+
+  /**
+   * TAB-791, reproduced from the report.
+   *
+   * Asked to put a b-roll in a slot, the model wrote `src="assets/b-roll.mp4"` —
+   * a filename nothing in the project ever had — over a working reference, and
+   * said it had succeeded. `list_files` shows only editable source, so the model
+   * could not see that `001_37ab941f_cfr24_h264.mp4` was sitting right there.
+   *
+   * The prompt already said "Never invent file contents or paths", so the fix
+   * cannot be another sentence: this asserts the *write* is refused.
+   */
+  function projectWithMedia(): string {
+    const root = mkdtempSync(join(tmpdir(), "tabario-media-"));
+    mkdirSync(join(root, "assets"), { recursive: true });
+    mkdirSync(join(root, "compositions"), { recursive: true });
+    writeFileSync(join(root, "assets/001_37ab941f_cfr24_h264.mp4"), "video-bytes");
+    writeFileSync(join(root, "assets/voiceover.wav"), "audio-bytes");
+    writeFileSync(join(root, "index.html"), HTML);
+    return root;
+  }
+
+  const SCENE =
+    '<div><video id="scene-1-video" src="assets/001_37ab941f_cfr24_h264.mp4"></video></div>\n';
+
+  it("refuses a write whose media src names a file the project does not have", async () => {
+    const root = projectWithMedia();
+    writeFileSync(join(root, "compositions/scene-1.html"), SCENE);
+    const hash = createHash("sha256").update(SCENE).digest("hex");
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("invent", "write_file", {
+            path: "compositions/scene-1.html",
+            content: SCENE.replace("assets/001_37ab941f_cfr24_h264.mp4", "assets/b-roll.mp4"),
+            expected_hash: hash,
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(completion("I used the asset that exists."));
+
+    await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "timeline",
+      transcript: [
+        { role: "user", text: "we need a b-roll in that slot", at: new Date().toISOString() },
+      ],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    // The working reference survives. Losing it was half the damage in the report.
+    expect(readFileSync(join(root, "compositions/scene-1.html"), "utf-8")).toBe(SCENE);
+
+    const second = JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body));
+    const toolMessage = second.messages.find(
+      (message: { tool_call_id?: string }) => message.tool_call_id === "invent",
+    );
+    const { error } = JSON.parse(toolMessage.content);
+    expect(error).toContain("assets/b-roll.mp4");
+    // The refusal has to be the answer too, or the next turn guesses again.
+    expect(error).toContain("assets/001_37ab941f_cfr24_h264.mp4");
+  });
+
+  /**
+   * The false-positive case, which matters more than the happy path: a guard
+   * that rejected any of these would block ordinary editing outright.
+   *
+   * `compositions/scene-1.html` writing `src="assets/…"` means *project-root*
+   * relative, not relative to `compositions/` — resolving only one way would
+   * reject every real composition in every Tabario project.
+   */
+  it("allows srcs that resolve, remote URLs, data URIs and unresolved template values", async () => {
+    const root = projectWithMedia();
+    const mixed =
+      "<div>" +
+      '<video id="a" src="assets/001_37ab941f_cfr24_h264.mp4"></video>' +
+      '<audio id="b" src="assets/voiceover.wav"></audio>' +
+      '<video id="c" src="https://cdn.example.com/remote.mp4"></video>' +
+      '<img id="d" src="data:image/png;base64,iVBORw0KGgo=">' +
+      '<video id="e" src="${clipUrl}"></video>' +
+      '<video id="f" src="assets/001_37ab941f_cfr24_h264.mp4?v=2#t=1"></video>' +
+      "</div>\n";
+    writeFileSync(join(root, "compositions/scene-1.html"), SCENE);
+    const hash = createHash("sha256").update(SCENE).digest("hex");
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("ok", "write_file", {
+            path: "compositions/scene-1.html",
+            content: mixed,
+            expected_hash: hash,
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(completion("Done."));
+
+    await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "timeline",
+      transcript: [{ role: "user", text: "rebuild the scene", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    expect(readFileSync(join(root, "compositions/scene-1.html"), "utf-8")).toBe(mixed);
+  });
+
+  it("lets the model enumerate the media it may reference, and only the media", async () => {
+    const root = projectWithMedia();
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(completion("", [call("media", "list_media", {})]))
+      .mockResolvedValueOnce(completion("There are two assets."));
+
+    await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "what b-roll do I have?", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    const second = JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body));
+    const toolMessage = second.messages.find(
+      (message: { tool_call_id?: string }) => message.tool_call_id === "media",
+    );
+    const payload = JSON.parse(toolMessage.content);
+    expect(payload.files).toEqual(["assets/001_37ab941f_cfr24_h264.mp4", "assets/voiceover.wav"]);
+    // Source files are `list_files`' job; mixing them would re-blur the line
+    // between what is editable and what is merely referenceable.
+    expect(payload.files).not.toContain("index.html");
   });
 });

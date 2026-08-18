@@ -101,6 +101,7 @@ A HyperFrames project's timeline IS its HTML — reading the files is how you in
 So questions about what is on screen, when, for how long, or why something is missing are answerable from the source. To answer one, read \`index.html\` and any mounted compositions and reason over those attributes — give concrete element ids and time ranges. Never say you cannot see the timeline or the media; if something genuinely is not in the files, say what you looked at and what was absent.
 
 Never invent file contents or paths. Never embed remote assets, secrets, or network calls in project code.
+Media filenames cannot be guessed — call list_media to see what the project actually contains, and reference only those. A write whose src points at a file the project does not have is rejected, and the rejection lists the files that do exist.
 Preserve the existing template, media references, duration, captions, and voiceover unless the user asks to change them.
 All edits are staged and linted before Studio applies them. Call validate_project after edits and repair lint errors.
 For edit-oriented requests, make the requested source changes. For questions, answer without changing files.
@@ -133,6 +134,13 @@ const tools = [
       required: ["path"],
       additionalProperties: false,
     },
+  ),
+  tool(
+    "list_media",
+    "List the video, audio and image files the project actually contains. These are not editable, " +
+      "but they are the only media you may reference from a src attribute. Call this before adding " +
+      "or changing any <video>, <audio> or <img> src — filenames cannot be guessed.",
+    { type: "object", properties: {}, additionalProperties: false },
   ),
   tool("search_files", "Search editable source files for literal text.", {
     type: "object",
@@ -190,6 +198,123 @@ function assertNoSymlinks(root: string, relativePath: string): void {
   }
 }
 
+/**
+ * Media the agent may reference but may not edit (TAB-791).
+ *
+ * `list_files` reports only `isSupportedAgentSource` paths, which is every text
+ * source and **no** media at all. The agent was therefore blind to `assets/`:
+ * asked to put a b-roll in a slot it had no way to learn that
+ * `001_37ab941f_cfr24_h264.mp4` existed, so it invented `assets/b-roll.mp4` and
+ * reported success. The preview 404'd and the real reference was lost.
+ */
+const MEDIA_EXTENSIONS = new Set([
+  ".mp4",
+  ".mov",
+  ".webm",
+  ".m4v",
+  ".ogv",
+  ".mp3",
+  ".wav",
+  ".m4a",
+  ".aac",
+  ".ogg",
+  ".flac",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".webp",
+  ".gif",
+  ".avif",
+  ".svg",
+]);
+
+/** Mirrors the tags @hyperframes/lint's `missing_local_asset` rule scans, plus <audio>. */
+const MEDIA_SRC_RE = /<(?:video|audio|img|source)\b[^>]*?\bsrc\s*=\s*["']([^"']*)["']/gi;
+
+function isMediaPath(path: string): boolean {
+  const dot = path.lastIndexOf(".");
+  return dot >= 0 && MEDIA_EXTENSIONS.has(path.slice(dot).toLowerCase());
+}
+
+/**
+ * Every media file in the project, as project-root-relative paths.
+ *
+ * Reuses `snapshotAgentFiles` rather than walking again: it already skips
+ * ignored directories and symlinks, and `list_files` already pays this cost per
+ * call, so this stays consistent with the existing tool rather than inventing a
+ * second notion of "the project's files".
+ */
+function mediaInventory(root: string): string[] {
+  return Object.keys(snapshotAgentFiles(root).files).filter(isMediaPath).sort();
+}
+
+/** A src the project ships nothing for, and cannot: remote, inline, or templated. */
+function isNonLocalSrc(src: string): boolean {
+  return /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(src) || /\$\{|\{\{|<%/.test(src);
+}
+
+/**
+ * Does `src` resolve to a file that exists?
+ *
+ * Both interpretations count. A composition under `compositions/` writes
+ * `src="assets/x.mp4"` meaning **project-root**-relative, while a root-level
+ * document means file-relative — and `@hyperframes/lint` resolves the same
+ * ambiguity the same way. Accepting either is what keeps this from rejecting
+ * edits that are perfectly correct.
+ */
+function mediaSrcResolves(root: string, fileRelative: string, src: string): boolean {
+  const clean = (src.split("?")[0] ?? "").split("#")[0] ?? "";
+  // An empty src is `media_missing_src`'s business, not this guard's.
+  if (!clean) return true;
+  const rootDir = resolve(root);
+  return [resolve(rootDir, dirname(fileRelative), clean), resolve(rootDir, clean)].some(
+    (candidate) => {
+      const rel = relative(rootDir, candidate);
+      // Outside the project is unservable by the preview, so it is missing even
+      // when it exists on disk.
+      if (!rel || rel === ".." || rel.startsWith(`..${sep}`)) return false;
+      return existsSync(candidate);
+    },
+  );
+}
+
+/**
+ * Refuse a write that points media at a file the project does not have.
+ *
+ * This is deliberately a **gate, not an instruction**. The system prompt already
+ * said "Never invent file contents or paths" and the model did it anyway, then
+ * skipped the `validate_project` call that would have caught it — so the only
+ * thing that reliably stops a hallucinated path is a check the model does not
+ * get to opt out of.
+ *
+ * The error carries the real inventory, so the refusal is also the answer: the
+ * next turn can pick a filename that exists instead of guessing again.
+ */
+function assertMediaSrcsResolve(root: string, fileRelative: string, content: string): void {
+  if (!fileRelative.toLowerCase().endsWith(".html")) return;
+
+  const missing: string[] = [];
+  const re = new RegExp(MEDIA_SRC_RE.source, MEDIA_SRC_RE.flags);
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(content)) !== null) {
+    const src = match[1] ?? "";
+    if (isNonLocalSrc(src)) continue;
+    if (mediaSrcResolves(root, fileRelative, src)) continue;
+    if (!missing.includes(src)) missing.push(src);
+  }
+  if (missing.length === 0) return;
+
+  const available = mediaInventory(root);
+  throw new Error(
+    `${fileRelative} references media the project does not contain: ${missing.join(", ")}. ` +
+      "The renderer and the preview both 404 on these, so the edit would leave a blank region. " +
+      (available.length
+        ? `Use one of the files that exist: ${available.join(", ")}.`
+        : "This project contains no media files at all.") +
+      " Media cannot be created by editing HTML — reference an existing asset.",
+  );
+}
+
 function safeSourcePath(root: string, candidate: unknown): { relative: string; absolute: string } {
   const requested = requiredPath(candidate);
   const absolute = resolve(root, requested);
@@ -233,6 +358,11 @@ function listFiles(args: JsonRecord, options: TabarioModelOptions): unknown {
     .slice(0, limit);
 }
 
+function listMedia(_args: JsonRecord, options: TabarioModelOptions): unknown {
+  const files = mediaInventory(options.stagingDir);
+  return { files, count: files.length };
+}
+
 function readFile(args: JsonRecord, options: TabarioModelOptions): unknown {
   const file = safeSourcePath(options.stagingDir, args.path);
   if (!existsSync(file.absolute)) throw new Error("file does not exist");
@@ -271,6 +401,7 @@ function writeFile(args: JsonRecord, options: TabarioModelOptions): unknown {
   const current = hashFile(file.absolute);
   if ((args.expected_hash ?? null) !== current)
     throw new Error(`hash conflict for ${file.relative}; current hash is ${current ?? "null"}`);
+  assertMediaSrcsResolve(options.stagingDir, file.relative, args.content);
   mkdirSync(dirname(file.absolute), { recursive: true });
   writeFileSync(file.absolute, args.content, "utf-8");
   return { path: file.relative, hash: hashFile(file.absolute) };
@@ -295,6 +426,7 @@ async function validateProject(_args: JsonRecord, options: TabarioModelOptions):
 
 const TOOL_HANDLERS: Record<string, ToolHandler> = {
   list_files: listFiles,
+  list_media: listMedia,
   read_file: readFile,
   search_files: searchFiles,
   write_file: writeFile,
