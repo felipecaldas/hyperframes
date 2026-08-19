@@ -381,4 +381,39 @@ describe("AgentDrawer", () => {
     expect(host.querySelector(".animate-spin")).toBeNull();
     act(() => root.unmount());
   });
+
+  /**
+   * TAB-798. A compositor deploy wipes the in-memory Studio session table, so an
+   * open editor's stream starts answering 404. Nothing handled that: the stream
+   * was only ever closed by a terminal event, so `busy` stayed true — and since
+   * TAB-797 that means the spinner ticks forever.
+   */
+  it("stops the spinner and says what to do when the stream dies", async () => {
+    const message = "The Caption Layer is too high";
+    const { fetchMock } = runFixture([]);
+    const { host, root } = await mountDrawer(fetchMock);
+
+    const textarea = composer(host);
+    await act(async () => typeInto(textarea, message));
+    await act(async () => pressEnter(textarea));
+    await settle();
+    expect(host.querySelector(".animate-spin")).not.toBeNull();
+
+    const source = FakeEventSource.instances[0];
+    if (!source) throw new Error("event source missing");
+    await act(async () => {
+      // readyState CLOSED is what a 404/410 leaves behind — the browser has
+      // already failed the connection for good.
+      source.readyState = 2;
+      source.emit("error", {});
+      await Promise.resolve();
+    });
+
+    expect(host.querySelector(".animate-spin")).toBeNull();
+    expect(host.textContent).toContain("Lost the connection to Tabario AI");
+    expect(host.textContent).toContain("Reload the page");
+    // The turn stays put. Dropping it here would re-create TAB-797's bug.
+    expect(host.textContent).toContain(message);
+    act(() => root.unmount());
+  });
 });

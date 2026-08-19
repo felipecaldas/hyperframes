@@ -6,6 +6,7 @@ import { isSelfWriteEcho } from "./sdkSelfWriteRegistry";
 import { shouldSuppressAgentRefresh } from "../utils/agentBridge";
 import { consumeStudioWriteToken } from "../utils/studioFileVersion";
 import { logReload } from "../utils/reloadDebug";
+import { openEventStream } from "../utils/eventStream";
 
 type ExternalChangeDrainResult =
   | { status: "clean" }
@@ -330,6 +331,16 @@ export function useExternalFileChangeCoordinator({
     ],
   );
 
+  // Read through a ref so the subscription below does not depend on
+  // `processChange`'s identity. It is a `useCallback` over nine dependencies, so
+  // it is rebuilt often — and each rebuild used to tear down the EventSource and
+  // open a new one, which against a dead session is a fresh 404 every time
+  // (TAB-798).
+  const changeHandlerRef = useRef(processChange);
+  useEffect(() => {
+    changeHandlerRef.current = processChange;
+  }, [processChange]);
+
   useEffect(() => {
     // A local agent run writes the project files itself, so every one of its
     // writes arrives here as an external change. Reloading mid-run would
@@ -338,7 +349,7 @@ export function useExternalFileChangeCoordinator({
     // refreshes the preview once, on completion.
     const handler = (payload?: unknown) => {
       if (shouldSuppressAgentRefresh()) return;
-      return processChange(payload);
+      return changeHandlerRef.current(payload);
     };
     const adapter = testHotAdapter();
     if (adapter) {
@@ -349,10 +360,22 @@ export function useExternalFileChangeCoordinator({
       import.meta.hot.on("hf:file-change", handler);
       return () => import.meta.hot?.off?.("hf:file-change", handler);
     }
-    const eventSource = new EventSource("/api/events");
-    eventSource.addEventListener("file-change", handler);
-    return () => eventSource.close();
-  }, [processChange]);
+    // Production only — with Vite the HMR channel above carries these, which is
+    // why nobody hit this path in development.
+    const stream = openEventStream({
+      url: "/api/events",
+      listeners: { "file-change": handler },
+      onGiveUp: (reason) => {
+        // No UI to own this one: losing it means external edits stop
+        // auto-reloading, not that anything is corrupt. Say so once rather than
+        // stopping in silence.
+        console.warn(
+          `[studio] file-change stream stopped (${reason}); reload to resume auto-refresh.`,
+        );
+      },
+    });
+    return () => stream.close();
+  }, []);
 
   const retry = useCallback(async () => {
     const current = blockedRef.current;

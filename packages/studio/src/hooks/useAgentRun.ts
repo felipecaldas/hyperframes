@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentChangedFile, AgentProvider, AgentRunEvent } from "@hyperframes/studio-server";
 import { finishAgentRun, setAgentRunActive, type StudioAgentRequest } from "../utils/agentBridge";
+import { openEventStream, type EventStreamHandle } from "../utils/eventStream";
 
 const EVENT_TYPES = [
   "status",
@@ -108,7 +109,7 @@ export function useAgentRun(options: UseAgentRunOptions) {
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [elapsedMs, setElapsedMs] = useState(0);
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const streamRef = useRef<EventStreamHandle | null>(null);
 
   // A run has no progress bar to give — the honest substitute for "how much
   // longer" is how long it has already been.
@@ -136,8 +137,8 @@ export function useAgentRun(options: UseAgentRunOptions) {
   );
 
   const closeStream = useCallback(() => {
-    eventSourceRef.current?.close();
-    eventSourceRef.current = null;
+    streamRef.current?.close();
+    streamRef.current = null;
   }, []);
 
   const refreshOnce = useCallback(async () => {
@@ -161,21 +162,33 @@ export function useAgentRun(options: UseAgentRunOptions) {
 
   const subscribeToRun = useCallback(
     (id: string) => {
-      const eventSource = new EventSource(`/api/agent/runs/${encodeURIComponent(id)}/events`);
-      eventSourceRef.current = eventSource;
-      for (const type of EVENT_TYPES) {
-        eventSource.addEventListener(type, (raw) => {
-          if (!(raw instanceof MessageEvent)) return;
-          const event = JSON.parse(raw.data) as AgentRunEvent;
-          setEvents((current) => [...current, event]);
-          if (event.files) setChangedFiles(event.files);
-          if (!TERMINAL_EVENTS.has(event.type)) return;
-          if (event.type === "failure") setError(event.message ?? "Agent run failed.");
-          closeStream();
+      const handle = (raw: MessageEvent) => {
+        const event = JSON.parse(raw.data) as AgentRunEvent;
+        setEvents((current) => [...current, event]);
+        if (event.files) setChangedFiles(event.files);
+        if (!TERMINAL_EVENTS.has(event.type)) return;
+        if (event.type === "failure") setError(event.message ?? "Agent run failed.");
+        closeStream();
+        setBusy(false);
+        void refreshOnce();
+      };
+      streamRef.current = openEventStream({
+        url: `/api/agent/runs/${encodeURIComponent(id)}/events`,
+        listeners: Object.fromEntries(EVENT_TYPES.map((type) => [type, handle])),
+        onGiveUp: () => {
+          // The run itself may well be fine — this says only that we can no
+          // longer hear it, which is why the wording does not claim a failure.
+          // `pendingPrompt` is deliberately left standing: dropping it here
+          // would make the message vanish again, which is TAB-797's bug.
+          streamRef.current = null;
           setBusy(false);
-          void refreshOnce();
-        });
-      }
+          setStartedAt(null);
+          setAgentRunActive(false);
+          setError(
+            "Lost the connection to Tabario AI. Reload the page to reconnect — the run may still be finishing.",
+          );
+        },
+      });
     },
     [closeStream, refreshOnce],
   );
