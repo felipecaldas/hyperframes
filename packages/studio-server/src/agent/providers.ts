@@ -774,9 +774,10 @@ async function executeToolCalls(
 const MEASURE_BEFORE_ANSWERING =
   "You changed the project but have not measured the result, so you do not yet know whether it " +
   "worked. Call measure_layout now on the elements you changed, seeking to a time when they are " +
-  "on screen, and compare the numbers with what was asked. If they match, say what was changed. " +
-  "If they do not, either change what the measurement points at or say plainly what it is now and " +
-  "what you could not achieve. Do not repeat your previous answer unchecked.";
+  "on screen, and compare the numbers with what was asked. Then reply, in the same plain language " +
+  "as always: say what you changed and what the measurement shows. If the numbers do not match " +
+  "what was asked, either change what the measurement points at or say plainly what it is now and " +
+  "what you could not achieve. Always end with a reply — never finish silently.";
 
 /** Said when stripping code leaves nothing at all — never an empty bubble. */
 const NOTHING_LEFT_TO_SAY = "I've finished. Let me know if you'd like anything adjusted.";
@@ -876,8 +877,15 @@ export async function runTabarioModel(options: TabarioModelOptions): Promise<Tab
         messages.push({ role: "user", content: MEASURE_BEFORE_ANSWERING });
         continue;
       }
-      if (assistantText) options.onAssistant(assistantText);
-      return { assistantText, model };
+      // Never finish silently. `assistantText` is only ever set from a
+      // completion that carried content, and a model that answers with tool
+      // calls alone and then stops leaves the drawer showing changed files and
+      // no word about them — which is what two live TAB-805 runs did. TAB-795
+      // already decided an empty bubble is not acceptable; this is the same
+      // rule applied to the turn as a whole rather than to one stripped reply.
+      const reply = assistantText || NOTHING_LEFT_TO_SAY;
+      options.onAssistant(reply);
+      return { assistantText: reply, model };
     }
     await executeToolCalls(completion.toolCalls, messages, options, state);
   }

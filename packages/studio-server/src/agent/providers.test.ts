@@ -1176,4 +1176,38 @@ describe("Tabario AI provider", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(result.assistantText).toBe("The caption runs from 5.2s to 7.3s.");
   });
+
+  /**
+   * Two live TAB-805 runs applied a real change and said nothing at all: the
+   * model answered with tool calls and then stopped, so the drawer showed
+   * changed files and no word about them. `assistantText` is only ever set from
+   * a completion that carried content, and nothing covered the case where none
+   * ever did. TAB-795 already ruled an empty bubble unacceptable.
+   */
+  it("never finishes silently, even when the model returns no text at all", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const said: string[] = [];
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(completion("", [call("r", "read_file", { path: "index.html" })]))
+      .mockResolvedValueOnce(completion(""));
+
+    const result = await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "what is on screen?", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: (text) => said.push(text),
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    expect(result.assistantText).toBe(
+      "I've finished. Let me know if you'd like anything adjusted.",
+    );
+    expect(said).toEqual([result.assistantText]);
+  });
 });
