@@ -93,12 +93,18 @@ function findByHfId(document: Document, hfId: string): Element | null {
       `[data-hf-id="${escapeCssAttrValue(hfId)}"]`,
     );
     if (matches.length > 1) {
-      // The mint contract guarantees uniqueness; a duplicate means upstream
-      // id drift. Don't silently patch an arbitrary one — surface it.
+      // TAB-807: this used to warn and then patch `matches[0]` anyway, which is
+      // exactly the "pick the first one" the agent's own `assertUniqueAnchor`
+      // exists to prevent — an edit that lands on a different element and still
+      // looks like it worked. A duplicated id identifies nothing, so it
+      // resolves to nothing; `findTargetElement` then falls back to the
+      // element's `id` or selector, which are explicit identifiers rather than
+      // an arbitrary choice among equals.
       // eslint-disable-next-line no-console
       console.warn(
-        `sourceMutation: data-hf-id "${hfId}" matched ${matches.length} elements; using the first. ids must be unique per document.`,
+        `sourceMutation: data-hf-id "${hfId}" matched ${matches.length} elements; refusing to guess which. ids must be unique per document.`,
       );
+      return null;
     }
     return matches[0] ?? null;
   } catch {

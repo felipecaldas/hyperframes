@@ -37,6 +37,9 @@ import {
   type ResolvedProject,
   type RenderJobState,
   type BackgroundRemovalRender,
+  measureInPage,
+  classifyLayoutProbe,
+  unavailableMeasurement,
 } from "@hyperframes/studio-server";
 import { resolveAutoProxy } from "../utils/projectConfig.js";
 import { getElementScreenshotClip } from "@hyperframes/studio-server/screenshot-clip";
@@ -646,6 +649,92 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
       } finally {
         opts.signal.removeEventListener("abort", closePage);
         await page?.close().catch(() => {});
+      }
+    },
+
+    /**
+     * Measure a staged project's real layout (TAB-805).
+     *
+     * Bundled and served the same way `hyperframes check` audits layout, rather
+     * than opened off disk: `bundleToSingleHtml` inlines every
+     * `data-composition-src` scene and the runtime IIFE, and the static server
+     * gives assets a real origin with Range support. Opening the file directly
+     * would leave scene slots empty and silently report every element inside one
+     * as missing.
+     *
+     * What gets measured is the **staged** copy, never the live project — the
+     * agent's edits are not in the live one, so measuring that would answer a
+     * question nobody asked.
+     *
+     * The runtime is live here, which means a clip that is off-screen at
+     * `seekTime` genuinely has no layout. That comes back as unmeasurable with
+     * the reason, not as a zero-size box that reads like a clean result.
+     */
+    async measureLayout(opts) {
+      const seekTime = opts.seekTime ?? 0;
+      const composition = opts.composition ?? "index.html";
+      const entry = join(opts.projectDir, composition);
+      if (!existsSync(entry))
+        return unavailableMeasurement(`${composition} does not exist in the project.`, seekTime);
+
+      const session = await getThumbnailBrowser(browserGpuMode);
+      if (!session)
+        return unavailableMeasurement(
+          "no browser is available to this Studio server, so nothing could be measured.",
+          seekTime,
+        );
+
+      let page: import("puppeteer-core").Page | null = null;
+      let server: { url: string; close: () => Promise<void> } | null = null;
+      const closePage = () => void page?.close().catch(() => {});
+      opts.signal?.addEventListener("abort", closePage, { once: true });
+      try {
+        const { bundleToSingleHtml } = await import("@hyperframes/core/compiler");
+        const { serveStaticProjectHtml } = await import("../utils/staticProjectServer.js");
+        const html = await bundleToSingleHtml(opts.projectDir, { entryFile: composition });
+        server = await serveStaticProjectHtml(
+          opts.projectDir,
+          html,
+          "Failed to bind the layout measurement server",
+        );
+
+        // The frame is what every percentage position resolves against, so a
+        // wrong viewport silently changes every measurement taken in it.
+        const source = readFileSync(entry, "utf-8");
+        const width = Number(/data-width="(\d+)"/.exec(source)?.[1]) || 1920;
+        const height = Number(/data-height="(\d+)"/.exec(source)?.[1]) || 1080;
+
+        page = await session.browser.newPage();
+        await page.setViewport({ width, height, deviceScaleFactor: 1 });
+        await page.goto(server.url, { waitUntil: "domcontentloaded", timeout: 15000 });
+        await page
+          .waitForFunction(
+            () => {
+              const w = window as Window & { __timelines?: Record<string, unknown> };
+              return !!(w.__timelines && Object.keys(w.__timelines).length > 0);
+            },
+            { timeout: 5000 },
+          )
+          .catch(() => {
+            // A composition with no timeline still lays out. Measure it anyway.
+          });
+        await seekCompositionTimeline(page, seekTime, {
+          fallbackToBridgeAndTimelines: true,
+          waitForPreferredSeekTargetMs: 500,
+          animationFrameSettle: "double",
+          waitForFontsMs: 500,
+        });
+        const raw = await page.evaluate(measureInPage, opts.selectors);
+        return classifyLayoutProbe(raw, seekTime);
+      } catch (err) {
+        return unavailableMeasurement(
+          `the measurement failed: ${err instanceof Error ? err.message : String(err)}`,
+          seekTime,
+        );
+      } finally {
+        opts.signal?.removeEventListener("abort", closePage);
+        await page?.close().catch(() => {});
+        await server?.close().catch(() => {});
       }
     },
 

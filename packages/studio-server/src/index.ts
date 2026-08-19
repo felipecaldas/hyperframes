@@ -30,6 +30,18 @@ export {
 export { buildSubCompositionHtml } from "./helpers/subComposition.js";
 export { getElementScreenshotClip, type ScreenshotClip } from "./helpers/screenshotClip.js";
 export {
+  measureInPage,
+  classifyLayoutProbe,
+  unavailableMeasurement,
+} from "./helpers/layoutProbe.js";
+export type {
+  LayoutMeasurement,
+  LayoutElementMeasurement,
+  RawLayoutProbe,
+  RawLayoutElement,
+} from "./helpers/layoutProbe.js";
+
+export {
   thumbnailDeviceScaleFactor,
   type ThumbnailOutputDimensions,
 } from "./helpers/thumbnailOutput.js";

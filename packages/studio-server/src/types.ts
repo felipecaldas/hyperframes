@@ -1,5 +1,6 @@
 import type { CanvasResolution } from "@hyperframes/parsers";
 import type { RegistryItem } from "@hyperframes/core";
+import type { LayoutMeasurement } from "./helpers/layoutProbe.js";
 
 /** Resolved info about a single project. */
 export interface ResolvedProject {
@@ -208,6 +209,28 @@ export interface StudioApiAdapter {
     selectorIndex?: number;
     signal: AbortSignal;
   }) => Promise<Buffer | null>;
+
+  /**
+   * Optional: measure what a composition actually lays out as (TAB-805).
+   *
+   * The agent needs this because lint cannot see layout. `projectDir` is
+   * deliberately a bare directory rather than a `ResolvedProject`: the agent
+   * measures its **staged** copy, which is not a registered project, and
+   * measuring the live one instead would report on files the agent has not
+   * written yet.
+   *
+   * An adapter without a browser must resolve to a measurement carrying
+   * `unavailable` — never an empty element list that reads as "nothing wrong".
+   */
+  measureLayout?: (opts: {
+    projectDir: string;
+    /** Entry file relative to projectDir. Defaults to index.html. */
+    composition?: string;
+    selectors: string[];
+    /** Timeline position in seconds to seek to before measuring. */
+    seekTime?: number;
+    signal?: AbortSignal;
+  }) => Promise<LayoutMeasurement>;
 
   /** Optional: resolve session ID to project (multi-project mode). */
   resolveSession?: (sessionId: string) => Promise<{ projectId: string; title: string } | null>;

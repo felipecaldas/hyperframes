@@ -826,4 +826,234 @@ describe("Tabario AI provider", () => {
 
     expect(readFileSync(join(root, "index.html"), "utf-8")).toBe("<div>$& $1 ${total}</div>\n");
   });
+
+  /**
+   * TAB-807, reproducing the live failure exactly.
+   *
+   * Asked to put a caption on one line, the model re-emitted `#caption-2`'s word
+   * spans and copied three `data-hf-id` values off `#caption-0`. The words were
+   * right; the ids were not. Studio resolves a user's manual edits by that id,
+   * so the next edit to caption-2's words would have landed on caption-0's and
+   * still looked like it worked.
+   */
+  it("refuses an edit that copies another element's data-hf-id", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    const source =
+      '<html data-composition-id="demo"><body>\n' +
+      '<div data-hf-id="hf-bvg5" id="caption-0"><span data-hf-id="hf-00u9" id="caption-0-w0">Helena\'s</span> <span data-hf-id="hf-o1v4" id="caption-0-w1">agency</span></div>\n' +
+      '<div data-hf-id="hf-ci36" id="caption-2"><span data-hf-id="hf-kmog" id="caption-2-w0">solving her production bottleneck.</span></div>\n' +
+      "</body></html>\n";
+    writeFileSync(join(root, "index.html"), source);
+    const hash = createHash("sha256").update(source).digest("hex");
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("dupe", "edit_file", {
+            path: "index.html",
+            old_string:
+              '<span data-hf-id="hf-kmog" id="caption-2-w0">solving her production bottleneck.</span>',
+            new_string:
+              '<span data-hf-id="hf-kmog" id="caption-2-w0">solving</span> <span data-hf-id="hf-o1v4" id="caption-2-w1">her production bottleneck.</span>',
+            expected_hash: hash,
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(completion("I kept the original ids."));
+
+    await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "put it on one line", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    expect(readFileSync(join(root, "index.html"), "utf-8")).toBe(source);
+    const second = JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body));
+    const toolMessage = second.messages.find(
+      (message: { tool_call_id?: string }) => message.tool_call_id === "dupe",
+    );
+    const error = JSON.parse(toolMessage.content).error as string;
+    expect(error).toContain("hf-o1v4");
+    expect(error).toContain("data-hf-id");
+  });
+
+  /**
+   * TAB-780's inherited-vs-introduced rule. The repro project is *already* on
+   * disk carrying three duplicates, so a gate that refuses any file containing
+   * one would make every later edit to it fail for a fault the edit did not
+   * commit.
+   */
+  it("allows an edit to a file that already carried duplicate ids", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    const source =
+      '<html data-composition-id="demo"><body>\n' +
+      '<span data-hf-id="hf-dupe">one</span><span data-hf-id="hf-dupe">two</span>\n' +
+      '<p data-hf-id="hf-solo">CHANGE ME</p>\n' +
+      "</body></html>\n";
+    writeFileSync(join(root, "index.html"), source);
+    const hash = createHash("sha256").update(source).digest("hex");
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("inherited", "edit_file", {
+            path: "index.html",
+            old_string: "CHANGE ME",
+            new_string: "CHANGED",
+            expected_hash: hash,
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(completion("Done."));
+
+    await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "change the text", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    expect(readFileSync(join(root, "index.html"), "utf-8")).toContain("CHANGED");
+  });
+
+  /**
+   * TAB-805. The measurement must be taken on the **staged** copy — the live
+   * project does not have the agent's edits in it yet, so measuring that would
+   * answer a question nobody asked.
+   */
+  it("measures the staged project and gives the model the numbers", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const measureLayout = vi.fn().mockResolvedValue({
+      measured: true,
+      seekTime: 5.5,
+      frame: { width: 720, height: 720 },
+      elements: [
+        {
+          selector: "#caption-2",
+          box: { x: 157, y: 524, width: 405, height: 149 },
+          lines: 3,
+          overflows: false,
+          visibility: "hidden",
+          pinnedByManualEdit: { width: "405px", height: "149px" },
+          text: "solving her production bottleneck.",
+        },
+      ],
+    });
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("m", "measure_layout", { selectors: ["#caption-2"], seek_time: 5.5 }),
+        ]),
+      )
+      .mockResolvedValueOnce(completion("It is still on three lines."));
+
+    await runTabarioModel({
+      adapter: { ...adapter(), measureLayout },
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "is it one line yet?", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    expect(measureLayout).toHaveBeenCalledWith(
+      expect.objectContaining({ projectDir: root, selectors: ["#caption-2"], seekTime: 5.5 }),
+    );
+    const second = JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body));
+    const toolMessage = second.messages.find(
+      (message: { tool_call_id?: string }) => message.tool_call_id === "m",
+    );
+    const result = JSON.parse(toolMessage.content);
+    expect(result.measured).toBe(true);
+    expect(result.elements[0].lines).toBe(3);
+    expect(result.elements[0].pinnedByManualEdit.width).toBe("405px");
+  });
+
+  /**
+   * A Studio server with no browser must say so. Returning an empty element
+   * list would read as "measured, nothing wrong" — the precise mistake TAB-700
+   * is about.
+   */
+  it("says it could not measure rather than implying nothing is wrong", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [call("m", "measure_layout", { selectors: ["#caption-2"] })]),
+      )
+      .mockResolvedValueOnce(completion("I could not measure it."));
+
+    await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "is it one line yet?", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    const second = JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body));
+    const toolMessage = second.messages.find(
+      (message: { tool_call_id?: string }) => message.tool_call_id === "m",
+    );
+    const result = JSON.parse(toolMessage.content);
+    expect(result.measured).toBe(false);
+    expect(result.unavailable).toContain("no browser");
+    expect(result.elements).toEqual([]);
+  });
+
+  /**
+   * TAB-806. The prompt described `tl.set` under "motion", so a `set` at 0s
+   * carrying width/height read as an animation rather than as the pinned box it
+   * is. Asserted on the request actually sent, like the TAB-781 check above.
+   */
+  it("tells the model that a set at 0s is a pinned box, and that lint is not sight", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(completion("An answer."));
+
+    await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [
+        { role: "user", text: "this caption takes three lines", at: new Date().toISOString() },
+      ],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    const body = JSON.parse(String((fetchImpl.mock.calls[0]?.[1] as RequestInit)?.body));
+    const system = body.messages.find((message: { role: string }) => message.role === "system");
+    expect(system.content).toContain("not motion");
+    expect(system.content).toContain("Lint is not sight");
+    expect(system.content).toContain("measure_layout");
+    // The tool has to actually be offered, not just described.
+    expect(body.tools.map((t: { function: { name: string } }) => t.function.name)).toContain(
+      "measure_layout",
+    );
+  });
 });

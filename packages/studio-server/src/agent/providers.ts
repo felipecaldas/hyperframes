@@ -11,6 +11,7 @@ import {
 import { dirname, join, relative, resolve, sep } from "node:path";
 import type { StudioApiAdapter } from "../types.js";
 import { lintProject } from "../helpers/projectLint.js";
+import { unavailableMeasurement } from "../helpers/layoutProbe.js";
 import { isSupportedAgentSource, snapshotAgentFiles } from "./files.js";
 import type { AgentProviderCapability, AgentRequestKind, AgentThreadSummary } from "./types.js";
 
@@ -110,6 +111,7 @@ A HyperFrames project's timeline IS its HTML — reading the files is how you in
 - Scenes are mounted from \`compositions/*.html\` via \`data-composition-src\`; their own timings are relative to where the parent mounts them.
 - Media live in \`assets/\` and are referenced by \`<video>\`, \`<img>\` and \`<audio>\` elements; captions are text elements on their own track.
 - Motion is the GSAP block in \`index.html\`: \`tl.to\`, \`tl.fromTo\` and \`tl.set\` calls, each with a position in seconds.
+- Layout overrides are \`gsap.set("#id", {…})\` and \`tl.set("#id", {…}, 0)\` calls carrying \`x\`, \`y\`, \`width\` or \`height\`. These are **not motion**. They are the box a manual drag or resize in Studio left behind, they apply at time 0, and they override the element's CSS rule for that element only. When something wraps onto too many lines, overflows, sits too high or is too narrow, this is the first place to look — before its markup. Widening a pinned box, or removing the pin, is usually the change; re-typing the words inside it never is.
 
 So questions about what is on screen, when, for how long, or why something is missing are answerable from the source. To answer one, read \`index.html\` and any mounted compositions and reason over those attributes — give concrete layer names and time ranges. Never say you cannot see the timeline or the media; if something genuinely is not in the files, say what you looked at and what was absent.
 
@@ -118,6 +120,7 @@ Media filenames cannot be guessed — call list_media to see what the project ac
 Change an existing file with edit_file, never by rewriting it whole: name the exact snippet you are replacing and everything else is left untouched. write_file only creates files that do not exist yet. This matters because re-typing a file you were asked to make one change to is how unrelated lines get silently altered.
 Preserve the existing template, media references, duration, captions, and voiceover unless the user asks to change them.
 All edits are staged and linted before Studio applies them. Call validate_project after edits and repair lint errors.
+Lint is not sight. \`validate_project\` only proves the HTML parses — it cannot tell you how many lines a caption takes, whether an element overflows its box, or where it sits in the frame. \`measure_layout\` renders the staged project and measures it. Use it to check any claim about how something looks, and use it again after a layout change, before you say it worked. If it reports an element as unmeasurable, that is not "nothing wrong" — say what you could not measure.
 
 Act on the request — do not merely describe what you would do. The request kind above is a transport label, not the user's intent: everything typed into Studio's chat arrives as \`chat\`, so decide from what the user actually said.
 - If they report a problem, say something looks wrong, or ask for a change, and you understand what they mean, then make the change now, in this turn, with the write tools. "The captions are too high" is a request to move them; it does not need the words "fix it".
@@ -127,7 +130,8 @@ Act on the request — do not merely describe what you would do. The request kin
 How to reply — you are talking to someone editing a video, not reading code:
 - Plain language only. Never include code, markup, CSS, JavaScript, diffs, class names, CSS selectors, style property names, or file paths. Fenced code blocks are removed from your reply before it reaches the user, so anything you put in one is simply lost.
 - Name things as the user sees them on the timeline: the layer's name, the words on screen, the time it appears. Fall back to an internal id only when nothing user-visible identifies the element.
-- Two to four sentences — what was wrong, what you changed, and what they will see now. Past tense once it is done.`;
+- Two to four sentences — what was wrong, what you changed, and what they will see now. Past tense once it is done.
+- Never report a visual change as done when the measurement does not show it. If the numbers still disagree with what was asked, say what it is now and what you could not achieve.`;
 }
 
 const tools = [
@@ -213,6 +217,24 @@ const tools = [
     properties: {},
     additionalProperties: false,
   }),
+  tool(
+    "measure_layout",
+    "Measure what the staged project actually lays out as: each element's box in pixels, how many " +
+      "rendered lines its text takes, and whether its content overflows its box. This is the only " +
+      "way to check a claim about how something looks — lint sees HTML, not layout. Name elements " +
+      'by CSS selector (e.g. "#caption-2"). Scenes are mounted, so pass seek_time to measure at ' +
+      "a moment the element is actually on screen — its data-start is a good choice.",
+    {
+      type: "object",
+      properties: {
+        selectors: { type: "array", items: { type: "string" } },
+        composition: { type: "string" },
+        seek_time: { type: "number" },
+      },
+      required: ["selectors"],
+      additionalProperties: false,
+    },
+  ),
 ];
 
 function tool(name: string, description: string, parameters: JsonRecord) {
@@ -437,6 +459,53 @@ function searchFiles(args: JsonRecord, options: TabarioModelOptions): unknown {
   return matches;
 }
 
+/**
+ * Refuse a write that would leave two elements sharing one `data-hf-id` (TAB-807).
+ *
+ * TAB-796 made edits *targeted*, so the model can no longer corrupt lines
+ * outside the region it names. Nothing checked what it re-types *inside* that
+ * region. Asked to put a caption on one line, the model re-emitted
+ * `#caption-2`'s four word spans and copied three `data-hf-id` values off
+ * `#caption-0` — the words were right, the ids were not.
+ *
+ * That is worse than it looks. `data-hf-id` is the key Studio's edit
+ * persistence resolves an element by, and a duplicate makes the next manual
+ * edit land on the *other* element while looking like it worked. It is the same
+ * failure `assertUniqueAnchor` exists to prevent, one layer down.
+ *
+ * Introduced-only, per TAB-780: a file that already carried duplicates must not
+ * make every later edit fail. The message names the ids so the next turn can
+ * put the originals back rather than guess at new ones.
+ */
+const HF_ID_RE = /\bdata-hf-id="([^"]*)"/g;
+
+function duplicateHfIds(content: string): string[] {
+  const seen = new Set<string>();
+  const duplicated = new Set<string>();
+  for (const match of content.matchAll(HF_ID_RE)) {
+    const id = match[1];
+    if (!id) continue;
+    if (seen.has(id)) duplicated.add(id);
+    else seen.add(id);
+  }
+  return [...duplicated];
+}
+
+function assertNoNewDuplicateHfIds(before: string, after: string, relative: string): void {
+  if (!relative.toLowerCase().endsWith(".html")) return;
+  const inherited = new Set(duplicateHfIds(before));
+  const introduced = duplicateHfIds(after).filter((id) => !inherited.has(id));
+  if (introduced.length === 0) return;
+  throw new Error(
+    `${relative} would end up with two elements sharing ${
+      introduced.length === 1 ? "the data-hf-id" : "the data-hf-ids"
+    } ${introduced.join(", ")}. Studio resolves a user's edits by that id, so a repeated one sends ` +
+      "their next edit to the wrong element and still looks like it worked. This happens when ids " +
+      "are copied from a nearby element while re-typing. Keep every element's existing data-hf-id " +
+      "exactly as it already was, and never invent or reuse one.",
+  );
+}
+
 /** Literal (non-regex) occurrence count, for the uniqueness requirement. */
 function countOccurrences(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1;
@@ -505,6 +574,7 @@ function editFile(args: JsonRecord, options: TabarioModelOptions): unknown {
   const after = before.replace(oldString, () => newString);
   if (Buffer.byteLength(after, "utf-8") > MAX_FILE_BYTES) throw new Error("file is too large");
   assertMediaSrcsResolve(options.stagingDir, file.relative, after);
+  assertNoNewDuplicateHfIds(before, after, file.relative);
   writeFileSync(file.absolute, after, "utf-8");
   return { path: file.relative, hash: hashFile(file.absolute) };
 }
@@ -531,6 +601,7 @@ function writeFile(args: JsonRecord, options: TabarioModelOptions): unknown {
   if ((args.expected_hash ?? null) !== null)
     throw new Error(`hash conflict for ${file.relative}; current hash is null`);
   assertMediaSrcsResolve(options.stagingDir, file.relative, args.content);
+  assertNoNewDuplicateHfIds("", args.content, file.relative);
   mkdirSync(dirname(file.absolute), { recursive: true });
   writeFileSync(file.absolute, args.content, "utf-8");
   return { path: file.relative, hash: hashFile(file.absolute) };
@@ -553,6 +624,49 @@ async function validateProject(_args: JsonRecord, options: TabarioModelOptions):
   };
 }
 
+/** How many elements one measurement may name. A request is a handful, not a sweep. */
+const MAX_MEASURE_SELECTORS = 12;
+
+/**
+ * Measure the staged project, or say plainly that it could not be measured.
+ *
+ * The staging dir is what gets measured, never the live project: the agent's
+ * edits are not in the live one yet, so measuring it would report on a file the
+ * agent did not write and quietly answer the wrong question.
+ */
+async function measureLayoutTool(args: JsonRecord, options: TabarioModelOptions): Promise<unknown> {
+  const selectors = (Array.isArray(args.selectors) ? args.selectors : [])
+    .filter((value): value is string => typeof value === "string" && value.trim() !== "")
+    .slice(0, MAX_MEASURE_SELECTORS);
+  if (selectors.length === 0)
+    throw new Error('selectors is required — name at least one element, e.g. "#caption-2"');
+
+  const requested = args.seek_time;
+  const seekTime =
+    typeof requested === "number" && Number.isFinite(requested) ? Math.max(0, requested) : 0;
+
+  if (!options.adapter.measureLayout)
+    return unavailableMeasurement(
+      "This Studio server cannot measure layout — no browser is available to it. Do not report a " +
+        "visual result you were unable to check; say that you could not measure it.",
+      seekTime,
+    );
+
+  const composition =
+    typeof args.composition === "string" && args.composition.trim() ? args.composition : undefined;
+  // Confine the measured file to the staging dir, for the same reason every
+  // other tool is confined to it.
+  if (composition) safeSourcePath(options.stagingDir, composition);
+
+  return options.adapter.measureLayout({
+    projectDir: options.stagingDir,
+    composition,
+    selectors,
+    seekTime,
+    signal: options.signal,
+  });
+}
+
 const TOOL_HANDLERS: Record<string, ToolHandler> = {
   list_files: listFiles,
   list_media: listMedia,
@@ -562,6 +676,7 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
   write_file: writeFile,
   delete_file: deleteFile,
   validate_project: validateProject,
+  measure_layout: measureLayoutTool,
 };
 
 async function executeTool(call: ToolCall, options: TabarioModelOptions): Promise<unknown> {

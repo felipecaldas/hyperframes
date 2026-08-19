@@ -32,6 +32,7 @@ const TOOL_LABELS: Record<string, string> = {
   write_file: "Adding a file…",
   delete_file: "Removing a file…",
   validate_project: "Checking the result…",
+  measure_layout: "Measuring how it looks…",
 };
 
 /** A tool event as a person would say it; unknown tools degrade, never leak. */
