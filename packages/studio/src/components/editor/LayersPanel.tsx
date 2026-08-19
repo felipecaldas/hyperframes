@@ -18,6 +18,7 @@ import { getVisibleLayers, sortLayersByZIndex } from "./layersPanelSort";
 import { deriveTimelineStoreKey } from "../../player/lib/timelineElementHelpers";
 import { resolveZOrderReposition } from "./canvasContextMenuZOrder";
 import { buildStableSelector } from "./domEditingDom";
+import { isAtomicCapture } from "./domEditingGroups";
 import { zReorderCoalesceKey } from "../../hooks/useElementLifecycleOps";
 import { useLayerReorderTimelineMirror } from "../nle/useCanvasZOrderTimelineMirror";
 import { runZLaneGesture } from "../nle/zLaneGesture";
@@ -259,7 +260,7 @@ export const LayersPanel = memo(function LayersPanel() {
   const handleLayerDoubleClick = useCallback(
     async (layer: DomEditLayerItem) => {
       const selection = await resolveSelection(layer);
-      if (selection?.element.hasAttribute("data-hf-group")) {
+      if (selection && isAtomicCapture(selection.element)) {
         setActiveGroupElement(selection.element);
       } else {
         await handleSelectLayer(layer);
@@ -430,7 +431,9 @@ export const LayersPanel = memo(function LayersPanel() {
           >
             <span aria-hidden="true">←</span>
             <span className="truncate">
-              {activeGroupElement.getAttribute("data-hf-group") || "Group"}
+              {activeGroupElement.getAttribute("data-hf-group") ||
+                activeGroupElement.getAttribute("data-hf-label") ||
+                "Group"}
             </span>
           </button>
         )}

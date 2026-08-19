@@ -5,6 +5,17 @@ import { isHtmlElement } from "./domEditingDom";
 // (or to the next nested group inside it). One level of drill-in at a time keeps
 // nested groups navigable.
 
+// `data-hf-atomic` marks a container that behaves like a group for selection
+// and drill-in, but is not a user-made group: it cannot be ungrouped, and the
+// Layers panel shows it as one row. Compilers use it for units like captions.
+export function isAtomicContainer(el: HTMLElement): boolean {
+  return el.hasAttribute("data-hf-atomic");
+}
+
+export function isAtomicCapture(el: HTMLElement): boolean {
+  return el.hasAttribute("data-hf-group") || isAtomicContainer(el);
+}
+
 export type GroupCapture =
   | { kind: "unit"; element: HTMLElement } // select this group wrapper as one unit
   | { kind: "child" } // resolve the clicked element normally
@@ -25,7 +36,7 @@ export function resolveGroupCapture(
 ): GroupCapture {
   const groups: HTMLElement[] = [];
   for (let n: HTMLElement | null = startEl; n; n = n.parentElement) {
-    if (n.hasAttribute("data-hf-group")) groups.push(n);
+    if (isAtomicCapture(n)) groups.push(n);
   }
   const result = ((): GroupCapture => {
     if (!activeGroupElement) {

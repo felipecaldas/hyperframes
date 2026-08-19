@@ -4,7 +4,7 @@ import {
   resolveEditingSections,
   type EditableElementFacts,
 } from "@hyperframes/core/editing";
-import { groupScopedLayerRoots, resolveGroupCapture } from "./domEditingGroups";
+import { groupScopedLayerRoots, isAtomicContainer, resolveGroupCapture } from "./domEditingGroups";
 import type {
   DomEditCapabilities,
   DomEditContextOptions,
@@ -486,6 +486,10 @@ export function collectDomEditLayerItems(
         sourceFile: target.sourceFile,
       });
     }
+
+    // An atomic container is one row; its children only enumerate once the
+    // user drills into it (it then becomes a layer-tree root, not a visitee).
+    if (target && isAtomicContainer(el) && el !== (options.activeGroupElement ?? null)) return;
 
     const nextDepth = target ? depth + 1 : depth;
     for (const child of Array.from(el.children)) {

@@ -273,6 +273,9 @@ export function buildElementLabel(el: HTMLElement): string {
     return humanizeIdentifier(compositionSrc);
   }
 
+  const hfLabel = el.getAttribute("data-hf-label");
+  if (hfLabel) return hfLabel;
+
   const group = el.getAttribute("data-hf-group");
   if (group) return group;
 

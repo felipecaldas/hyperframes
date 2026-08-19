@@ -2,6 +2,7 @@ import { useCallback, useRef } from "react";
 import { liveTime, usePlayerStore } from "../player";
 import { pauseStudioPreviewPlayback } from "../utils/studioPreviewHelpers";
 import { type DomEditSelection } from "../components/editor/domEditing";
+import { isAtomicCapture } from "../components/editor/domEditingGroups";
 import type { ApplyDomSelectionOptions, ResolveDomSelectionOptions } from "./useDomSelection";
 import { trackStudioEvent } from "../utils/studioTelemetry";
 
@@ -118,7 +119,7 @@ export function usePreviewInteraction({
           cycle.candidates.length > 1 &&
           Math.hypot(e.clientX - cycle.x, e.clientY - cycle.y) < CYCLE_RADIUS_PX &&
           downTs - cycle.at < CYCLE_WINDOW_MS;
-        if (hit?.element.hasAttribute("data-hf-group")) {
+        if (hit && isAtomicCapture(hit.element)) {
           e.preventDefault();
           e.stopPropagation();
           cycleRef.current = null;
