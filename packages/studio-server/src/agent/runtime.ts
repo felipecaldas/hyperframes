@@ -400,7 +400,20 @@ export class AgentRuntime {
       if (!job.cancelled) failure = timeouts.reason() ?? errorMessage(error);
     } finally {
       timeouts.clear();
-      rmSync(stagingDir, { recursive: true, force: true });
+      // Cleanup must never decide whether the run gets to report itself.
+      //
+      // A throw here skips `recordAssistant` and `finishRun` both, so the user
+      // sees changed files, no reply, and no completion, while the ledger sits
+      // on "running" for ever. That is exactly what a TAB-805 measurement
+      // caused: its static server inherited the project's `autoProxy`, so the
+      // browser triggered transcodes that wrote into this directory while it
+      // was being removed, and `rmSync` raised on the moving target.
+      try {
+        rmSync(stagingDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.warn(`[Studio] could not remove agent staging dir: ${errorMessage(error)}`);
+      }
     }
 
     this.recordAssistant(job, thread, assistantText);

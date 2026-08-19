@@ -263,6 +263,12 @@ async function runLayoutMeasurement(
       opts.projectDir,
       html,
       "Failed to bind the layout measurement server",
+      [],
+      // Proxy transcoding off, explicitly. A layout measurement wants geometry,
+      // not a playable codec, and leaving the project's `autoProxy` on made the
+      // browser request `?hf-proxy=` variants that spawn ffmpeg and write into
+      // the very staging directory the run deletes on its way out.
+      false,
     );
 
     // The frame is what every percentage position resolves against, so a wrong

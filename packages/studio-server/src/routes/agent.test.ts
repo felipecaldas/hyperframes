@@ -1,6 +1,25 @@
 // @vitest-environment node
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+/**
+ * TAB-805. Lets one test make the staging cleanup fail the way a live run did,
+ * so the assertion is "the run still reports itself", not "rmSync works".
+ */
+const stagingRemoval = vi.hoisted(() => ({ shouldFail: false }));
+vi.mock("node:fs", async (importActual) => {
+  const actual = await importActual<typeof import("node:fs")>();
+  return {
+    ...actual,
+    default: actual,
+    rmSync: ((path: never, options: never) => {
+      if (stagingRemoval.shouldFail && String(path).includes("staging"))
+        throw new Error("ENOTEMPTY: directory not empty");
+      return actual.rmSync(path, options);
+    }) as typeof actual.rmSync,
+  };
+});
+
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -471,5 +490,47 @@ describe("Tabario AI API", () => {
       body: "{}",
     });
     expect(existsSync(join(setup.projectDir, "compositions/accent.html"))).toBe(false);
+  });
+
+  /**
+   * A run that measured, applied its changes, and then vanished: no reply, no
+   * completion, ledger stuck on "running". The cleanup in the run's `finally`
+   * threw — a TAB-805 measurement server had inherited the project's autoProxy
+   * and was writing transcodes into the staging directory as it was removed —
+   * and a throw there skips `recordAssistant` and `finishRun` both.
+   *
+   * Cleanup must never decide whether the run gets to report itself.
+   */
+  it("still reports the run when the staging cleanup fails", async () => {
+    const hash = createHash("sha256").update(INITIAL_HTML).digest("hex");
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          completion("", [
+            toolCall("write", "edit_file", {
+              path: "index.html",
+              old_string: "before",
+              new_string: "after",
+              expected_hash: hash,
+            }),
+          ]),
+        )
+        .mockImplementation(async () => completion("Updated the timeline.")),
+    );
+    const app = createStudioApi(adapter(setup.projectDir));
+    const token = await nonce(app);
+    stagingRemoval.shouldFail = true;
+    try {
+      const jobId = await start(app, token, "Change the opening", { kind: "timeline" });
+      const stream = await events(app, jobId);
+      expect(stream).toContain("event: changed-files");
+      expect(stream).toContain("event: assistant");
+      expect(stream).toContain("event: complete");
+    } finally {
+      stagingRemoval.shouldFail = false;
+    }
+    expect(readFileSync(join(setup.projectDir, "index.html"), "utf-8")).toContain("after");
   });
 });
