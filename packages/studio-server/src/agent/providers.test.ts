@@ -131,7 +131,7 @@ describe("Tabario AI provider", () => {
           }),
         ]),
       )
-      .mockResolvedValueOnce(completion("Updated the opening frame."));
+      .mockImplementation(async () => completion("Updated the opening frame."));
     const assistant: string[] = [];
 
     const result = await runTabarioModel({
@@ -292,7 +292,7 @@ describe("Tabario AI provider", () => {
           }),
         ]),
       )
-      .mockResolvedValueOnce(completion("Done."));
+      .mockImplementation(async () => completion("Done."));
 
     await runTabarioModel({
       adapter: adapter(),
@@ -414,7 +414,7 @@ describe("Tabario AI provider", () => {
           }),
         ]),
       )
-      .mockResolvedValueOnce(completion("I moved the captions down."));
+      .mockImplementation(async () => completion("I moved the captions down."));
 
     const result = await runTabarioModel({
       adapter: adapter(),
@@ -587,7 +587,7 @@ describe("Tabario AI provider", () => {
           }),
         ]),
       )
-      .mockResolvedValueOnce(completion("I moved the captions down."));
+      .mockImplementation(async () => completion("I moved the captions down."));
 
     await runTabarioModel({
       adapter: adapter(),
@@ -670,7 +670,7 @@ describe("Tabario AI provider", () => {
           }),
         ]),
       )
-      .mockResolvedValueOnce(completion("Added the scene."));
+      .mockImplementation(async () => completion("Added the scene."));
 
     await runTabarioModel({
       adapter: adapter(),
@@ -810,7 +810,7 @@ describe("Tabario AI provider", () => {
           }),
         ]),
       )
-      .mockResolvedValueOnce(completion("Done."));
+      .mockImplementation(async () => completion("Done."));
 
     await runTabarioModel({
       adapter: adapter(),
@@ -910,7 +910,7 @@ describe("Tabario AI provider", () => {
           }),
         ]),
       )
-      .mockResolvedValueOnce(completion("Done."));
+      .mockImplementation(async () => completion("Done."));
 
     await runTabarioModel({
       adapter: adapter(),
@@ -1055,5 +1055,125 @@ describe("Tabario AI provider", () => {
     expect(body.tools.map((t: { function: { name: string } }) => t.function.name)).toContain(
       "measure_layout",
     );
+  });
+
+  /**
+   * TAB-805's gate. In a live run against the reported project the model changed
+   * the caption's pinned box and then answered "it should now display
+   * correctly" without measuring anything — the same unchecked claim, one cause
+   * later. The prompt already asked it to measure; TAB-791 says an instruction
+   * it can decline is not a gate. So the run asks once, at the only moment that
+   * matters: when it tries to finish.
+   */
+  it("will not let a layout change be reported without measuring it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    const source = '<html data-composition-id="demo"><body><p>WIDE</p></body></html>\n';
+    writeFileSync(join(root, "index.html"), source);
+    const hash = createHash("sha256").update(source).digest("hex");
+    const measureLayout = vi.fn().mockResolvedValue({
+      measured: true,
+      seekTime: 0,
+      elements: [{ selector: "p", box: { x: 0, y: 0, width: 100, height: 39 }, lines: 1 }],
+    });
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("e", "edit_file", {
+            path: "index.html",
+            old_string: "WIDE",
+            new_string: "NARROW",
+            expected_hash: hash,
+          }),
+        ]),
+      )
+      // Answers without measuring — this is the turn the gate refuses to accept.
+      .mockResolvedValueOnce(completion("It should now display correctly."))
+      .mockResolvedValueOnce(completion("", [call("m", "measure_layout", { selectors: ["p"] })]))
+      .mockResolvedValueOnce(completion("It is one line now."));
+
+    const result = await runTabarioModel({
+      adapter: { ...adapter(), measureLayout },
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "make it one line", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    expect(measureLayout).toHaveBeenCalledOnce();
+    expect(result.assistantText).toBe("It is one line now.");
+    const third = JSON.parse(String(fetchImpl.mock.calls[2]?.[1]?.body));
+    const demand = third.messages[third.messages.length - 1];
+    expect(demand.role).toBe("user");
+    expect(demand.content).toContain("have not measured the result");
+  });
+
+  it("asks for a measurement once, then lets the answer stand", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    const source = '<html data-composition-id="demo"><body><p>WIDE</p></body></html>\n';
+    writeFileSync(join(root, "index.html"), source);
+    const hash = createHash("sha256").update(source).digest("hex");
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("e", "edit_file", {
+            path: "index.html",
+            old_string: "WIDE",
+            new_string: "NARROW",
+            expected_hash: hash,
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(completion("Done."))
+      .mockResolvedValueOnce(completion("Really done."));
+
+    const result = await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "make it one line", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    // Three completions, not a loop: asked once, then the reply stands.
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(result.assistantText).toBe("Really done.");
+  });
+
+  /**
+   * A question that changed nothing must not be told to measure. The gate keys
+   * on a write that actually landed, so a rejected edit does not trip it either.
+   */
+  it("does not demand a measurement when nothing was changed", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(completion("", [call("r", "read_file", { path: "index.html" })]))
+      .mockResolvedValueOnce(completion("The caption runs from 5.2s to 7.3s."));
+
+    const result = await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "when does it show?", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(result.assistantText).toBe("The caption runs from 5.2s to 7.3s.");
   });
 });

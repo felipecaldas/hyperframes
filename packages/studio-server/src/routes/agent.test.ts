@@ -206,7 +206,7 @@ describe("Tabario AI API", () => {
             }),
           ]),
         )
-        .mockResolvedValueOnce(completion("Updated the timeline.")),
+        .mockImplementation(async () => completion("Updated the timeline.")),
     );
     const app = createStudioApi(adapter(setup.projectDir));
     const token = await nonce(app);
@@ -252,7 +252,7 @@ describe("Tabario AI API", () => {
             }),
           ]),
         )
-        .mockResolvedValueOnce(completion("Made the requested change.")),
+        .mockImplementation(async () => completion("Made the requested change.")),
     );
     const app = createStudioApi(adapter(setup.projectDir));
     const token = await nonce(app);
@@ -288,7 +288,7 @@ describe("Tabario AI API", () => {
             }),
           ]),
         )
-        .mockResolvedValueOnce(completion("Made the requested change.")),
+        .mockImplementation(async () => completion("Made the requested change.")),
     );
     const app = createStudioApi(adapter(setup.projectDir));
     const token = await nonce(app);
@@ -315,7 +315,7 @@ describe("Tabario AI API", () => {
             }),
           ]),
         )
-        .mockResolvedValueOnce(completion("Made the requested change.")),
+        .mockImplementation(async () => completion("Made the requested change.")),
     );
     const app = createStudioApi(adapter(setup.projectDir));
     const token = await nonce(app);
@@ -374,7 +374,7 @@ describe("Tabario AI API", () => {
             }),
           ]),
         )
-        .mockResolvedValueOnce(completion("I moved the captions down.")),
+        .mockImplementation(async () => completion("I moved the captions down.")),
     );
     const app = createStudioApi(adapter(setup.projectDir));
     const token = await nonce(app);

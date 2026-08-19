@@ -667,6 +667,8 @@ async function measureLayoutTool(args: JsonRecord, options: TabarioModelOptions)
   });
 }
 
+const WRITE_TOOLS = new Set(["edit_file", "write_file"]);
+
 const TOOL_HANDLERS: Record<string, ToolHandler> = {
   list_files: listFiles,
   list_media: listMedia,
@@ -722,10 +724,23 @@ async function requestCompletion(
   return completionMessage(await response.json());
 }
 
+/** What a round of tools did, for the gate that runs when the model tries to finish. */
+interface ToolRunState {
+  /** A write to a file whose layout can be measured actually landed. */
+  changedRenderable: boolean;
+  /** `measure_layout` was called — whether or not it could measure. */
+  measured: boolean;
+}
+
+function isRenderable(path: unknown): boolean {
+  return typeof path === "string" && /\.(html|css)$/i.test(path);
+}
+
 async function executeToolCalls(
   calls: ToolCall[],
   messages: ChatMessage[],
   options: TabarioModelOptions,
+  state: ToolRunState,
 ): Promise<void> {
   for (const call of calls) {
     // Cancelling stops the batch here rather than at the next round. A round's
@@ -739,12 +754,29 @@ async function executeToolCalls(
     let result: unknown;
     try {
       result = await executeTool(call, options);
+      // Only a write that survived every gate counts as a change worth
+      // measuring; a rejected edit left the project exactly as it was.
+      if (WRITE_TOOLS.has(call.function.name) && isRenderable(parseArguments(call).path))
+        state.changedRenderable = true;
     } catch (error) {
       result = { error: error instanceof Error ? error.message : String(error) };
     }
+    if (call.function.name === "measure_layout") state.measured = true;
     messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result) });
   }
 }
+
+/**
+ * What the run says to the model when it changed the look of something and then
+ * tried to answer without checking. One nudge, never a loop: if it still does
+ * not measure, the turn ends and the reply stands on its own.
+ */
+const MEASURE_BEFORE_ANSWERING =
+  "You changed the project but have not measured the result, so you do not yet know whether it " +
+  "worked. Call measure_layout now on the elements you changed, seeking to a time when they are " +
+  "on screen, and compare the numbers with what was asked. If they match, say what was changed. " +
+  "If they do not, either change what the measurement points at or say plainly what it is now and " +
+  "what you could not achieve. Do not repeat your previous answer unchecked.";
 
 /** Said when stripping code leaves nothing at all — never an empty bubble. */
 const NOTHING_LEFT_TO_SAY = "I've finished. Let me know if you'd like anything adjusted.";
@@ -790,16 +822,37 @@ function presentableAssistantText(text: string): string {
   return cleaned || NOTHING_LEFT_TO_SAY;
 }
 
-export async function runTabarioModel(options: TabarioModelOptions): Promise<TabarioModelResult> {
+function requireApiKey(): string {
   const apiKey = process.env.OPENROUTER_API_KEY?.trim();
   if (!apiKey) throw new Error("Tabario AI is not configured on this Studio server.");
-  const model = modelName();
-  const messages: ChatMessage[] = [
+  return apiKey;
+}
+
+function initialMessages(options: TabarioModelOptions): ChatMessage[] {
+  return [
     { role: "system", content: systemPrompt(options.kind) },
     ...options.transcript.slice(-24).map((entry) => ({ role: entry.role, content: entry.text })),
   ];
+}
+
+/**
+ * Whether the model may end the turn, or has to go and look first.
+ *
+ * True only when a write actually landed on something whose layout can be
+ * measured, nothing was measured, and it has not already been asked once.
+ */
+function mustMeasureFirst(state: ToolRunState, alreadyAsked: boolean): boolean {
+  return state.changedRenderable && !state.measured && !alreadyAsked;
+}
+
+export async function runTabarioModel(options: TabarioModelOptions): Promise<TabarioModelResult> {
+  const apiKey = requireApiKey();
+  const model = modelName();
+  const messages = initialMessages(options);
   const fetchImpl = options.fetchImpl ?? fetch;
   let assistantText = "";
+  const state: ToolRunState = { changedRenderable: false, measured: false };
+  let measurementDemanded = false;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     if (options.signal.aborted) throw new DOMException("Tabario AI run cancelled.", "AbortError");
@@ -812,10 +865,21 @@ export async function runTabarioModel(options: TabarioModelOptions): Promise<Tab
     });
     if (completion.content) assistantText = presentableAssistantText(completion.content);
     if (completion.toolCalls.length === 0) {
+      // The gate, not the instruction (TAB-791). The prompt already tells the
+      // model to measure after a layout change, and in a live run against the
+      // reported project it changed the caption's pinned box and then answered
+      // "it should now display correctly" without ever measuring — which is the
+      // same unchecked claim TAB-805 exists to stop, one cause later. Asked
+      // once, at the only moment that matters: when it tries to finish.
+      if (mustMeasureFirst(state, measurementDemanded)) {
+        measurementDemanded = true;
+        messages.push({ role: "user", content: MEASURE_BEFORE_ANSWERING });
+        continue;
+      }
       if (assistantText) options.onAssistant(assistantText);
       return { assistantText, model };
     }
-    await executeToolCalls(completion.toolCalls, messages, options);
+    await executeToolCalls(completion.toolCalls, messages, options, state);
   }
   throw new Error(`Tabario AI exceeded ${MAX_TOOL_ROUNDS} tool rounds.`);
 }
