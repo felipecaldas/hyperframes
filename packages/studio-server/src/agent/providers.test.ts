@@ -108,6 +108,13 @@ describe("Tabario AI provider", () => {
     expect(system.content).toContain("timeline IS its HTML");
     // The attributes a timing question is actually answered from.
     expect(system.content).toContain("data-start");
+    // TAB-812: the caption rules that prevent the TAB-804/TAB-791 regression
+    // modes — the model merging/splitting word spans or rewriting the shared
+    // highlight loop instead of editing a span's text or data attributes.
+    expect(system.content).toContain("data-hf-atomic");
+    expect(system.content).toContain("Never rewrite, duplicate or inline the highlight loop");
+    expect(system.content).toContain("never merge or split word spans");
+    expect(system.content).toContain("never copy a `data-hf-id`");
     expect(system.content).toContain("data-duration");
     expect(system.content).toContain("data-composition-src");
     // And the explicit instruction not to plead blindness.

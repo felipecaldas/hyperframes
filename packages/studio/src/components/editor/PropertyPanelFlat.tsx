@@ -18,6 +18,11 @@ import { isCanaryEnabled } from "../../telemetry/canary";
 import { AudioFxGroup } from "./propertyPanelAudioFxGroup.js";
 import { useVolumeAutomation } from "./useVolumeAutomation";
 import { FlatMediaSection } from "./propertyPanelFlatMediaSection";
+import {
+  FlatCaptionSection,
+  captionStyleSummary,
+  isCaptionSelection,
+} from "./propertyPanelFlatCaptionSection";
 import { deriveElementTiming } from "./propertyPanelFlatTimingDerivation";
 import { createGsapLivePreview } from "./gsapLivePreview";
 import { formatTextFieldPreview } from "./propertyPanelSections";
@@ -129,13 +134,15 @@ export function PropertyPanelFlat({
 }: PropertyPanelFlatProps) {
   // PropertyPanel keys this component by selection, so the default is per element.
   const [openGroupId, setOpenGroupId] = useState<string>(() =>
-    isTextEditableSelection(element)
-      ? "text"
-      : showEditableSections
-        ? "style"
-        : sections.media
-          ? "media"
-          : "layout",
+    isCaptionSelection(element)
+      ? "caption"
+      : isTextEditableSelection(element)
+        ? "text"
+        : showEditableSections
+          ? "style"
+          : sections.media
+            ? "media"
+            : "layout",
   );
 
   // Tracks which group(s) are actively transitioning this toggle cycle, so
@@ -260,6 +267,20 @@ export function PropertyPanelFlat({
   const volumeAutomation = useVolumeAutomation(element, onSetAttributeQuiet ?? onSetAttributeLive);
 
   const groups: FlatGroupDescriptor[] = [];
+  if (isCaptionSelection(element)) {
+    groups.push({
+      id: "caption",
+      title: "Caption",
+      summary: captionStyleSummary(element),
+      content: (
+        <FlatCaptionSection
+          element={element}
+          onSetAttribute={onSetAttribute}
+          onSetAttributes={onSetAttributes}
+        />
+      ),
+    });
+  }
   if (isTextEditable) {
     groups.push({
       id: "text",
