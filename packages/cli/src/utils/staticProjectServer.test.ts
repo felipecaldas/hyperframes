@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { get, Agent, type IncomingMessage } from "node:http";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -368,5 +369,36 @@ describe("serveStaticProjectHtml transparent media proxies", () => {
     const res = await fetch(`${server.url}image.png?hf-proxy=h264`);
     expect(res.status).toBe(404);
     expect(mocks.resolveProxy).not.toHaveBeenCalled();
+  });
+
+  /**
+   * TAB-805. Closing must not wait on a pooled keep-alive socket. Node already
+   * drops idle ones, so this passes today and is here as a regression guard:
+   * the measurement path closes this server while still holding a shared
+   * browser, and a close that waits would stall an agent run.
+   */
+  it("closes promptly with a pooled keep-alive connection open", async () => {
+    const projectDir = mk();
+    const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+    const local = await serveStaticProjectHtml(projectDir, "<html>hi</html>");
+    try {
+      // A real keep-alive request, so the socket is still pooled afterwards.
+      const res = await new Promise<IncomingMessage>((ok, no) => {
+        get(`${local.url}`, { agent }, ok).on("error", no);
+      });
+      res.resume();
+      await new Promise((ok) => res.on("end", ok));
+
+      await expect(
+        Promise.race([
+          local.close().then(() => "closed"),
+          new Promise((ok) => setTimeout(() => ok("hung"), 3000)),
+        ]),
+      ).resolves.toBe("closed");
+    } finally {
+      agent.destroy();
+    }
+    // Already closed; the outer afterEach must not close it twice.
+    server = undefined;
   });
 });

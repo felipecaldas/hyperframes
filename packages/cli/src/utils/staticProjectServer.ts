@@ -225,9 +225,22 @@ export async function serveStaticProjectHtml(
   return {
     url: `http://127.0.0.1:${port}/`,
     port,
+    /**
+     * `server.close()` stops listening and waits for connections to end. Node
+     * drops *idle* keep-alive sockets for us, but not ones mid-request, so a
+     * caller that closes the server without also closing its browser can wait
+     * on a socket nobody is going to finish. `hyperframes check` never met this
+     * because it closes the whole browser first; TAB-805's measurement holds a
+     * shared, leased browser and closes only its page. Dropping the sockets
+     * explicitly makes closing bounded however the caller manages its browser.
+     *
+     * This is hardening, not the fix for any observed hang — the measurement
+     * carries its own deadline for that.
+     */
     close: () =>
       new Promise<void>((resolveClose) => {
         server.close(() => resolveClose());
+        server.closeAllConnections();
       }),
   };
 }
