@@ -347,6 +347,40 @@ describe("Tabario AI API", () => {
     expect(stream).not.toContain("event: failure");
   });
 
+  /**
+   * TAB-794. `chat` is what every message typed into Studio's chat arrives as,
+   * so it can no longer mean "read-only" — a reported problem has to end in an
+   * applied edit. `isEditRequest` still calls this kind a non-edit, which is
+   * only about the wording of the no-op message; the transaction itself must
+   * commit exactly as any other kind does.
+   */
+  it("applies a chat-kind run that edited in response to a reported problem", async () => {
+    const hash = seedProject(setup.projectDir, INITIAL_HTML);
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          completion("", [
+            toolCall("write", "write_file", {
+              path: "index.html",
+              content: INITIAL_HTML.replace("before", "after"),
+              expected_hash: hash,
+            }),
+          ]),
+        )
+        .mockResolvedValueOnce(completion("I moved the captions down.")),
+    );
+    const app = createStudioApi(adapter(setup.projectDir));
+    const token = await nonce(app);
+    const jobId = await start(app, token, 'The "Caption Layer" is too high', { kind: "chat" });
+    const stream = await events(app, jobId);
+
+    expect(stream).toContain("event: changed-files");
+    expect(stream).not.toContain("event: failure");
+    expect(readFileSync(join(setup.projectDir, "index.html"), "utf-8")).toContain("after");
+  });
+
   it("cancels an in-flight model call without applying staged work", async () => {
     vi.stubGlobal(
       "fetch",

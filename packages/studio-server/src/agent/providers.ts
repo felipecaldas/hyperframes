@@ -87,6 +87,19 @@ function modelName(): string {
  * So the project's structure is stated outright. Nothing here widens what the
  * agent may write; it only removes the reason it had to believe it could not
  * look.
+ *
+ * TAB-794: the request kind must stop deciding intent. `useAgentRun` sends
+ * `kind: request?.kind ?? "chat"`, so *every* message typed into Studio's chat
+ * arrives as `chat` — and this prompt used to end "For questions, answer
+ * without changing files". Told "the Caption Layer is too high", the model
+ * dutifully replied with a plan in future tense and changed nothing. It was
+ * obeying: a typed request was, by construction, a question. So `chat` now
+ * means *decide from what the user said*; the explicit kinds stay as they were.
+ *
+ * TAB-795: and say it like a person. The same reply carried a fenced block of
+ * raw CSS, which Studio renders verbatim — fence markers and all — to someone
+ * who is editing a video, not a stylesheet. The prompt constrained the reply's
+ * content and never its register.
  */
 function systemPrompt(kind: AgentRequestKind): string {
   return `You are Tabario AI inside Tabario Studio. You are editing one isolated HyperFrames project.
@@ -98,14 +111,22 @@ A HyperFrames project's timeline IS its HTML — reading the files is how you in
 - Media live in \`assets/\` and are referenced by \`<video>\`, \`<img>\` and \`<audio>\` elements; captions are text elements on their own track.
 - Motion is the GSAP block in \`index.html\`: \`tl.to\`, \`tl.fromTo\` and \`tl.set\` calls, each with a position in seconds.
 
-So questions about what is on screen, when, for how long, or why something is missing are answerable from the source. To answer one, read \`index.html\` and any mounted compositions and reason over those attributes — give concrete element ids and time ranges. Never say you cannot see the timeline or the media; if something genuinely is not in the files, say what you looked at and what was absent.
+So questions about what is on screen, when, for how long, or why something is missing are answerable from the source. To answer one, read \`index.html\` and any mounted compositions and reason over those attributes — give concrete layer names and time ranges. Never say you cannot see the timeline or the media; if something genuinely is not in the files, say what you looked at and what was absent.
 
 Never invent file contents or paths. Never embed remote assets, secrets, or network calls in project code.
 Media filenames cannot be guessed — call list_media to see what the project actually contains, and reference only those. A write whose src points at a file the project does not have is rejected, and the rejection lists the files that do exist.
 Preserve the existing template, media references, duration, captions, and voiceover unless the user asks to change them.
 All edits are staged and linted before Studio applies them. Call validate_project after edits and repair lint errors.
-For edit-oriented requests, make the requested source changes. For questions, answer without changing files.
-End with a concise explanation of what changed or what you found.`;
+
+Act on the request — do not merely describe what you would do. The request kind above is a transport label, not the user's intent: everything typed into Studio's chat arrives as \`chat\`, so decide from what the user actually said.
+- If they report a problem, say something looks wrong, or ask for a change, and you understand what they mean, then make the change now, in this turn, with the write tools. "The captions are too high" is a request to move them; it does not need the words "fix it".
+- Answer without editing only when the message is genuinely a question about the project, or when you cannot proceed without something only the user can tell you — in that case ask exactly one specific question and stop.
+- Never end a turn with a plan you have not carried out. Do not say what you "will" do; do it, then say what you did.
+
+How to reply — you are talking to someone editing a video, not reading code:
+- Plain language only. Never include code, markup, CSS, JavaScript, diffs, class names, CSS selectors, style property names, or file paths. Fenced code blocks are removed from your reply before it reaches the user, so anything you put in one is simply lost.
+- Name things as the user sees them on the timeline: the layer's name, the words on screen, the time it appears. Fall back to an internal id only when nothing user-visible identifies the element.
+- Two to four sentences — what was wrong, what you changed, and what they will see now. Past tense once it is done.`;
 }
 
 const tools = [
@@ -495,6 +516,50 @@ async function executeToolCalls(
   }
 }
 
+/** Said when stripping code leaves nothing at all — never an empty bubble. */
+const NOTHING_LEFT_TO_SAY = "I've finished. Let me know if you'd like anything adjusted.";
+
+/**
+ * The reply as the user should see it (TAB-795).
+ *
+ * The system prompt now forbids code in a reply, but TAB-791 already proved
+ * that an instruction the model can decline is not a gate — it invented a
+ * filename while the prompt said "Never invent file contents or paths". So the
+ * outward-facing copy is stripped too.
+ *
+ * Only what reaches the user is cleaned. The `messages` array keeps the raw
+ * completion, because that is the model's own record of what it said and
+ * rewriting it would make later turns reason about a conversation that did not
+ * happen.
+ *
+ * An unterminated fence swallows the rest of the message on purpose: half a
+ * code block is still a code block, and the fallback below is a better thing to
+ * show than the back half of a stylesheet.
+ */
+function presentableAssistantText(text: string): string {
+  const kept: string[] = [];
+  let fence: string | null = null;
+  for (const line of text.split("\n")) {
+    const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1];
+    if (fence) {
+      // A fence closes only on its own character, and never on a shorter run.
+      if (marker && marker[0] === fence[0] && marker.length >= fence.length) fence = null;
+      continue;
+    }
+    if (marker) fence = marker;
+    else kept.push(line);
+  }
+  const cleaned = kept
+    .join("\n")
+    // Unwrap inline code, then drop any stray backtick, so no code formatting
+    // survives to suggest the user is looking at source.
+    .replace(/`+([^`\n]*)`+/g, "$1")
+    .replace(/`/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return cleaned || NOTHING_LEFT_TO_SAY;
+}
+
 export async function runTabarioModel(options: TabarioModelOptions): Promise<TabarioModelResult> {
   const apiKey = process.env.OPENROUTER_API_KEY?.trim();
   if (!apiKey) throw new Error("Tabario AI is not configured on this Studio server.");
@@ -515,7 +580,7 @@ export async function runTabarioModel(options: TabarioModelOptions): Promise<Tab
       content: completion.content || null,
       tool_calls: completion.toolCalls,
     });
-    if (completion.content) assistantText = completion.content;
+    if (completion.content) assistantText = presentableAssistantText(completion.content);
     if (completion.toolCalls.length === 0) {
       if (assistantText) options.onAssistant(assistantText);
       return { assistantText, model };

@@ -336,4 +336,210 @@ describe("Tabario AI provider", () => {
     // between what is editable and what is merely referenceable.
     expect(payload.files).not.toContain("index.html");
   });
+
+  /**
+   * TAB-794, reproduced from the report.
+   *
+   * Told "the Caption Layer is too high", the model replied "I will adjust the
+   * top CSS property…" and changed nothing. It was obeying: `useAgentRun` sends
+   * `kind: request?.kind ?? "chat"`, so every typed message arrives as `chat`,
+   * and the prompt mapped `chat` to "answer without changing files". A stated
+   * problem was structurally incapable of producing an edit.
+   *
+   * Asserted on the request actually sent, so a refactor that drops the clauses
+   * fails here rather than in a user's session.
+   */
+  it("tells the model to act on a stated problem rather than propose a plan", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(completion("Lowered them."));
+
+    await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [
+        {
+          role: "user",
+          text: 'The "Caption Layer" is too high',
+          at: new Date().toISOString(),
+        },
+      ],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    const body = JSON.parse(String((fetchImpl.mock.calls[0]?.[1] as RequestInit)?.body));
+    const system = body.messages.find((message: { role: string }) => message.role === "system");
+    // The kind must stop standing in for intent.
+    expect(system.content).toContain("transport label, not the user's intent");
+    expect(system.content).toContain('does not need the words "fix it"');
+    expect(system.content).toContain("make the change now, in this turn");
+    expect(system.content).toContain("Never end a turn with a plan you have not carried out");
+    // A real question must still be answerable without touching files.
+    expect(system.content).toContain(
+      "Answer without editing only when the message is genuinely a question",
+    );
+    // TAB-781's guidance has to survive this edit.
+    expect(system.content).toContain("timeline IS its HTML");
+  });
+
+  /**
+   * The other half of TAB-794: `chat` is no longer a read-only mode, so a run
+   * that decides to edit must actually write. Applying the write is the
+   * runtime's job; producing it is this module's.
+   */
+  it("writes on a chat-kind request when the user reported a problem", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const hash = createHash("sha256").update(HTML).digest("hex");
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("write", "write_file", {
+            path: "index.html",
+            content: HTML.replace("before", "after"),
+            expected_hash: hash,
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(completion("I moved the captions down."));
+
+    const result = await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [
+        { role: "user", text: "the captions are too high", at: new Date().toISOString() },
+      ],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    expect(readFileSync(join(root, "index.html"), "utf-8")).toContain("after");
+    expect(result.assistantText).toBe("I moved the captions down.");
+  });
+
+  /**
+   * TAB-795, reproduced from the report.
+   *
+   * The same reply carried a fenced block of raw CSS, which Studio renders
+   * verbatim — fence markers included — to someone editing a video. The prompt
+   * says not to; the strip is what makes it true, because TAB-791 already
+   * showed an instruction the model can decline is not a gate.
+   */
+  it("strips code out of the reply and says so in the prompt", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const reply = [
+      "You're right, the captions sit too high.",
+      "",
+      "```html",
+      "    .hf-captions { top: 85%; font-size: 31.2px; }",
+      "```",
+      "",
+      "I lowered the `Caption Layer` and it now fits on one line.",
+    ].join("\n");
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(completion(reply));
+    const assistant: string[] = [];
+
+    const result = await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [
+        { role: "user", text: "the captions are too high", at: new Date().toISOString() },
+      ],
+      signal: new AbortController().signal,
+      onAssistant: (text) => assistant.push(text),
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    expect(result.assistantText).toBe(
+      "You're right, the captions sit too high.\n\nI lowered the Caption Layer and it now fits on one line.",
+    );
+    // Both paths out of this module carry the cleaned copy, not just one.
+    expect(assistant).toEqual([result.assistantText]);
+    expect(result.assistantText).not.toContain("```");
+    expect(result.assistantText).not.toContain("hf-captions");
+    expect(result.assistantText).not.toContain("`");
+
+    const body = JSON.parse(String((fetchImpl.mock.calls[0]?.[1] as RequestInit)?.body));
+    const system = body.messages.find((message: { role: string }) => message.role === "system");
+    expect(system.content).toContain(
+      "you are talking to someone editing a video, not reading code",
+    );
+    expect(system.content).toContain("CSS selectors");
+    expect(system.content).toContain("Fenced code blocks are removed from your reply");
+  });
+
+  it("never leaves an empty bubble when the reply was nothing but code", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const reply = ["```css", ".hf-captions { top: 85%; }", "```"].join("\n");
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(completion(reply));
+
+    const result = await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "lower the captions", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    expect(result.assistantText).toBe(
+      "I've finished. Let me know if you'd like anything adjusted.",
+    );
+  });
+
+  /**
+   * An unterminated fence takes the rest of the message with it. Half a code
+   * block is still a code block, and the model's own record must stay intact
+   * either way — later turns have to reason about what it actually said.
+   */
+  it("drops an unclosed code block and leaves the model's own transcript raw", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const reply = ["I lowered the captions.", "```html", '<div class="hf-captions">'].join("\n");
+    // The unclosed block is the *final* message, so the strip is what decides
+    // what the user sees; put it mid-run and this test would pass either way.
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(completion(reply, [call("read", "read_file", { path: "index.html" })]))
+      .mockResolvedValueOnce(completion(reply));
+
+    const result = await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "lower the captions", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    expect(result.assistantText).toBe("I lowered the captions.");
+    expect(result.assistantText).not.toContain("hf-captions");
+    const second = JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body));
+    const echoed = second.messages.find(
+      (message: { role: string; content: string | null }) =>
+        message.role === "assistant" && typeof message.content === "string",
+    );
+    expect(echoed.content).toBe(reply);
+  });
 });
