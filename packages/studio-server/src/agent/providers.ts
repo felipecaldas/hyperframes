@@ -613,6 +613,12 @@ async function executeToolCalls(
   options: TabarioModelOptions,
 ): Promise<void> {
   for (const call of calls) {
+    // Cancelling stops the batch here rather than at the next round. A round's
+    // tool calls can be several, and one of them can be `validate_project` — a
+    // compile and a headless browser — so running the batch out first left the
+    // user watching "Cancelling…" for tens of seconds. Stopping between calls
+    // rather than mid-call keeps a tool's own writes whole.
+    if (options.signal.aborted) throw new DOMException("Tabario AI run cancelled.", "AbortError");
     options.onTool(call.function.name);
     options.onActivity();
     let result: unknown;

@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { detectProvider, runTabarioModel } from "./providers.js";
@@ -687,6 +687,61 @@ describe("Tabario AI provider", () => {
     expect(readFileSync(join(root, "compositions/scene-9.html"), "utf-8")).toBe(
       "<div>new scene</div>\n",
     );
+  });
+
+  /**
+   * Cancelling used to wait for the whole batch. The round loop checks the
+   * signal, but the batch it had already been handed did not — and a batch can
+   * hold `validate_project`, which is a compile and a headless browser. Stop
+   * therefore registered tens of seconds after it was pressed.
+   */
+  it("stops a tool batch as soon as the run is cancelled", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const controller = new AbortController();
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      completion("", [
+        call("first", "write_file", {
+          path: "compositions/scene-a.html",
+          content: "<div>a</div>\n",
+          expected_hash: null,
+        }),
+        call("second", "write_file", {
+          path: "compositions/scene-b.html",
+          content: "<div>b</div>\n",
+          expected_hash: null,
+        }),
+      ]),
+    );
+    const started: string[] = [];
+
+    await expect(
+      runTabarioModel({
+        adapter: adapter(),
+        stagingDir: root,
+        kind: "timeline",
+        transcript: [{ role: "user", text: "add two scenes", at: new Date().toISOString() }],
+        signal: controller.signal,
+        onAssistant: () => {},
+        // Cancelled while the first tool is being announced, which is squarely
+        // inside the batch — exactly where the round-level check cannot see it.
+        onTool: (name) => {
+          started.push(name);
+          controller.abort();
+        },
+        onActivity: () => {},
+        fetchImpl,
+      }),
+    ).rejects.toThrow("cancelled");
+
+    expect(started).toEqual(["write_file"]);
+    // The call already under way is allowed to finish, so no file is left half
+    // written...
+    expect(readFileSync(join(root, "compositions/scene-a.html"), "utf-8")).toBe("<div>a</div>\n");
+    // ...and nothing after it in the batch runs.
+    expect(existsSync(join(root, "compositions/scene-b.html"))).toBe(false);
+    // Nor is the model asked to continue a run the user has stopped.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   /**
