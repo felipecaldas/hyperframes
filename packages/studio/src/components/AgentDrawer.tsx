@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { Robot, X, ArrowCounterClockwise, Stop, Plus } from "@phosphor-icons/react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Robot, X, ArrowCounterClockwise, Stop, Plus, CircleNotch } from "@phosphor-icons/react";
 import type {
   AgentChangedFile,
   AgentProvider,
@@ -12,7 +12,7 @@ import {
   subscribeAgentToggle,
   type StudioAgentRequest,
 } from "../utils/agentBridge";
-import { useAgentRun } from "../hooks/useAgentRun";
+import { toolLabel, useAgentRun } from "../hooks/useAgentRun";
 
 interface Capabilities {
   enabled: boolean;
@@ -60,34 +60,71 @@ function LintActivity({ findings }: { findings: NonNullable<AgentRunEvent["findi
   );
 }
 
+function Bubble({ role, children }: { role: "user" | "assistant"; children: React.ReactNode }) {
+  const tone =
+    role === "user"
+      ? "ml-5 bg-neutral-800 text-neutral-200"
+      : "mr-5 bg-neutral-900 text-neutral-300";
+  return (
+    <div className={`rounded-lg p-2 text-xs ${tone}`}>
+      <div className="mb-1 text-[9px] uppercase text-neutral-600">{role}</div>
+      <div className="whitespace-pre-wrap break-words">{children}</div>
+    </div>
+  );
+}
+
+function elapsedLabel(milliseconds: number): string {
+  const total = Math.floor(milliseconds / 1000);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+/**
+ * The bubble that stands in for the reply while the run is in flight.
+ *
+ * A run takes minutes, and until TAB-797 the only sign it was alive was a
+ * collapsed `<details>` of 10px grey text that rendered nothing at all until the
+ * first server event arrived. There is no progress to report honestly, so this
+ * reports the two things that are true: what it is doing, and for how long.
+ */
+function PendingReply({ status, elapsedMs }: { status: string | null; elapsedMs: number }) {
+  return (
+    <div className="mr-5 rounded-lg bg-neutral-900 p-2 text-xs text-neutral-400">
+      <div className="mb-1 text-[9px] uppercase text-neutral-600">assistant</div>
+      <div className="flex items-center gap-2">
+        <CircleNotch size={13} className="shrink-0 animate-spin text-studio-accent" />
+        <span>{status ?? "Starting…"}</span>
+        <span className="ml-auto shrink-0 tabular-nums text-[10px] text-neutral-600">
+          {elapsedLabel(elapsedMs)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 /** Persisted thread turns followed by this run's live assistant output. */
 function AgentTranscript({
   thread,
   events,
+  pendingPrompt,
 }: {
   thread: AgentThreadSummary | undefined;
   events: AgentRunEvent[];
+  pendingPrompt: string | null;
 }) {
   return (
     <>
       {thread?.transcript.map((entry, index) => (
-        <div
-          key={`${entry.at}-${index}`}
-          className={`rounded-lg p-2 text-xs ${entry.role === "user" ? "ml-5 bg-neutral-800 text-neutral-200" : "mr-5 bg-neutral-900 text-neutral-300"}`}
-        >
-          <div className="mb-1 text-[9px] uppercase text-neutral-600">{entry.role}</div>
-          <div className="whitespace-pre-wrap break-words">{entry.text}</div>
-        </div>
+        <Bubble key={`${entry.at}-${index}`} role={entry.role}>
+          {entry.text}
+        </Bubble>
       ))}
+      {pendingPrompt !== null && <Bubble role="user">{pendingPrompt}</Bubble>}
       {events
         .filter((event) => event.type === "assistant")
         .map((event) => (
-          <div
-            key={event.id}
-            className="mr-5 rounded-lg bg-neutral-900 p-2 text-xs text-neutral-300 whitespace-pre-wrap"
-          >
+          <Bubble key={event.id} role="assistant">
             {event.text}
-          </div>
+          </Bubble>
         ))}
     </>
   );
@@ -104,7 +141,13 @@ function AgentActivityPanel({ activity, busy }: { activity: AgentRunEvent[]; bus
             {event.findings ? (
               <LintActivity findings={event.findings} />
             ) : (
-              <div>{event.message ?? event.type}</div>
+              // This panel is open for the whole run, so it is user-facing too —
+              // a raw `read_file` here is the same leak TAB-795 closed.
+              <div>
+                {event.type === "tool" && event.message
+                  ? toolLabel(event.message)
+                  : (event.message ?? event.type)}
+              </div>
             )}
           </div>
         ))}
@@ -169,7 +212,15 @@ function AgentComposer(props: AgentComposerProps) {
         <textarea
           value={chat}
           onChange={(event) => onChatChange(event.target.value)}
-          placeholder="Ask the agent to change this project…"
+          onKeyDown={(event) => {
+            // Enter sends, Shift+Enter is a newline — what every chat does, and
+            // what the user expects when the box looks like this (TAB-797).
+            // `isComposing` guards IME candidate selection, which also fires Enter.
+            if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+            event.preventDefault();
+            if (!busy && props.generatedPrompt) props.onStart();
+          }}
+          placeholder="Ask Tabario AI to change this video…"
           className="h-20 w-full resize-none rounded border border-neutral-800 bg-neutral-900 p-2 text-xs text-neutral-200 outline-none focus:border-studio-accent"
         />
       )}
@@ -218,6 +269,7 @@ export function AgentDrawer({ projectId, beforeRun, onRefresh }: AgentDrawerProp
   const [threads, setThreads] = useState<AgentThreadSummary[]>([]);
   const [request, setRequest] = useState<StudioAgentRequest | null>(null);
   const [chat, setChat] = useState("");
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const loadThreads = useCallback(async () => {
     const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/agent/threads`);
@@ -250,17 +302,32 @@ export function AgentDrawer({ projectId, beforeRun, onRefresh }: AgentDrawerProp
 
   const clearChat = useCallback(() => setChat(""), []);
   const clearRequest = useCallback(() => setRequest(null), []);
+  /**
+   * A prompt that came from the composer goes back to the composer if the run
+   * never started. One built from a generated request does not — that context
+   * is still sitting in `request`, and pasting it into the chat box would put
+   * the user in front of a wall of machine-written text.
+   */
+  const returnChat = useCallback(
+    (prompt: string) => {
+      if (!request) setChat(prompt);
+    },
+    [request],
+  );
 
   const {
     activity,
     busy,
     changedFiles,
     closeStream,
+    elapsedMs,
     error,
     events,
     jobId,
+    latestStatus,
     mutateRun,
     newChat,
+    pendingPrompt,
     setError,
     startRun,
   } = useAgentRun({
@@ -275,6 +342,7 @@ export function AgentDrawer({ projectId, beforeRun, onRefresh }: AgentDrawerProp
     loadThreads,
     onPromptConsumed: clearChat,
     onThreadReset: clearRequest,
+    onPromptReturned: returnChat,
   });
 
   // Declared after useAgentRun so setError is initialised before the deps run.
@@ -288,6 +356,13 @@ export function AgentDrawer({ projectId, beforeRun, onRefresh }: AgentDrawerProp
     [setError],
   );
   useEffect(() => closeStream, [closeStream]);
+
+  // Follow the newest turn. Depends on the elapsed tick too, so the spinner
+  // bubble stays in view on a long run rather than drifting off the bottom.
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [thread, events, pendingPrompt, elapsedMs, open]);
 
   if (!open) return null;
   return (
@@ -312,9 +387,10 @@ export function AgentDrawer({ projectId, beforeRun, onRefresh }: AgentDrawerProp
           </button>
         </div>
       </header>
-      <div className="flex-1 space-y-3 overflow-y-auto p-3">
+      <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-3">
         <AgentNotices capabilities={capabilities} provider={provider} available={available} />
-        <AgentTranscript thread={thread} events={events} />
+        <AgentTranscript thread={thread} events={events} pendingPrompt={pendingPrompt} />
+        {busy && <PendingReply status={latestStatus} elapsedMs={elapsedMs} />}
         <AgentActivityPanel activity={activity} busy={busy} />
         <AgentChangedFilesPanel changedFiles={changedFiles} />
         {request && (

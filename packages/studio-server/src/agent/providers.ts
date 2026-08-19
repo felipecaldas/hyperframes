@@ -115,6 +115,7 @@ So questions about what is on screen, when, for how long, or why something is mi
 
 Never invent file contents or paths. Never embed remote assets, secrets, or network calls in project code.
 Media filenames cannot be guessed — call list_media to see what the project actually contains, and reference only those. A write whose src points at a file the project does not have is rejected, and the rejection lists the files that do exist.
+Change an existing file with edit_file, never by rewriting it whole: name the exact snippet you are replacing and everything else is left untouched. write_file only creates files that do not exist yet. This matters because re-typing a file you were asked to make one change to is how unrelated lines get silently altered.
 Preserve the existing template, media references, duration, captions, and voiceover unless the user asks to change them.
 All edits are staged and linted before Studio applies them. Call validate_project after edits and repair lint errors.
 
@@ -169,16 +170,38 @@ const tools = [
     required: ["query"],
     additionalProperties: false,
   }),
-  tool("write_file", "Create or replace an editable source file using optimistic hash locking.", {
-    type: "object",
-    properties: {
-      path: { type: "string" },
-      content: { type: "string" },
-      expected_hash: { type: ["string", "null"] },
+  tool(
+    "edit_file",
+    "Change part of an existing source file by replacing an exact snippet. This is how you edit: " +
+      "old_string must appear exactly once, so include enough surrounding text to make it unique. " +
+      "Every line you do not name is left byte-for-byte untouched.",
+    {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        old_string: { type: "string" },
+        new_string: { type: "string" },
+        expected_hash: { type: ["string", "null"] },
+      },
+      required: ["path", "old_string", "new_string", "expected_hash"],
+      additionalProperties: false,
     },
-    required: ["path", "content", "expected_hash"],
-    additionalProperties: false,
-  }),
+  ),
+  tool(
+    "write_file",
+    "Create a NEW editable source file. It cannot overwrite a file that already exists — use " +
+      "edit_file for that.",
+    {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        content: { type: "string" },
+        expected_hash: { type: ["string", "null"] },
+      },
+      required: ["path", "content", "expected_hash"],
+      additionalProperties: false,
+    },
+  ),
   tool("delete_file", "Delete an editable source file using optimistic hash locking.", {
     type: "object",
     properties: { path: { type: "string" }, expected_hash: { type: "string" } },
@@ -414,14 +437,99 @@ function searchFiles(args: JsonRecord, options: TabarioModelOptions): unknown {
   return matches;
 }
 
+/** Literal (non-regex) occurrence count, for the uniqueness requirement. */
+function countOccurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
+
+/**
+ * Change one region of a file and leave every other byte alone (TAB-796).
+ *
+ * `write_file` used to accept whole-file content, so every edit re-typed the
+ * entire document. Asked only to move the caption layer, the model also
+ * re-emitted an unrelated 4,363-character line and flipped one `rotate(17.78deg)`
+ * to `-17.78`, silently rotating a glyph of the title the wrong way. That is
+ * valid HTML, so `validate_project` passed and the TAB-780 introduced-errors
+ * gate saw nothing. The bigger the file, the more untouched content was put at
+ * risk on every single edit.
+ *
+ * Requiring a unique `old_string` is what makes the change *targeted*: the model
+ * has to name the region it means, and everything it does not name is copied
+ * rather than retyped. A non-unique anchor is refused rather than guessed at,
+ * because picking "the first one" is exactly how an edit lands in the wrong
+ * place.
+ */
+/** The two strings an edit needs, or a message saying which one is wrong. */
+function editStrings(args: JsonRecord): { oldString: string; newString: string } {
+  const oldString = args.old_string;
+  const newString = args.new_string;
+  if (typeof oldString !== "string" || oldString === "")
+    throw new Error("old_string is required and cannot be empty");
+  if (typeof newString !== "string") throw new Error("new_string is required");
+  if (oldString === newString) throw new Error("old_string and new_string are identical");
+  return { oldString, newString };
+}
+
+/**
+ * Refuse anything but exactly one match.
+ *
+ * Resolving an ambiguous anchor to "the first one" is how a targeted edit lands
+ * in the wrong place — the failure this whole tool exists to prevent — so the
+ * count is reported back and the model is made to narrow it itself.
+ */
+function assertUniqueAnchor(content: string, oldString: string, relative: string): void {
+  const occurrences = countOccurrences(content, oldString);
+  if (occurrences === 1) return;
+  throw new Error(
+    occurrences === 0
+      ? `old_string does not appear in ${relative}. Read the file and copy the snippet exactly, whitespace included.`
+      : `old_string appears ${occurrences} times in ${relative}; include enough surrounding text to identify exactly one.`,
+  );
+}
+
+function editFile(args: JsonRecord, options: TabarioModelOptions): unknown {
+  const file = safeSourcePath(options.stagingDir, args.path);
+  if (!existsSync(file.absolute))
+    throw new Error(`${file.relative} does not exist; use write_file to create it`);
+  const { oldString, newString } = editStrings(args);
+
+  const current = hashFile(file.absolute);
+  if ((args.expected_hash ?? null) !== current)
+    throw new Error(`hash conflict for ${file.relative}; current hash is ${current ?? "null"}`);
+
+  const before = readFileSync(file.absolute, "utf-8");
+  assertUniqueAnchor(before, oldString, file.relative);
+
+  // Replace via a function so `$&`, `$1` and friends inside new_string stay
+  // literal — they are content here, not substitution patterns.
+  const after = before.replace(oldString, () => newString);
+  if (Buffer.byteLength(after, "utf-8") > MAX_FILE_BYTES) throw new Error("file is too large");
+  assertMediaSrcsResolve(options.stagingDir, file.relative, after);
+  writeFileSync(file.absolute, after, "utf-8");
+  return { path: file.relative, hash: hashFile(file.absolute) };
+}
+
+/**
+ * Create a file that does not exist yet.
+ *
+ * Overwriting is refused outright rather than discouraged: TAB-791 established
+ * that an instruction the model can decline is not a gate, and "rewrite the
+ * whole file" is precisely the operation that corrupted untouched lines in
+ * TAB-796. `delete_file` remains available for a genuine wholesale replacement,
+ * which at least makes the intent explicit in the ledger.
+ */
 function writeFile(args: JsonRecord, options: TabarioModelOptions): unknown {
   const file = safeSourcePath(options.stagingDir, args.path);
   if (typeof args.content !== "string") throw new Error("content is required");
   if (Buffer.byteLength(args.content, "utf-8") > MAX_FILE_BYTES)
     throw new Error("file is too large");
   const current = hashFile(file.absolute);
-  if ((args.expected_hash ?? null) !== current)
-    throw new Error(`hash conflict for ${file.relative}; current hash is ${current ?? "null"}`);
+  if (current !== null)
+    throw new Error(
+      `${file.relative} already exists — use edit_file to change part of it. Rewriting a whole file re-types every line, and lines you were not asked to touch get altered that way. To replace it wholesale, delete_file first.`,
+    );
+  if ((args.expected_hash ?? null) !== null)
+    throw new Error(`hash conflict for ${file.relative}; current hash is null`);
   assertMediaSrcsResolve(options.stagingDir, file.relative, args.content);
   mkdirSync(dirname(file.absolute), { recursive: true });
   writeFileSync(file.absolute, args.content, "utf-8");
@@ -450,6 +558,7 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
   list_media: listMedia,
   read_file: readFile,
   search_files: searchFiles,
+  edit_file: editFile,
   write_file: writeFile,
   delete_file: deleteFile,
   validate_project: validateProject,

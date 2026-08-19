@@ -123,9 +123,10 @@ describe("Tabario AI provider", () => {
       .mockResolvedValueOnce(
         completion("", [
           call("read", "read_file", { path: "index.html" }),
-          call("write", "write_file", {
+          call("write", "edit_file", {
             path: "index.html",
-            content: HTML.replace("before", "after"),
+            old_string: "before",
+            new_string: "after",
             expected_hash: hash,
           }),
         ]),
@@ -222,9 +223,10 @@ describe("Tabario AI provider", () => {
       .fn<typeof fetch>()
       .mockResolvedValueOnce(
         completion("", [
-          call("invent", "write_file", {
+          call("invent", "edit_file", {
             path: "compositions/scene-1.html",
-            content: SCENE.replace("assets/001_37ab941f_cfr24_h264.mp4", "assets/b-roll.mp4"),
+            old_string: "assets/001_37ab941f_cfr24_h264.mp4",
+            new_string: "assets/b-roll.mp4",
             expected_hash: hash,
           }),
         ]),
@@ -269,23 +271,23 @@ describe("Tabario AI provider", () => {
   it("allows srcs that resolve, remote URLs, data URIs and unresolved template values", async () => {
     const root = projectWithMedia();
     const mixed =
-      "<div>" +
       '<video id="a" src="assets/001_37ab941f_cfr24_h264.mp4"></video>' +
       '<audio id="b" src="assets/voiceover.wav"></audio>' +
       '<video id="c" src="https://cdn.example.com/remote.mp4"></video>' +
       '<img id="d" src="data:image/png;base64,iVBORw0KGgo=">' +
       '<video id="e" src="${clipUrl}"></video>' +
-      '<video id="f" src="assets/001_37ab941f_cfr24_h264.mp4?v=2#t=1"></video>' +
-      "</div>\n";
+      '<video id="f" src="assets/001_37ab941f_cfr24_h264.mp4?v=2#t=1"></video>';
     writeFileSync(join(root, "compositions/scene-1.html"), SCENE);
     const hash = createHash("sha256").update(SCENE).digest("hex");
     const fetchImpl = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(
         completion("", [
-          call("ok", "write_file", {
+          call("ok", "edit_file", {
             path: "compositions/scene-1.html",
-            content: mixed,
+            old_string:
+              '<video id="scene-1-video" src="assets/001_37ab941f_cfr24_h264.mp4"></video>',
+            new_string: mixed,
             expected_hash: hash,
           }),
         ]),
@@ -304,7 +306,11 @@ describe("Tabario AI provider", () => {
       fetchImpl,
     });
 
-    expect(readFileSync(join(root, "compositions/scene-1.html"), "utf-8")).toBe(mixed);
+    // The wrapper the edit did not name survives verbatim — that is the whole
+    // point of an anchored replace, and it is what TAB-796 lost.
+    expect(readFileSync(join(root, "compositions/scene-1.html"), "utf-8")).toBe(
+      `<div>${mixed}</div>\n`,
+    );
   });
 
   it("lets the model enumerate the media it may reference, and only the media", async () => {
@@ -400,9 +406,10 @@ describe("Tabario AI provider", () => {
       .fn<typeof fetch>()
       .mockResolvedValueOnce(
         completion("", [
-          call("write", "write_file", {
+          call("write", "edit_file", {
             path: "index.html",
-            content: HTML.replace("before", "after"),
+            old_string: "before",
+            new_string: "after",
             expected_hash: hash,
           }),
         ]),
@@ -541,5 +548,227 @@ describe("Tabario AI provider", () => {
         message.role === "assistant" && typeof message.content === "string",
     );
     expect(echoed.content).toBe(reply);
+  });
+
+  /**
+   * TAB-796, reproduced from the live TAB-793 run.
+   *
+   * Asked only to move the caption layer, the model rewrote the whole file and
+   * re-emitted an unrelated 4,363-character line, flipping one
+   * `rotate(17.78deg)` to `-17.78`. Valid HTML, so lint and the TAB-780
+   * introduced-errors gate both passed it.
+   *
+   * The assertion is byte-equality of every other line, not "the change I asked
+   * for happened" — the run in the report did do what was asked. What it also
+   * did is the bug.
+   */
+  const WIDE_HTML = [
+    '<html data-composition-id="demo">',
+    "  <style>.hf-captions { top: 46%; }</style>",
+    '  <div id="arc" data-rot="a(17.78deg) b(-13.33deg) c(20.00deg)">HELENA&#39;S AGENCY</div>',
+    "  <body>before</body>",
+    "</html>",
+    "",
+  ].join("\n");
+
+  it("changes only the named snippet and leaves every other line byte-identical", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), WIDE_HTML);
+    const hash = createHash("sha256").update(WIDE_HTML).digest("hex");
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("edit", "edit_file", {
+            path: "index.html",
+            old_string: ".hf-captions { top: 46%; }",
+            new_string: ".hf-captions { top: 70%; }",
+            expected_hash: hash,
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(completion("I moved the captions down."));
+
+    await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [
+        { role: "user", text: "the captions are too high", at: new Date().toISOString() },
+      ],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    const before = WIDE_HTML.split("\n");
+    const after = readFileSync(join(root, "index.html"), "utf-8").split("\n");
+    expect(after.length).toBe(before.length);
+    const changed = before.map((line, i) => i).filter((i) => before[i] !== after[i]);
+    // Exactly one line differs, and it is the one that was named.
+    expect(changed).toEqual([1]);
+    expect(after[1]).toContain("top: 70%");
+    // The line that got corrupted in the report is untouched, entity and all.
+    expect(after[2]).toBe(before[2]);
+    expect(after[2]).toContain("b(-13.33deg)");
+    expect(after[2]).toContain("&#39;");
+  });
+
+  it("refuses to overwrite a file that already exists, and names the way to edit it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const hash = createHash("sha256").update(HTML).digest("hex");
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("clobber", "write_file", {
+            path: "index.html",
+            content: HTML.replace("before", "after"),
+            expected_hash: hash,
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(completion("I used a targeted edit instead."));
+
+    await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "change it", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    expect(readFileSync(join(root, "index.html"), "utf-8")).toBe(HTML);
+    const second = JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body));
+    const toolMessage = second.messages.find(
+      (message: { tool_call_id?: string }) => message.tool_call_id === "clobber",
+    );
+    const { error } = JSON.parse(toolMessage.content);
+    // The refusal has to be the answer, or the next turn just tries again.
+    expect(error).toContain("already exists");
+    expect(error).toContain("edit_file");
+  });
+
+  it("still creates files that do not exist yet", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("create", "write_file", {
+            path: "compositions/scene-9.html",
+            content: "<div>new scene</div>\n",
+            expected_hash: null,
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(completion("Added the scene."));
+
+    await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "timeline",
+      transcript: [{ role: "user", text: "add a scene", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    expect(readFileSync(join(root, "compositions/scene-9.html"), "utf-8")).toBe(
+      "<div>new scene</div>\n",
+    );
+  });
+
+  /**
+   * A non-unique anchor is refused rather than resolved to "the first one" —
+   * silently picking an occurrence is how a targeted edit lands in the wrong
+   * place, which is the failure this tool exists to prevent.
+   */
+  it("refuses an ambiguous anchor and reports how many times it matched", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    const repeated = '<p class="x">hi</p>\n<p class="x">hi</p>\n';
+    writeFileSync(join(root, "index.html"), repeated);
+    const hash = createHash("sha256").update(repeated).digest("hex");
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("ambiguous", "edit_file", {
+            path: "index.html",
+            old_string: '<p class="x">hi</p>',
+            new_string: '<p class="x">bye</p>',
+            expected_hash: hash,
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(completion("I need a more specific anchor."));
+
+    await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "change the second one", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    expect(readFileSync(join(root, "index.html"), "utf-8")).toBe(repeated);
+    const second = JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body));
+    const toolMessage = second.messages.find(
+      (message: { tool_call_id?: string }) => message.tool_call_id === "ambiguous",
+    );
+    expect(JSON.parse(toolMessage.content).error).toContain("appears 2 times");
+  });
+
+  /**
+   * `String.replace` treats `$&` and `$1` in the replacement as substitution
+   * patterns. In a composition they are ordinary characters — a template
+   * placeholder or a price — so the replacement is applied as a function.
+   */
+  it("treats dollar patterns in the replacement as literal text", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    const source = "<div>PRICE</div>\n";
+    writeFileSync(join(root, "index.html"), source);
+    const hash = createHash("sha256").update(source).digest("hex");
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("dollar", "edit_file", {
+            path: "index.html",
+            old_string: "PRICE",
+            new_string: "$& $1 ${total}",
+            expected_hash: hash,
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(completion("Done."));
+
+    await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "set the price text", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    expect(readFileSync(join(root, "index.html"), "utf-8")).toBe("<div>$& $1 ${total}</div>\n");
   });
 });

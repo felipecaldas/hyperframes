@@ -198,9 +198,10 @@ describe("Tabario AI API", () => {
         .fn()
         .mockResolvedValueOnce(
           completion("", [
-            toolCall("write", "write_file", {
+            toolCall("write", "edit_file", {
               path: "index.html",
-              content: INITIAL_HTML.replace("before", "after"),
+              old_string: "before",
+              new_string: "after",
               expected_hash: hash,
             }),
           ]),
@@ -243,9 +244,10 @@ describe("Tabario AI API", () => {
         .fn()
         .mockResolvedValueOnce(
           completion("", [
-            toolCall("write", "write_file", {
+            toolCall("write", "edit_file", {
               path: "index.html",
-              content: INITIAL_HTML.replace("before", "LINT_ERROR"),
+              old_string: "before",
+              new_string: "LINT_ERROR",
               expected_hash: hash,
             }),
           ]),
@@ -278,9 +280,10 @@ describe("Tabario AI API", () => {
         .fn()
         .mockResolvedValueOnce(
           completion("", [
-            toolCall("write", "write_file", {
+            toolCall("write", "edit_file", {
               path: "index.html",
-              content: INHERITED_HTML.replace("before", "after"),
+              old_string: "before",
+              new_string: "after",
               expected_hash: hash,
             }),
           ]),
@@ -304,9 +307,10 @@ describe("Tabario AI API", () => {
         .fn()
         .mockResolvedValueOnce(
           completion("", [
-            toolCall("write", "write_file", {
+            toolCall("write", "edit_file", {
               path: "index.html",
-              content: INHERITED_HTML.replace("before", "LINT_ERROR"),
+              old_string: "before",
+              new_string: "LINT_ERROR",
               expected_hash: hash,
             }),
           ]),
@@ -362,9 +366,10 @@ describe("Tabario AI API", () => {
         .fn()
         .mockResolvedValueOnce(
           completion("", [
-            toolCall("write", "write_file", {
+            toolCall("write", "edit_file", {
               path: "index.html",
-              content: INITIAL_HTML.replace("before", "after"),
+              old_string: "before",
+              new_string: "after",
               expected_hash: hash,
             }),
           ]),
