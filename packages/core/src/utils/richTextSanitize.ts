@@ -50,20 +50,36 @@ const FORMATTING_STYLE_PROPS = new Set([
 // UNSAFE_VALUE can be a sufficient guard.
 
 /**
- * Attributes a formatting tag may carry.
+ * Attributes a formatting tag may carry: any `data-*` with a bare-token value.
  *
- * The identity a text layer is tracked by. Everything else is dropped: a
- * contenteditable is a paste target, and an event handler or an id that
- * shadows a composition's own is not formatting.
+ * This was only the identity pair a text layer is tracked by
+ * (`data-hf-text-key`/`data-hf-id`), on the reasoning that nothing else on a
+ * span was formatting. But compilers author data on spans too — a caption
+ * word carries its highlight timings as `data-w-start`/`data-w-end` — and
+ * stripping those on a structural text edit silently killed the behaviour
+ * they drive. Data attributes are inert to the browser, so with their values
+ * held to a bare token the risk was never the name. Event handlers, ids that
+ * shadow a composition's own, and anything URL-shaped are still not
+ * formatting and still dropped.
  */
-const FORMATTING_ATTRS = new Set(["data-hf-text-key", "data-hf-id"]);
+const DATA_ATTR_NAME = /^data-[a-z0-9-]+$/;
 
 /**
- * What those attributes are allowed to look like: a bare token, nothing else.
+ * What an allowed attribute's value may look like: a bare token, nothing else.
  * `:` is deliberate because text keys use selector-like tokens such as
- * `child:1`; neither allowed attribute is interpreted as a URL.
+ * `child:1`; `.` because compiler-authored numbers look like `3.000`. No
+ * allowed attribute is interpreted as a URL.
  */
-const SAFE_ATTR_VALUE = /^[A-Za-z0-9_:-]+$/;
+const SAFE_ATTR_VALUE = /^[A-Za-z0-9_.:-]+$/;
+
+/**
+ * What a class may keep: its valid tokens. A span's classes are how a
+ * stylesheet recognises it (`hf-caption-word`), so a structural edit that
+ * drops them un-styles words the user never touched. Filtered token by token
+ * rather than kept-or-dropped whole: one hostile token should cost itself,
+ * not the styling next to it.
+ */
+const SAFE_CLASS_TOKEN = /^[A-Za-z0-9_-]+$/;
 
 /**
  * Tags dropped whole rather than unwrapped.
@@ -100,7 +116,19 @@ export function isRichTextFormattingTag(tagName: string): boolean {
 
 /** Whether an attribute survives the rich-text persistence boundary. */
 export function isRichTextFormattingAttribute(name: string, value: string): boolean {
-  return FORMATTING_ATTRS.has(name.toLowerCase()) && SAFE_ATTR_VALUE.test(value);
+  return DATA_ATTR_NAME.test(name.toLowerCase()) && SAFE_ATTR_VALUE.test(value);
+}
+
+export interface RichTextSanitizeOptions {
+  /**
+   * The `data-hf-id` values the composition file held before this edit.
+   *
+   * An element carrying one of them may keep its `id`: that identity was
+   * already in the file, so the id rides on it rather than on anything the
+   * payload minted for itself. Without this set — the default — every id is
+   * stripped, which is the strictly safer behaviour this module always had.
+   */
+  knownHfIds?: ReadonlySet<string>;
 }
 
 /** Whether a declaration survives the rich-text persistence boundary. */
@@ -127,7 +155,10 @@ function isElementNode(node: Node): node is Element {
  * first. Never assign untrusted HTML to a live DOM element and then call this
  * function: active content can run before sanitization begins.
  */
-export function sanitizeRichTextChildren(parent: Element): void {
+export function sanitizeRichTextChildren(
+  parent: Element,
+  options: RichTextSanitizeOptions = {},
+): void {
   const pending: SanitizerFrame[] = Array.from(
     parent.childNodes,
     (node): SanitizerFrame => ({ phase: "visit", node }),
@@ -138,7 +169,7 @@ export function sanitizeRichTextChildren(parent: Element): void {
   for (let frame = pending.pop(); frame; frame = pending.pop()) {
     if (frame.phase === "sanitize") {
       if (!FORMATTING_TAGS.has(frame.tag)) unwrap(frame.element);
-      else stripAttributes(frame.element);
+      else stripAttributes(frame.element, options);
       continue;
     }
 
@@ -174,18 +205,51 @@ function unwrap(element: Element): void {
   parent.removeChild(element);
 }
 
-/** Leave a kept tag with a filtered style attribute and its identity, no more. */
-function stripAttributes(element: Element): void {
+/**
+ * Whether this element's `id` survives. Only when the element also carries a
+ * `data-hf-id` the file already knew: pasted markup can claim any id it
+ * likes, but it cannot have been in the file before the edit.
+ */
+function mayKeepId(element: Element, id: string, options: RichTextSanitizeOptions): boolean {
+  if (!SAFE_ATTR_VALUE.test(id)) return false;
+  const hfId = element.getAttribute("data-hf-id");
+  if (!hfId) return false;
+  return options.knownHfIds?.has(hfId) === true;
+}
+
+/** The valid tokens of a class value, which are all of it that may survive. */
+function filterClassTokens(value: string): string {
+  return value
+    .split(/\s+/)
+    .filter((token) => SAFE_CLASS_TOKEN.test(token))
+    .join(" ");
+}
+
+/** Put back what a filter kept of a value, or nothing when it kept nothing. */
+function setFilteredAttribute(
+  element: Element,
+  name: string,
+  value: string | null,
+  filter: (value: string) => string,
+): void {
+  if (value === null) return;
+  const safe = filter(value);
+  if (safe) element.setAttribute(name, safe);
+  else element.removeAttribute(name);
+}
+
+/** Keep a kept tag's filtered style, classes, data, and proven identity, no more. */
+function stripAttributes(element: Element, options: RichTextSanitizeOptions): void {
   const style = element.getAttribute("style");
+  const classValue = element.getAttribute("class");
   for (const name of Array.from(element.getAttributeNames())) {
     const value = element.getAttribute(name) ?? "";
     if (isRichTextFormattingAttribute(name, value)) continue;
+    if (name.toLowerCase() === "id" && mayKeepId(element, value, options)) continue;
     element.removeAttribute(name);
   }
-  if (style === null) return;
-  const safe = filterStyle(style);
-  if (safe) element.setAttribute("style", safe);
-  else element.removeAttribute("style");
+  setFilteredAttribute(element, "class", classValue, filterClassTokens);
+  setFilteredAttribute(element, "style", style, filterStyle);
 }
 
 /** Keep only the allowlisted declarations, and only if their values are inert. */

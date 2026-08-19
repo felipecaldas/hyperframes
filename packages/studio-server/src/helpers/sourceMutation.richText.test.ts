@@ -89,6 +89,35 @@ describe("rich-text patch operation", () => {
   });
 });
 
+describe("rich-text keeps a caption's identity through a structural edit", () => {
+  const CAPTION_DOC = `<!doctype html><html><body><div data-composition-id="main"><div id="caption-4" class="clip hf-captions" data-hf-atomic data-hf-label="Caption 4"><span id="caption-4-w0" class="hf-caption-word" data-hf-id="hf-w0" data-w-start="3.000" data-w-end="3.500">hello</span><span id="caption-4-w1" class="hf-caption-word" data-hf-id="hf-w1" data-w-start="3.500" data-w-end="4.000">world</span></div></div></body></html>`;
+
+  it("pre-existing spans keep id, class and data; pasted spans lose their id", () => {
+    const { html, matched } = patchElementInHtml(CAPTION_DOC, { id: "caption-4" }, [
+      {
+        type: "rich-text",
+        property: "",
+        value:
+          '<span id="caption-4-w0" class="hf-caption-word" data-hf-id="hf-w0" data-w-start="3.000" data-w-end="3.500">hi</span>' +
+          '<span id="caption-4-w1" class="hf-caption-word" data-hf-id="hf-w1" data-w-start="3.500" data-w-end="4.000">world</span>' +
+          '<span id="smuggled" data-hf-id="hf-forged" class="hf-caption-word">new</span>',
+      },
+    ]);
+
+    expect(matched).toBe(true);
+    // The words the file already knew keep the identity GSAP and the replay
+    // ledger address them by.
+    expect(html).toContain('id="caption-4-w0"');
+    expect(html).toContain('id="caption-4-w1"');
+    expect(html).toContain('data-w-start="3.000"');
+    expect(html).toContain('class="hf-caption-word"');
+    // The pasted span's data-hf-id was never in the file, so its id does not
+    // survive — however plausible it looks.
+    expect(html).not.toContain('id="smuggled"');
+    expect(html).toContain(">new</span>");
+  });
+});
+
 describe("text-content is still not a markup sink", () => {
   it("escapes markup handed to the older operation, exactly as before", () => {
     const { html } = patchTitle("safe", '<span style="color: red">x</span>', "text-content");

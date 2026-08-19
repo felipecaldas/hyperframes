@@ -42,6 +42,13 @@ export interface InlineTextEditSession {
   outline: string;
   /** The element's own outline offset, restored with the outline. */
   outlineOffset: string;
+  /**
+   * The `data-hf-id` values inside the element when editing started — the
+   * identities the file already holds. The commit-time sanitizer lets an `id`
+   * survive only on an element carrying one of these, so pasted markup cannot
+   * bring an id of its own. Mirrors what the server write boundary enforces.
+   */
+  knownHfIds: ReadonlySet<string>;
 }
 
 /** The live markup to persist and the session snapshot to restore on failure. */
@@ -125,11 +132,17 @@ export function useInlineTextEdit({
     (element: HTMLElement, caretAt?: { x: number; y: number }): boolean => {
       if (openRef.current) return false;
 
+      const knownHfIds = new Set<string>();
+      for (const descendant of Array.from(element.querySelectorAll("[data-hf-id]"))) {
+        const value = descendant.getAttribute("data-hf-id");
+        if (value) knownHfIds.add(value);
+      }
       const open = {
         element,
         original: element.innerHTML,
         outline: element.style.outline,
         outlineOffset: element.style.outlineOffset,
+        knownHfIds,
       };
       // Drawn on the element itself, not in Studio's overlay above it. This is
       // the only mark that says the caret is in the TEXT rather than the
@@ -164,7 +177,7 @@ export function useInlineTextEdit({
     if (!open) return;
     // Sanitised here, in the element, so the preview shows exactly what will be
     // saved rather than something the server will quietly cut down.
-    sanitizeRichTextChildren(open.element);
+    sanitizeRichTextChildren(open.element, { knownHfIds: open.knownHfIds });
     const html = open.element.innerHTML;
     teardown();
     // After teardown, so the commit path's own resync does not fight an

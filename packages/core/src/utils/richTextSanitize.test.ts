@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { parseHTML } from "linkedom";
-import { isRichTextFormattingTag, sanitizeRichTextChildren } from "./richTextSanitize";
+import {
+  isRichTextFormattingTag,
+  sanitizeRichTextChildren,
+  type RichTextSanitizeOptions,
+} from "./richTextSanitize";
 
 function parseWithLinkedom(html: string): Element {
   const { document: doc } = parseHTML(
@@ -25,9 +29,13 @@ const PARSERS: Array<[string, (html: string) => Element]> = [
   ["linkedom", parseWithLinkedom],
 ];
 
-function clean(html: string, parse: (html: string) => Element): string {
+function clean(
+  html: string,
+  parse: (html: string) => Element,
+  options?: RichTextSanitizeOptions,
+): string {
   const host = parse(html);
-  sanitizeRichTextChildren(host);
+  sanitizeRichTextChildren(host, options);
   return host.innerHTML;
 }
 
@@ -65,12 +73,85 @@ describe.each(PARSERS)("sanitizeRichTextChildren (%s)", (_name, parse) => {
     expect(out).toContain("color: red");
   });
 
-  it("strips every attribute that is neither style nor an identity", () => {
-    const out = clean('<span id="a" class="b" data-x="c" style="color: red">x</span>', parse);
+  it("strips everything that is neither style, class, data, nor proven identity", () => {
+    const out = clean(
+      '<span id="a" title="t" tabindex="1" draggable="true" style="color: red">x</span>',
+      parse,
+    );
     expect(out).not.toContain("id=");
-    expect(out).not.toContain("class=");
-    expect(out).not.toContain("data-x");
+    expect(out).not.toContain("title");
+    expect(out).not.toContain("tabindex");
+    expect(out).not.toContain("draggable");
     expect(out).toContain("color: red");
+  });
+
+  // A span's classes are how the stylesheet recognises it, and a compiler's
+  // data attributes are behaviour it drives (a caption word's highlight
+  // timings). Stripping them on a structural text edit un-styled and froze
+  // words the user never touched.
+  describe("preserved vs stripped", () => {
+    it("keeps a class", () => {
+      const out = clean('<span class="hf-caption-word">x</span>', parse);
+      expect(out).toContain('class="hf-caption-word"');
+    });
+
+    it("keeps only the valid class tokens", () => {
+      const out = clean('<span class="hf-caption-word bad(token) also_ok">x</span>', parse);
+      expect(out).toContain('class="hf-caption-word also_ok"');
+      expect(out).not.toContain("bad");
+    });
+
+    it("drops the class attribute when no token survives", () => {
+      const out = clean('<span class="bad(token)">x</span>', parse);
+      expect(out).not.toContain("class=");
+    });
+
+    it("keeps a data attribute whose value carries a decimal point", () => {
+      const out = clean('<span data-w-start="3.000" data-w-end="3.500">x</span>', parse);
+      expect(out).toContain('data-w-start="3.000"');
+      expect(out).toContain('data-w-end="3.500"');
+    });
+
+    it("drops a data attribute whose value is not a bare token", () => {
+      const out = clean('<span data-x="url(javascript:alert(1))">x</span>', parse);
+      expect(out).not.toContain("data-x");
+    });
+
+    it("keeps an id on an element whose data-hf-id the file already held", () => {
+      const out = clean('<span id="caption-4-w1" data-hf-id="hf-w1">x</span>', parse, {
+        knownHfIds: new Set(["hf-w1"]),
+      });
+      expect(out).toContain('id="caption-4-w1"');
+    });
+
+    it("strips an id when the data-hf-id is not one the file held", () => {
+      const out = clean('<span id="evil" data-hf-id="hf-forged">x</span>', parse, {
+        knownHfIds: new Set(["hf-w1"]),
+      });
+      expect(out).not.toContain('id="evil"');
+      expect(out).toContain('data-hf-id="hf-forged"');
+    });
+
+    it("strips an id from an element with no data-hf-id at all", () => {
+      const out = clean('<span id="evil">x</span>', parse, { knownHfIds: new Set(["hf-w1"]) });
+      expect(out).not.toContain("id=");
+    });
+
+    it("strips every id when no known set is given, exactly as before", () => {
+      const out = clean('<span id="caption-4-w1" data-hf-id="hf-w1">x</span>', parse);
+      expect(out).not.toContain('id="caption-4-w1"');
+      expect(out).toContain('data-hf-id="hf-w1"');
+    });
+
+    it("still strips an event handler however the rest is preserved", () => {
+      const out = clean(
+        '<span class="hf-caption-word" data-w-start="3.000" onclick="steal()">x</span>',
+        parse,
+      );
+      expect(out).not.toContain("onclick");
+      expect(out).toContain("hf-caption-word");
+      expect(out).toContain("data-w-start");
+    });
   });
 
   // The design panel tracks each text layer by this. Stripping it left the

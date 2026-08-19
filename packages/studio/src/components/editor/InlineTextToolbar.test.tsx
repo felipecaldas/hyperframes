@@ -26,6 +26,7 @@ function scene(html: string) {
     original: html,
     outline: "",
     outlineOffset: "",
+    knownHfIds: new Set<string>(),
   };
   return { element, iframe, session };
 }

@@ -200,6 +200,22 @@ function stampNewChildIds(parent: Element): void {
   }
 }
 
+/**
+ * The `data-hf-id` values the file holds right now. Collected BEFORE a
+ * rich-text write replaces a subtree, so "known" means what the file already
+ * contained — never what the payload brought with it. The sanitizer lets an
+ * `id` survive only on an element whose `data-hf-id` is in this set.
+ */
+function collectKnownHfIds(parent: Element): Set<string> {
+  const known = new Set<string>();
+  const root = parent.ownerDocument?.body ?? parent;
+  walkCompositionDescendants(root, (el) => {
+    const id = el.getAttribute("data-hf-id");
+    if (id) known.add(id);
+  });
+  return known;
+}
+
 // fallow-ignore-next-line complexity
 export function patchElementInHtml(
   source: string,
@@ -263,8 +279,9 @@ export function patchElementInHtml(
       // can actually judge, and linkedom never runs anything it parses.
       case "rich-text":
         if (op.value != null) {
+          const knownHfIds = collectKnownHfIds(opTarget);
           opTarget.innerHTML = op.value;
-          sanitizeRichTextChildren(opTarget);
+          sanitizeRichTextChildren(opTarget, { knownHfIds });
           stampNewChildIds(opTarget);
         }
         break;
