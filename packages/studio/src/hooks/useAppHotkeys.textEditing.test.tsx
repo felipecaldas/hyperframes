@@ -11,7 +11,7 @@ import { useAppHotkeys } from "./useAppHotkeys";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const timelineDelete = vi.fn(async () => undefined);
+const timelineDeleteMany = vi.fn(async () => undefined);
 const domDelete = vi.fn(async () => undefined);
 const keyframeDelete = vi.fn();
 const textCommits = vi.fn();
@@ -74,7 +74,7 @@ function Harness() {
   const leftSidebarRef = useRef<LeftSidebarHandle | null>(null);
 
   useAppHotkeys({
-    handleTimelineElementDelete: timelineDelete,
+    handleTimelineElementsDelete: timelineDeleteMany,
     handleTimelineElementSplit: vi.fn(async () => undefined),
     handleDomEditElementDelete: domDelete,
     domEditSelectionRef: selectionRef,
@@ -161,7 +161,7 @@ function pressRetargetedCut(): KeyboardEvent {
 
 beforeEach(() => {
   vi.useFakeTimers();
-  timelineDelete.mockClear();
+  timelineDeleteMany.mockClear();
   domDelete.mockClear();
   keyframeDelete.mockClear();
   textCommits.mockClear();
@@ -221,7 +221,7 @@ describe("useAppHotkeys text-field ownership", () => {
     expect(document.activeElement).toBe(textarea);
     expect(textarea.selectionStart).toBe(4);
     expect(textarea.selectionEnd).toBe(4);
-    expect(timelineDelete).not.toHaveBeenCalled();
+    expect(timelineDeleteMany).not.toHaveBeenCalled();
     expect(domDelete).not.toHaveBeenCalled();
     expect(keyframeDelete).not.toHaveBeenCalled();
 
@@ -243,8 +243,10 @@ describe("useAppHotkeys text-field ownership", () => {
     const canvasDelete = pressBackspace(canvas);
 
     expect(canvasDelete.defaultPrevented).toBe(true);
-    expect(timelineDelete).toHaveBeenCalledTimes(1);
-    expect(domDelete).not.toHaveBeenCalled();
+    // The canvas holds a selection, so it owns the delete — the timeline's copy
+    // of that selection is derived and drops any member without a timeline row.
+    expect(domDelete).toHaveBeenCalledTimes(1);
+    expect(timelineDeleteMany).not.toHaveBeenCalled();
     expect(keyframeDelete).not.toHaveBeenCalled();
   });
 });

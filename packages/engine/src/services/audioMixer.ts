@@ -10,6 +10,7 @@ import { join, dirname } from "path";
 import { parseHTML } from "linkedom";
 import { extractAudioMetadata } from "../utils/ffprobe.js";
 import { isNotMediaPayload } from "../utils/notMediaPayload.js";
+import { clampAudioGain } from "@hyperframes/core/audio-gain";
 import {
   downloadToTemp,
   isHttpUrl,
@@ -41,6 +42,7 @@ import {
 } from "@hyperframes/core/audio-automation";
 import { chainTailSeconds } from "@hyperframes/core/audio-fx-tail";
 import {
+  MEDIA_RENDER_ID_ATTR,
   normalizePlaybackRate,
   parseStrictFiniteTimingNumber,
   readMediaStart,
@@ -66,8 +68,7 @@ export type { AudioElement, MixResult } from "./audioMixer.types.js";
 export const MIXED_AUDIO_FILENAME = "audio.m4a";
 
 function clampVolume(volume: number): number {
-  if (!Number.isFinite(volume)) return 1;
-  return Math.max(0, Math.min(1, volume));
+  return clampAudioGain(volume);
 }
 
 function formatFilterNumber(value: number): string {
@@ -486,15 +487,21 @@ export function parseAudioElements(html: string): AudioElement[] {
     };
   };
 
+  // A compiled render document stamps a document-unique render id; prefer it,
+  // because element ids are only unique within one composition file and the
+  // render document inlines many. See core's mediaRenderIds.ts.
+  const trackId = (el: RefResolverEl): string | null =>
+    el.getAttribute(MEDIA_RENDER_ID_ATTR) || el.getAttribute("id");
+
   for (const el of document.querySelectorAll("audio[id][src]")) {
-    const id = el.getAttribute("id");
+    const id = trackId(el);
     if (!id || !el.getAttribute("src") || isHidden(el)) continue;
     if (isKnownInactiveTimelineWindow(el, resolveStart(el))) continue;
     elements.push(build(el, id, "audio"));
   }
 
   for (const el of document.querySelectorAll('video[id][src][data-has-audio="true"]')) {
-    const id = el.getAttribute("id");
+    const id = trackId(el);
     if (!id || !el.getAttribute("src") || isHidden(el)) continue;
     if (isKnownInactiveTimelineWindow(el, resolveStart(el))) continue;
     elements.push(build(el, `${id}-audio`, "video"));
