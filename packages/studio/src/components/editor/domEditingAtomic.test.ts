@@ -9,12 +9,15 @@ const opts = { activeCompositionPath: "index.html", isMasterView: true, skipSour
 
 // The shape a compiler emits for a unit that must edit as one thing: an
 // identified container marked atomic, holding one identified span per word.
-function buildCaption(words = 6): { root: HTMLElement; caption: HTMLElement } {
+function buildCaption(
+  words = 6,
+  options: { atomicAttribute?: boolean } = {},
+): { root: HTMLElement; caption: HTMLElement } {
   const root = document.createElement("div");
   const caption = document.createElement("div");
   caption.id = "caption-4";
   caption.className = "clip hf-captions";
-  caption.setAttribute("data-hf-atomic", "");
+  if (options.atomicAttribute !== false) caption.setAttribute("data-hf-atomic", "");
   caption.setAttribute("data-hf-label", "Caption 4");
   for (let i = 0; i < words; i += 1) {
     const word = document.createElement("span");
@@ -40,6 +43,16 @@ describe("atomic container predicates", () => {
     expect(isAtomicCapture(atomic)).toBe(true);
     expect(isAtomicCapture(group)).toBe(true);
     expect(isAtomicCapture(document.createElement("div"))).toBe(false);
+  });
+
+  it("keeps pre-contract hf-captions projects atomic", () => {
+    const { root, caption } = buildCaption(4, { atomicAttribute: false });
+
+    expect(isAtomicContainer(caption)).toBe(true);
+    expect(isAtomicCapture(caption)).toBe(true);
+    expect(collectDomEditLayerItems(root, opts)).toHaveLength(1);
+
+    document.body.removeChild(root);
   });
 });
 

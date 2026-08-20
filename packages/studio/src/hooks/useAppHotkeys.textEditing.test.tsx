@@ -138,6 +138,27 @@ function pressBackspace(target: HTMLElement): KeyboardEvent {
   return event;
 }
 
+function pressRetargetedBackspace(): KeyboardEvent {
+  const event = new KeyboardEvent("keydown", {
+    key: "Backspace",
+    bubbles: true,
+    cancelable: true,
+  });
+  window.dispatchEvent(event);
+  return event;
+}
+
+function pressRetargetedCut(): KeyboardEvent {
+  const event = new KeyboardEvent("keydown", {
+    key: "x",
+    ctrlKey: true,
+    bubbles: true,
+    cancelable: true,
+  });
+  window.dispatchEvent(event);
+  return event;
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   timelineDelete.mockClear();
@@ -203,6 +224,20 @@ describe("useAppHotkeys text-field ownership", () => {
     expect(timelineDelete).not.toHaveBeenCalled();
     expect(domDelete).not.toHaveBeenCalled();
     expect(keyframeDelete).not.toHaveBeenCalled();
+
+    // The hosted/window-forwarding seam can report Window as the event target
+    // even though the textarea still owns focus. That must stay a text key too;
+    // previously it fell through to the selected layer's delete action.
+    const retargeted = pressRetargetedBackspace();
+    expect(retargeted.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(textarea);
+    expect(timelineDelete).not.toHaveBeenCalled();
+    expect(domDelete).not.toHaveBeenCalled();
+
+    const retargetedCut = pressRetargetedCut();
+    expect(retargetedCut.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(textarea);
+    expect(domDelete).not.toHaveBeenCalled();
 
     canvas.focus();
     const canvasDelete = pressBackspace(canvas);

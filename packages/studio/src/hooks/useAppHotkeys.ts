@@ -5,7 +5,7 @@ import type { TimelineElement } from "../player";
 import type { DomEditSelection } from "../components/editor/domEditing";
 import type { LeftSidebarHandle } from "../components/sidebar/LeftSidebar";
 import { STUDIO_MOTION_PATH } from "../components/editor/studioMotion";
-import { isTypingTarget } from "../utils/typingTarget";
+import { isTypingKeyEvent, isTypingTarget } from "../utils/typingTarget";
 import { isEditableTarget } from "../utils/timelineDiscovery";
 import { shouldIgnoreHistoryShortcut } from "../utils/studioHelpers";
 import { canSplitElement } from "../utils/timelineElementSplit";
@@ -477,11 +477,12 @@ export function useAppHotkeys({
   const handleAppKeyDown = useCallback((event: KeyboardEvent) => {
     const cb = cbRef.current;
     const key = event.key.toLowerCase();
+    const typing = isTypingKeyEvent(event);
     if (event.metaKey || event.ctrlKey) {
-      dispatchModifierKey(event, key, cb);
+      if (!typing) dispatchModifierKey(event, key, cb);
       return;
     }
-    if (!isTypingTarget(event.target)) dispatchPlainKey(event, key, cb);
+    if (!typing) dispatchPlainKey(event, key, cb);
   }, []);
 
   // eslint-disable-next-line no-restricted-syntax

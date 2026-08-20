@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it } from "vitest";
-import { isTypingTarget } from "./typingTarget";
+import { isTypingKeyEvent, isTypingTarget } from "./typingTarget";
 import { isEditableTarget } from "./timelineDiscovery";
 
 afterEach(() => {
@@ -50,5 +50,41 @@ describe("isTypingTarget", () => {
   it("says no to nothing at all", () => {
     expect(isTypingTarget(null)).toBe(false);
     expect(isTypingTarget({} as EventTarget)).toBe(false);
+  });
+});
+
+describe("isTypingKeyEvent", () => {
+  it("keeps a retargeted window event with the focused textarea", () => {
+    const textarea = mount("<textarea>Caption</textarea>");
+    textarea.focus();
+    const event = new KeyboardEvent("keydown", { key: "Backspace", bubbles: true });
+
+    // A forwarded/retargeted event can land on Window rather than the field.
+    // The focused editor still owns the keystroke.
+    window.dispatchEvent(event);
+
+    expect(event.target).not.toBe(textarea);
+    expect(isTypingTarget(event.target)).toBe(false);
+    expect(document.activeElement).toBe(textarea);
+    expect(isTypingKeyEvent(event)).toBe(true);
+  });
+
+  it("uses a composed-path editor when the public target is a boundary", () => {
+    const textarea = mount("<textarea>Caption</textarea>");
+    const event = new KeyboardEvent("keydown", { key: "Delete" });
+    Object.defineProperty(event, "composedPath", {
+      value: () => [textarea, document.body, document, window],
+    });
+
+    expect(isTypingKeyEvent(event)).toBe(true);
+  });
+
+  it("leaves an unfocused canvas key available to Studio", () => {
+    const canvas = mount('<button type="button">Canvas</button>');
+    canvas.focus();
+    const event = new KeyboardEvent("keydown", { key: "Delete", bubbles: true });
+    canvas.dispatchEvent(event);
+
+    expect(isTypingKeyEvent(event)).toBe(false);
   });
 });
