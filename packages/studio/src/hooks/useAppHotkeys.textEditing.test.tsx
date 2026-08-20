@@ -231,7 +231,7 @@ describe("useAppHotkeys text-field ownership", () => {
     const retargeted = pressRetargetedBackspace();
     expect(retargeted.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(textarea);
-    expect(timelineDelete).not.toHaveBeenCalled();
+    expect(timelineDeleteMany).not.toHaveBeenCalled();
     expect(domDelete).not.toHaveBeenCalled();
 
     const retargetedCut = pressRetargetedCut();
