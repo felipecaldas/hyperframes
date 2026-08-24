@@ -1726,7 +1726,11 @@ export const gsapRules: LintRule<LintContext>[] = [
     const findings: HyperframeLintFinding[] = [];
     for (const script of scripts) {
       const content = stripJsComments(script.content);
-      const regIdx = content.search(/window\s*\.\s*__timelines\s*\[/);
+      // Match the actual ASSIGNMENT, not any bracket reference: the emitted
+      // shells open with `if (window.__timelines[id]) ….kill()` — a read —
+      // and matching it flagged compositions whose real registration sits
+      // correctly after the async boundary (TAB-831).
+      const regIdx = content.search(/window\s*\.\s*__timelines\s*\[[^\]]*\]\s*=(?!=)/);
       if (regIdx < 0) continue;
       const fontsReadyIdx = content.search(/document\s*\.\s*fonts\s*\.\s*ready/);
       if (fontsReadyIdx < 0) continue;
@@ -1735,7 +1739,11 @@ export const gsapRules: LintRule<LintContext>[] = [
       // Confirm the build is actually deferred past the boundary (a tween/build call
       // appears after document.fonts.ready), i.e. the registered timeline starts empty.
       const tail = content.slice(fontsReadyIdx);
-      if (!/\.(?:to|from|fromTo)\s*\(|buildEffect\s*\(/.test(tail)) continue;
+      // `Array.from(` is not a tween — the caption karaoke runtime iterates
+      // spans with it inside fonts.ready and tripped the plain `.from(`
+      // match (TAB-831).
+      if (!/(?<!Array)(?<!Object)(?<!Promise)\.(?:to|from|fromTo)\s*\(|buildEffect\s*\(/.test(tail))
+        continue;
       findings.push({
         code: "gsap_timeline_registered_before_async_build",
         severity: "error",

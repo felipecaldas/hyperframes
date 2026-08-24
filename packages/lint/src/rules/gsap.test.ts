@@ -24,6 +24,54 @@ describe("GSAP rules", () => {
     expect(finding?.severity).toBe("error");
   });
 
+  it("does NOT error on a kill-guard READ before fonts.ready when the assignment is after (TAB-831)", async () => {
+    // The emitted shells always open with `if (window.__timelines[id]) ….kill()`.
+    // That is a read, not a registration — only the assignment position matters.
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080"></div>
+  <script>
+    window.__timelines = window.__timelines || {};
+    if (window.__timelines["c1"]) window.__timelines["c1"].kill();
+    var tl = gsap.timeline({ paused: true });
+    tl.fromTo("#editor", { opacity: 0 }, { opacity: 1, duration: 0.5 }, 0);
+    document.fonts.ready.then(function () {
+      document.querySelectorAll(".hf-captions").forEach(function (g) {
+        var words = Array.from(g.querySelectorAll("span"));
+        if (words.length) g.style.fontSize = "12px";
+      });
+    });
+    tl.set({}, {}, 5);
+    window.__timelines["c1"] = tl;
+  </script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find(
+      (f) => f.code === "gsap_timeline_registered_before_async_build",
+    );
+    expect(finding).toBeUndefined();
+  });
+
+  it("does NOT treat Array.from inside fonts.ready as a deferred build (TAB-831)", async () => {
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080"></div>
+  <script>
+    var tl = gsap.timeline({ paused: true });
+    window.__timelines["c1"] = tl;
+    document.fonts.ready.then(function () {
+      var words = Array.from(document.querySelectorAll("span"));
+      words.forEach(function (w) { tl.set(w, { scale: 1 }, 0); });
+    });
+  </script>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find(
+      (f) => f.code === "gsap_timeline_registered_before_async_build",
+    );
+    expect(finding).toBeUndefined();
+  });
+
   it("does NOT error when window.__timelines is registered AFTER the fonts.ready build", async () => {
     const html = `
 <html><body>
