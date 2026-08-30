@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { trackCheckReport, trackCommandFailure } from "../telemetry/events.js";
+import { trackLintRun } from "../telemetry/lintRun.js";
 import { getRunId } from "../telemetry/runId.js";
 import type { ProjectDir } from "./project.js";
 import { lintProject, shouldBlockRender, type ProjectLintResult } from "./lintProject.js";
@@ -491,7 +492,9 @@ function detectSweepStatic(
   duration: number,
   geometrySignatures: string[],
   motionIssues: AnchoredLayoutIssue[],
+  hasNoTimelineDeclaration: boolean,
 ): AnchoredLayoutIssue[] {
+  if (hasNoTimelineDeclaration) return [];
   if (duration < SWEEP_STATIC_MIN_DURATION_SEC) return [];
   if (geometrySignatures.length < 2) return [];
   if (motionIssues.some((issue) => issue.code === "motion_frozen")) return [];
@@ -1070,6 +1073,7 @@ export async function runAuditGrid(
     grid.duration,
     collected.geometrySignatures,
     motionIssues,
+    await driver.hasNoTimelineDeclaration(),
   );
   const rotationFindings = detectRotationPivotDrift(
     collected.rotationSamples,
@@ -1106,6 +1110,7 @@ export async function runCheckPipeline(
   dependencies: CheckDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<CheckReport> {
   let lintResult: ProjectLintResult;
+  const lintStartedAt = Date.now();
   try {
     lintResult = await dependencies.lintProject(project.dir);
   } catch (error) {
@@ -1114,6 +1119,11 @@ export async function runCheckPipeline(
     // for a script problem that doesn't exist.
     return failureReport(options, runtimeFailure(error, "check_lint_failure"));
   }
+  trackLintRun(project.dir, lintResult, {
+    command: "check",
+    durationMs: Date.now() - lintStartedAt,
+    ...(getRunId() !== undefined ? { runId: getRunId() } : {}),
+  });
 
   const lint = buildLintSection(lintResult);
   if (shouldBlockRender(true, false, lintResult.totalErrors, lintResult.totalWarnings)) {

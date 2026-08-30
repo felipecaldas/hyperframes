@@ -35,7 +35,6 @@ function resolveRawId(
 
 interface TimelineExpansionRawIdInput {
   selectedElementId: string | null;
-  isPlaying: boolean;
   currentTime: number;
   manifest: ClipManifestClip[];
   parentMap: Map<string, string>;
@@ -97,14 +96,12 @@ function findActiveExpandableCompositionId(
 
 export function resolveTimelineExpansionRawId({
   selectedElementId,
-  isPlaying,
   currentTime,
   manifest,
   parentMap,
 }: TimelineExpansionRawIdInput): string | null {
   const selectedRawId = resolveRawId(selectedElementId, manifest, parentMap);
   if (selectedRawId) return selectedRawId;
-  if (isPlaying) return null;
   return findActiveExpandableCompositionId(currentTime, manifest, parentMap);
 }
 
@@ -146,6 +143,32 @@ interface DisplayBounds {
  * could never be shown again (not even after a reload, since the attribute is in
  * the source).
  */
+/**
+ * Audio-group membership for an expanded child, from whichever source has it.
+ *
+ * The flat store twin when there is one; otherwise the `DomClipChild` record,
+ * which carried it off the live element during the DOM walk. That fallback is
+ * the ONLY source for a sub-composition that declares both a group and its
+ * members: those members never enter the flat store, so "inherit from the flat
+ * twin" silently produced no membership and therefore no group row — for
+ * exactly the case group support was extended to cover.
+ */
+function childGroupState(
+  flat: TimelineElement | undefined,
+  domChild: DomClipChild | undefined,
+): Partial<TimelineElement> {
+  const source = flat?.audioGroup ? flat : domChild?.audioGroup ? domChild : null;
+  if (!source) return {};
+  return {
+    audioGroup: source.audioGroup,
+    audioGroupLabel: source.audioGroupLabel,
+    audioGroupVolume: source.audioGroupVolume,
+    audioGroupHidden: source.audioGroupHidden,
+    audioGroupFxChain: source.audioGroupFxChain,
+    audioGroupAutomation: source.audioGroupAutomation,
+  };
+}
+
 function hostElementState(flat: TimelineElement | undefined): Partial<TimelineElement> {
   if (!flat) return {};
   return {
@@ -172,6 +195,7 @@ function buildChildElements(
   editBasis: { start: number; sourceFile: string | undefined },
   expandedHostKey: string,
   elements: readonly TimelineElement[],
+  domChildrenById: ReadonlyMap<string, DomClipChild>,
 ): TimelineElement[] {
   const result: TimelineElement[] = [];
   for (const child of siblings) {
@@ -200,6 +224,10 @@ function buildChildElements(
     result.push({
       ...base,
       ...hostElementState(elements.find((element) => element.key === key)),
+      ...childGroupState(
+        elements.find((element) => element.key === key),
+        domId ? domChildrenById.get(domId) : undefined,
+      ),
       key,
       start: clamped.start,
       duration: clamped.duration,
@@ -218,7 +246,13 @@ function buildChildElements(
       // clips. Fractions strictly between the host's lane and the next integer
       // can never equal a normalized (integer) lane, while still rendering the
       // children as their own ordered rows directly under the host.
-      track: display.track + (result.length + 1) / (siblings.length + 2),
+      //
+      // Confined to the LOWER half of that gap, because a GROUP row anchors at
+      // exactly `firstMemberTrack - 0.5` (`useTimelineTrackDerivations`) — and
+      // the old `k / (n + 2)` hit 0.5 dead on for a host with two children
+      // (2/4), producing a duplicate row key and a duplicated group header. This
+      // scheme's maximum is `0.5 * n / (n + 1)`, strictly under 0.5 for every n.
+      track: display.track + (0.5 * (result.length + 1)) / (siblings.length + 1),
       authoredTrack: base.authoredTrack,
       stackingContextId: base.stackingContextId,
       expandedParentStart: editBasis.start,
@@ -302,6 +336,7 @@ export function buildExpandedElements(
   };
 
   const parentKey = topLevelElement.key ?? topLevelElement.id;
+  const domChildrenById = new Map(domClipChildren.map((child) => [child.id, child]));
   const expanded = buildChildElements(
     siblings,
     {
@@ -312,6 +347,7 @@ export function buildExpandedElements(
     editBasis,
     parentKey,
     elements,
+    domChildrenById,
   );
   if (expanded.length === 0) return filterToTopLevel(elements, parentMap);
 
@@ -334,7 +370,7 @@ export function buildExpandedElements(
       : (el.key ?? el.id) === parentKey;
 
   // ADDITIVE drill-in: the host row stays and its children are appended under
-  // it. Expansion is also triggered by the playhead alone (paused auto-expand),
+  // it. Expansion is also triggered by the playhead alone (active auto-expand),
   // so substituting the host row made it vanish on an ordinary seek, and with
   // it the host's keyframe lane, since diamonds render per row from
   // `keyframeCache.get(elementKey)`. The synthetic fractional lanes above sit
@@ -356,13 +392,14 @@ export function useExpandedTimelineElements(): TimelineElement[] {
   const clipParentMap = usePlayerStore((s) => s.clipParentMap);
   const domClipChildren = usePlayerStore((s) => s.domClipChildren);
   const selectedElementId = usePlayerStore((s) => s.selectedElementId);
-  const isPlaying = usePlayerStore((s) => s.isPlaying);
   const currentTime = usePlayerStore((s) => s.currentTime);
 
-  // Resolve which raw clip drives expansion. This reads currentTime (for paused
-  // auto-expand) so it re-runs each scrub tick, but it's a cheap manifest scan and
-  // its RESULT only changes when the playhead crosses a composition boundary. Keying
-  // the expensive build below on these ids (not raw currentTime) avoids re-allocating
+  // Resolve which raw clip drives expansion from the store's committed playhead
+  // time. The RAF loop keeps live time out of React and Zustand during playback,
+  // so this target deliberately stays stable until the loop commits or a seek /
+  // pause updates the store. The scan re-runs on scrub ticks, but its RESULT only
+  // changes when the playhead crosses a composition boundary. Keying the expensive
+  // build below on these ids (not raw currentTime) avoids re-allocating
   // expandedElements — and cascading TimelineClip re-renders — on every tick.
   const { rawId, selectedRawId } = useMemo(() => {
     if (!clipManifest || clipManifest.length === 0 || clipParentMap.size === 0) {
@@ -371,14 +408,13 @@ export function useExpandedTimelineElements(): TimelineElement[] {
     return {
       rawId: resolveTimelineExpansionRawId({
         selectedElementId,
-        isPlaying,
         currentTime,
         manifest: clipManifest,
         parentMap: clipParentMap,
       }),
       selectedRawId: resolveRawId(selectedElementId, clipManifest, clipParentMap),
     };
-  }, [clipManifest, clipParentMap, selectedElementId, isPlaying, currentTime]);
+  }, [clipManifest, clipParentMap, selectedElementId, currentTime]);
 
   return useMemo(() => {
     if (!clipManifest || clipManifest.length === 0 || clipParentMap.size === 0) {

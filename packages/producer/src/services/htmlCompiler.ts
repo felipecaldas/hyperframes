@@ -23,6 +23,7 @@ import {
   isNonRelativeUrl,
   parseStrictFiniteTimingNumber,
   readMediaStart,
+  redactTelemetryString,
   resolveNaturalMediaTimelineDurationFromValues,
   type ResolvedDuration,
   type UnresolvedElement,
@@ -444,6 +445,31 @@ async function resolveMediaDuration(
     return { duration: null, resolvedPath: filePath };
   }
 
+  // STUDIO-5433: attach the remote `src` to any ffprobe failure surfaced from
+  // this branch. `extractMediaMetadata` → `runFfprobe` intentionally redacts
+  // its local `filePath` out of the error message (see
+  // engine/utils/ffprobe.ts::redactFfprobeInput), so a bare `moov atom not
+  // found` in Datadog carries no attribution and requires a Temporal history
+  // dump to identify the offending source. Re-throwing with the `src`
+  // (query-string redacted via `redactTelemetryString` so pre-signed URL
+  // signatures never reach telemetry) makes the next occurrence diagnosable
+  // directly from the render error. Fail-fast semantics for the video branch
+  // are preserved — only the message is enriched.
+  const withSrcContext = (error: unknown): Error => {
+    // A NotMediaPayloadError already carries its own attribution AND the
+    // routing metadata downstream keys on — `.code = "NOT_MEDIA_PAYLOAD"`,
+    // `.owner = "user"`, `.retryable = false`, `.elementFingerprints`. Wrapping
+    // it in a bare Error drops all four, flipping a user-input bug to
+    // generic/system/retryable: it pages ops and re-runs the render. Pass it
+    // through untouched.
+    if (error instanceof NotMediaPayloadError) return error;
+    const originalMessage = error instanceof Error ? error.message : String(error);
+    const safeSrc = redactTelemetryString(src);
+    const wrapped = new Error(`${originalMessage} [src=${safeSrc}]`);
+    if (error instanceof Error && error.stack) wrapped.stack = error.stack;
+    return wrapped;
+  };
+
   return withMediaProbeSlot(async () => {
     let profile: MediaProbeProfile;
     try {
@@ -471,13 +497,17 @@ async function resolveMediaDuration(
         }
         return { duration: null, resolvedPath: filePath };
       }
-      throw error;
+      throw withSrcContext(error);
     }
     assertAssetMediaTypeProfile(tagName === "video" ? "video" : "audio", profile, elementIdentity);
 
     let metadata: { durationSeconds: number };
     if (tagName === "video") {
-      metadata = await extractMediaMetadata(filePath);
+      try {
+        metadata = await extractMediaMetadata(filePath);
+      } catch (error) {
+        throw withSrcContext(error);
+      }
     } else {
       try {
         metadata = await extractAudioMetadata(filePath);
@@ -1250,6 +1280,8 @@ const REMOTE_MEDIA_SUBDIR = "_remote_media";
 // have `>` inside quoted attribute values (data-title etc.).
 const REMOTE_MEDIA_TAG_RE =
   /<(?:video|audio)\b[^>]*?\bsrc\s*=\s*["'](https?:\/\/[^"']+)["'][^>]*>/gi;
+// <source src> on media elements (picture uses srcset, not src).
+const REMOTE_SOURCE_TAG_RE = /<source\b[^>]*?\bsrc\s*=\s*["'](https?:\/\/[^"']+)["'][^>]*>/gi;
 // Match <img> tags (including agent-pipeline-emitted variants where `src` is
 // not the first attribute). Producer-side localisation is the primary fix for
 // the remote-<img> flicker; frameCapture's `pollImagesReady`/`decodeAllImages`
@@ -1320,10 +1352,11 @@ async function downloadAndRewriteUrls(
 }
 
 /**
- * Download any remote `src` URLs on `<video>` and `<audio>` elements into a
- * local subdirectory of `downloadDir`, rewrite the HTML src attributes to
- * relative paths, and return the updated HTML along with a map of
- * `{ relativePath → absoluteLocalPath }` for callers to add to `externalAssets`.
+ * Download any remote `src` URLs on `<video>` / `<audio>` elements and their
+ * `<source>` children into a local subdirectory of `downloadDir`, rewrite the
+ * HTML src attributes to relative paths, and return the updated HTML along with
+ * a map of `{ relativePath → absoluteLocalPath }` for callers to add to
+ * `externalAssets`.
  *
  * Skips URLs that fail to download (warns and preserves the original URL so
  * the browser can still attempt the remote fetch as a fallback).
@@ -1339,12 +1372,13 @@ export async function localizeRemoteMediaSources(
   html: string,
   downloadDir: string,
 ): Promise<{ html: string; remoteMediaAssets: Map<string, string> }> {
-  // Collect unique HTTP URLs from <video>/<audio> src attributes.
   const urlSet = new Set<string>();
-  const re = new RegExp(REMOTE_MEDIA_TAG_RE.source, REMOTE_MEDIA_TAG_RE.flags);
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html)) !== null) {
-    if (m[1]) urlSet.add(m[1]);
+  for (const tagRe of [REMOTE_MEDIA_TAG_RE, REMOTE_SOURCE_TAG_RE]) {
+    const re = new RegExp(tagRe.source, tagRe.flags);
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) !== null) {
+      if (m[1]) urlSet.add(m[1]);
+    }
   }
   return downloadAndRewriteUrls(
     urlSet,
@@ -1638,7 +1672,21 @@ export async function localizeRemoteFontFaces(
   );
 }
 
-const LOCAL_FONTFACE_URL_RE = /url\(["']?(?!data:|https?:\/\/)([^"')]+)["']?\)/gi;
+// `file:` joins data: and http(s): in the exclusion list. Without it an
+// absolute `file:///abs/path/font.ttf` src was read as a project-RELATIVE path,
+// resolved to `<projectDir>/file:/abs/path/...`, and the failed read was
+// swallowed below — leaving the rule untouched for the browser to reject.
+const LOCAL_FONTFACE_URL_RE = /url\(["']?(?!data:|file:|https?:\/\/)([^"')]+)["']?\)/gi;
+
+/**
+ * Match one `url(<path>)` occurrence, with or without quotes, for a literal
+ * path. Exported for tests: the suffix-collision it prevents is invisible in
+ * ordinary projects and easy to reintroduce.
+ */
+export function urlOccurrenceRe(localPath: string): RegExp {
+  const escaped = localPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`url\\((["']?)${escaped}\\1\\)`, "g");
+}
 // Base64 expands bytes by ~33%, then immutable HTML replacements retain more
 // string copies while compiling. Files up to and including 5 MiB remain inline;
 // the first byte above that stays file-backed. This conservative ceiling keeps
@@ -1709,10 +1757,26 @@ async function embedLocalFontFaces(html: string, projectDir: string): Promise<st
               `[Compiler] Embedded local font file: ${localPath} (${(font.buffer.length / 1024).toFixed(0)} KB → data URI)`,
             );
           }
-          result = result.replaceAll(localPath, dataUri);
+          // Anchored on the `url(...)` occurrence, not a bare substring. A
+          // plain replaceAll of `localPath` also rewrites that text anywhere
+          // else it appears -- including inside a LONGER url whose tail
+          // happens to match, e.g. embedding `fonts/x.ttf` would corrupt an
+          // untouched `url("file:///abs/fonts/x.ttf")` into
+          // `url("file:///abs/<data-uri>")`. Any two paths where one is a
+          // suffix of the other collide the same way. Every sibling rewrite
+          // in this file already anchors like this.
+          result = result.replace(urlOccurrenceRe(localPath), `url("${dataUri}")`);
           embeddedPaths.add(localPath);
-        } catch {
-          // File read or compression failed — keep the original path
+        } catch (error) {
+          // Keep the original path: a font that cannot be read must not fail
+          // the render. Logged rather than silently swallowed -- a silent skip
+          // here means the composition renders in a fallback typeface and
+          // nothing says why.
+          defaultLogger.warn(
+            `[Compiler] Could not embed local font ${localPath}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
         }
       }
     }
@@ -2026,7 +2090,9 @@ export async function compileForRender(
  * Discover media elements from the browser DOM after JavaScript has run.
  * This catches videos/audios whose `src` is set dynamically via JS
  * (e.g. `document.getElementById("pip-video").src = URL`), which the
- * static regex parsers miss because the HTML has `src=""`.
+ * static regex parsers miss because the HTML has `src=""`. Clips are keyed
+ * by `data-hf-render-id` when present — author ids collide across inlined
+ * scenes, and this snapshot is the only identity those empty-src elements get.
  */
 export interface BrowserMediaElement {
   id: string;
@@ -2088,7 +2154,14 @@ export async function discoverMediaFromBrowser(page: Page): Promise<BrowserMedia
         : htmlEl.tagName.toLowerCase() === "video"
           ? "video"
           : "audio";
-      const id = htmlEl.id || (isImage ? autoImageIds.get(htmlEl) : undefined);
+      // Render id is document-unique after inlining; author id is only unique
+      // per composition file. Empty-src media is skipped by the static parse
+      // and lives or dies on this snapshot — keying by author id collapses
+      // colliding scenes onto one clip (residual of #3340).
+      const id =
+        htmlEl.getAttribute("data-hf-render-id") ||
+        htmlEl.id ||
+        (isImage ? autoImageIds.get(htmlEl) : undefined);
       if (!id) return;
 
       // currentSrc is authoritative for <video>/<audio><source> and responsive images.
@@ -2149,7 +2222,10 @@ export async function discoverAudioVolumeAutomationFromTimeline(
   const sampleStep = 1 / Math.min(60, Math.max(1, sampleFps));
   const rawWindows = await page.evaluate((ids: string[]) => {
     return ids.flatMap((id) => {
-      const el = document.getElementById(id) ?? document.getElementById(id.replace(/-audio$/, ""));
+      const el =
+        window.__hfMediaEl?.(id) ??
+        document.getElementById(id) ??
+        document.getElementById(id.replace(/-audio$/, ""));
       if (!(el instanceof HTMLAudioElement) && !(el instanceof HTMLVideoElement)) return [];
       return [
         {
@@ -2238,7 +2314,9 @@ export async function discoverAudioVolumeAutomationFromTimeline(
 
       for (const { id, start, end } of clips) {
         const el =
-          document.getElementById(id) ?? document.getElementById(id.replace(/-audio$/, ""));
+          window.__hfMediaEl?.(id) ??
+          document.getElementById(id) ??
+          document.getElementById(id.replace(/-audio$/, ""));
         if (!(el instanceof HTMLAudioElement) && !(el instanceof HTMLVideoElement)) continue;
 
         const sampleStart = Math.max(0, start);
@@ -2346,24 +2424,40 @@ export async function discoverVideoVisibilityFromTimeline(
     const SAMPLE_STEP = 0.1;
     const BINARY_PRECISION = 1 / 60;
 
+    // Seek once per timestep and sample every video — seeking dominates and is
+    // independent of which element we read.
+    const entries: {
+      id: string;
+      sceneEl: Element;
+      firstVisible: number | null;
+      lastVisible: number | null;
+    }[] = [];
     for (const videoEl of videos) {
-      const id = videoEl.id;
+      const id = videoEl.getAttribute?.("data-hf-render-id") || videoEl.id;
       if (!id) continue;
+      entries.push({
+        id,
+        sceneEl: videoEl.closest(".scene") || videoEl,
+        firstVisible: null,
+        lastVisible: null,
+      });
+    }
+    if (entries.length === 0) return results;
 
-      const sceneEl = videoEl.closest(".scene") || videoEl;
-
-      let firstVisible: number | null = null;
-      let lastVisible: number | null = null;
-
-      for (let t = 0; t <= duration; t += SAMPLE_STEP) {
-        seekTl(t);
-        const opacity = parseFloat(window.getComputedStyle(sceneEl).opacity);
+    for (let t = 0; t <= duration; t += SAMPLE_STEP) {
+      seekTl(t);
+      for (const entry of entries) {
+        const opacity = parseFloat(window.getComputedStyle(entry.sceneEl).opacity);
         if (opacity > 0) {
-          if (firstVisible === null) firstVisible = t;
-          lastVisible = t;
+          if (entry.firstVisible === null) entry.firstVisible = t;
+          entry.lastVisible = t;
         }
       }
+    }
 
+    // Per-video boundary refinement (cheap: O(log(step)) seeks each).
+    for (const entry of entries) {
+      const { id, sceneEl, firstVisible, lastVisible } = entry;
       if (firstVisible === null || lastVisible === null) continue;
 
       // Binary search left boundary

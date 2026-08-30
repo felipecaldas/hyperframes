@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useMemo, useEffect, useLayoutEffect } from "react";
+import { useState, useCallback, useRef, useMemo, useLayoutEffect } from "react";
 import type { LeftSidebarHandle, SidebarTab } from "./components/sidebar/LeftSidebar";
 import { useRenderQueue } from "./components/renders/useRenderQueue";
 import { usePlayerStore } from "./player";
@@ -37,6 +37,7 @@ import { useCompositionDimensions } from "./hooks/useCompositionDimensions";
 import { useToast } from "./hooks/useToast";
 import { useCompositionContentLoader } from "./hooks/useCompositionContentLoader";
 import { useStudioUrlState } from "./hooks/useStudioUrlState";
+import { useEffectiveTimelineDuration } from "./hooks/useEffectiveTimelineDuration";
 import {
   buildStudioContextValue,
   useGlobalFileDrop,
@@ -60,11 +61,8 @@ import { StudioSplash } from "./components/StudioSplash";
 import { useServerConnection } from "./hooks/useServerConnection";
 import { useStudioSessionStart } from "./hooks/useStudioSessionStart";
 import { useTimelineAddAtPlayhead } from "./hooks/useTimelineAddAtPlayhead";
-import {
-  normalizeStudioCompositionPath,
-  readStudioUrlStateFromWindow,
-  resolveMasterCompositionPath,
-} from "./utils/studioUrlState";
+import { readStudioUrlStateFromWindow, resolveMasterCompositionPath } from "./utils/studioUrlState";
+import { useHydrateActiveCompPathFromUrl } from "./hooks/useHydrateActiveCompPathFromUrl";
 const getTimelineSelectionSet = () => usePlayerStore.getState().selectedElementIds;
 // fallow-ignore-next-line complexity
 export function StudioApp() {
@@ -86,7 +84,7 @@ export function StudioApp() {
   const activeCompPathRef = useRef(activeCompPath);
   activeCompPathRef.current = activeCompPath;
   const leftSidebarRef = useRef<LeftSidebarHandle>(null);
-  const renderQueue = useRenderQueue(projectId);
+  const renderQueue = useRenderQueue(projectId, activeCompPathRef);
   const captionEditMode = useCaptionStore((s) => s.isEditMode);
   const captionHasSelection = useCaptionStore((s) => s.selectedSegmentIds.size > 0);
   const captionSync = useCaptionSync(projectId);
@@ -95,13 +93,10 @@ export function StudioApp() {
   const setTimelineSelectionSet = usePlayerStore((s) => s.setSelectedElementIds);
   const timelineDuration = usePlayerStore((s) => s.duration);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
-  const effectiveTimelineDuration = useMemo(() => {
-    const maxEnd =
-      timelineElements.length > 0
-        ? Math.max(...timelineElements.map((el) => el.start + el.duration))
-        : 0;
-    return Math.max(timelineDuration, maxEnd);
-  }, [timelineDuration, timelineElements]);
+  const effectiveTimelineDuration = useEffectiveTimelineDuration(
+    timelineDuration,
+    timelineElements,
+  );
   const { toasts, showToast, dismissToast } = useToast();
   const panelLayout = usePanelLayout({
     rightCollapsed: initialUrlStateRef.current.rightCollapsed,
@@ -129,16 +124,14 @@ export function StudioApp() {
     activeCompPath,
     masterCompPath,
   );
-  useEffect(() => {
-    if (activeCompPathHydrated) return;
-    if (!fileManager.fileTreeLoaded) return;
-    const nextCompPath = normalizeStudioCompositionPath(
-      initialUrlStateRef.current.activeCompPath,
-      fileManager.fileTree,
-    );
-    setActiveCompPath((current) => (current === nextCompPath ? current : nextCompPath));
-    setActiveCompPathHydrated(true);
-  }, [activeCompPathHydrated, fileManager.fileTree, fileManager.fileTreeLoaded]);
+  useHydrateActiveCompPathFromUrl({
+    hydrated: activeCompPathHydrated,
+    fileTreeLoaded: fileManager.fileTreeLoaded,
+    fileTree: fileManager.fileTree,
+    initialUrlStateRef,
+    setActiveCompPath,
+    setHydrated: setActiveCompPathHydrated,
+  });
   const previewPersistence = usePreviewPersistence({
     showToast,
     readOptionalProjectFile: fileManager.readOptionalProjectFile,
@@ -532,6 +525,7 @@ export function StudioApp() {
                           domEditSaveTimestampRef={domEditSaveTimestampRef}
                           recordEdit={editHistory.recordEdit}
                           onToggleElementHidden={timelineEditing.handleToggleElementHidden}
+                          onAutoGroupCarveSources={timelineEditing.handleAutoGroupCarveSources}
                           onAddMediaOverlay={handleAddMediaOverlay}
                         />
                       )
@@ -549,6 +543,9 @@ export function StudioApp() {
                     handleTimelineElementResize={timelineEditing.handleTimelineElementResize}
                     handleTimelineGroupResize={timelineEditing.handleTimelineGroupResize}
                     handleToggleTrackHidden={timelineEditing.handleToggleTrackHidden}
+                    setAudioGroupAttribute={timelineEditing.setAudioGroupAttribute}
+                    handleGroupClips={timelineEditing.handleAutoGroupCarveSources}
+                    setElementFxAttribute={timelineEditing.setElementFxAttribute}
                     handleBlockedTimelineEdit={timelineEditing.handleBlockedTimelineEdit}
                     handleTimelineElementSplit={timelineEditing.handleTimelineElementSplit}
                     handleRazorSplit={timelineEditing.handleRazorSplit}

@@ -8,7 +8,7 @@ export type {
   AgentProviderCapability,
   AgentThreadSummary,
 } from "./agent/types.js";
-export { createProjectSignature } from "./helpers/projectSignature.js";
+export { createProjectSignature, affectsProjectSignature } from "./helpers/projectSignature.js";
 export type {
   StudioApiAdapter,
   ResolvedProject,

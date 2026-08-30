@@ -58,6 +58,7 @@ function cleanLint(): ProjectLintResult {
     results: [
       {
         file: "index.html",
+        contentHash: "test",
         result: {
           ok: true,
           errorCount: 0,
@@ -82,6 +83,7 @@ function lintWith(
     results: [
       {
         file: "index.html",
+        contentHash: "test",
         result: {
           ok: severity !== "error",
           errorCount: severity === "error" ? 1 : 0,
@@ -143,6 +145,7 @@ function fakeDriver(overrides: Partial<CheckAuditDriver> = {}): CheckAuditDriver
   return {
     initialize: vi.fn(async (_contrast: boolean) => undefined),
     getDuration: vi.fn(async () => 9),
+    hasNoTimelineDeclaration: vi.fn(async () => false),
     getTransitionBoundaries: vi.fn(async () => []),
     getCanvas: vi.fn(async () => ({ width: 1920, height: 1080 })),
     findAmbiguousSelectors: vi.fn(async (_selectors: string[]) => []),
@@ -526,6 +529,49 @@ it("skips caption_zone_collision when data-layout-allow-caption-zone is set", as
   );
 
   expect(report.layout.findings).toEqual([]);
+});
+
+it("keeps overlap waivers from suppressing changelog caption-rail collisions", async () => {
+  const collectGeometryCandidates = vi.fn(async (time: number) => [
+    geometryCandidate({
+      kind: "text",
+      tag: "div",
+      text: "Release card copy",
+      selector: "#release-card",
+      rect: fixtureRect(120, 970, 840, 118),
+      time,
+      dataAttributes: { "data-layout-allow-overlap": "" },
+    }),
+    geometryCandidate({
+      kind: "text",
+      tag: "div",
+      text: "Intentional caption rail",
+      selector: "#cap-line",
+      rect: fixtureRect(0, 990, 1080, 52),
+      time,
+      dataAttributes: { "data-layout-allow-caption-zone": "" },
+    }),
+  ]);
+  const { report } = await runScenario(
+    fakeDriver({
+      getCanvas: vi.fn(async () => ({ width: 1080, height: 1080 })),
+      collectGeometryCandidates,
+    }),
+    {
+      samples: 1,
+      contrast: false,
+      captionZone: { x0: 0, y0: 0.9, x1: 1, y1: 1, severity: "error" },
+    },
+  );
+
+  expect(report.layout.findings).toEqual([
+    expect.objectContaining({
+      code: "caption_zone_collision",
+      severity: "error",
+      selector: "#release-card",
+    }),
+  ]);
+  expect(report.ok).toBe(false);
 });
 
 it("filters caption candidates by the element box while centering the text rect", async () => {
@@ -1175,6 +1221,18 @@ describe("check pipeline", () => {
             finding.message.includes("did not advance"),
         ),
       ).toBe(true);
+    });
+
+    it("does not flag intentional static content declared with data-no-timeline", async () => {
+      const driver = fakeDriver({
+        getDuration: vi.fn(async () => 6),
+        hasNoTimelineDeclaration: vi.fn(async () => true),
+        collectLayoutGeometry: vi.fn(async () => "frozen"),
+      });
+
+      const { report } = await runScenario(driver);
+
+      expect(report.layout.findings.some((finding) => finding.code === "sweep_static")).toBe(false);
     });
 
     it("does not flag a 1.5s static title card — too short for the guard to apply", async () => {
