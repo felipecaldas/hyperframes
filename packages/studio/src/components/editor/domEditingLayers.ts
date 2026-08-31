@@ -22,7 +22,6 @@ import {
   getSelectorIndex,
   getSourceFileForElement,
   isHtmlElement,
-  isTextBearingTag,
 } from "./domEditingDom";
 import {
   findElementForSelection,
@@ -32,153 +31,15 @@ import {
 } from "./domEditingElement";
 import { isCompositionRootLayer } from "./domEditingRootLayer";
 
-export function isEditableTextLeaf(el: HTMLElement): boolean {
-  return isTextBearingTag(el.tagName.toLowerCase()) && el.children.length === 0;
-}
-
-function sameTagChildIndex(el: HTMLElement): number {
-  let index = 0;
-  let sibling = el.previousElementSibling;
-  while (sibling) {
-    if (sibling.tagName === el.tagName) index += 1;
-    sibling = sibling.previousElementSibling;
-  }
-  return index;
-}
-
-function getTextFieldLabel(
-  _tagName: string,
-  index: number,
-  total: number,
-  source: "self" | "child",
-): string {
-  if (source === "self" || total === 1) return "Content";
-  return `Text ${index + 1}`;
-}
-
-function buildTextField(
-  el: HTMLElement,
-  index: number,
-  total: number,
-  source: "self" | "child",
-  sourceChildIndex?: number,
-): DomEditTextField {
-  const tagName = el.tagName.toLowerCase();
-  const key = el.getAttribute("data-hf-text-key") ?? `${source}:${index}:${tagName}`;
-  return {
-    key,
-    label: getTextFieldLabel(tagName, index, total, source),
-    value: el.textContent ?? "",
-    tagName,
-    attributes: Array.from(el.attributes)
-      .filter((attribute) => attribute.name !== "style")
-      .map((attribute) => ({
-        name: attribute.name,
-        value: attribute.value,
-      })),
-    inlineStyles: getInlineStyles(el),
-    computedStyles: getCuratedComputedStyles(el),
-    source,
-    ...(sourceChildIndex == null ? {} : { sourceChildIndex }),
-  };
-}
-
-// fallow-ignore-next-line complexity
-export function collectDomEditTextFields(el: HTMLElement): DomEditTextField[] {
-  const childElements = Array.from(el.children).filter(isHtmlElement).filter(isEditableTextLeaf);
-
-  if (childElements.length > 0) {
-    const hasMixedContent = Array.from(el.childNodes).some(
-      (node) => node.nodeType === 3 && node.textContent?.trim(),
-    );
-
-    if (hasMixedContent) {
-      const fields: DomEditTextField[] = [];
-      let childIdx = 0;
-      for (const node of el.childNodes) {
-        if (node.nodeType === 3) {
-          const text = node.textContent ?? "";
-          if (!text.trim()) continue;
-          fields.push({
-            key: `text-node:${childIdx}`,
-            label: `Text ${childIdx + 1}`,
-            value: text,
-            tagName: "#text",
-            attributes: [],
-            inlineStyles: {},
-            computedStyles: {},
-            source: "text-node",
-          });
-          childIdx++;
-        } else if (isHtmlElement(node) && isEditableTextLeaf(node)) {
-          fields.push(
-            buildTextField(node, childIdx, childElements.length, "child", sameTagChildIndex(node)),
-          );
-          childIdx++;
-        }
-      }
-      return fields;
-    }
-
-    return childElements.map((child, index) =>
-      buildTextField(child, index, childElements.length, "child", sameTagChildIndex(child)),
-    );
-  }
-
-  if (isEditableTextLeaf(el)) {
-    return [buildTextField(el, 0, 1, "self")];
-  }
-
-  return [];
-}
-
-function escapeHtmlText(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-function serializeTextFieldStyle(field: DomEditTextField): string {
-  const entries = Object.entries(field.inlineStyles).filter(([, value]) => Boolean(value));
-  if (entries.length === 0) return "";
-  return entries.map(([key, value]) => `${key}: ${value}`).join("; ");
-}
-
-export function serializeDomEditTextFields(fields: DomEditTextField[]): string {
-  return fields
-    .filter((field) => field.source === "child" || field.source === "text-node")
-    .map((field) => {
-      if (field.source === "text-node") {
-        return escapeHtmlText(field.value);
-      }
-      const attrs = [
-        ...field.attributes.filter((attribute) => attribute.name !== "data-hf-text-key"),
-        { name: "data-hf-text-key", value: field.key },
-      ]
-        .map((attribute) => ` ${attribute.name}="${attribute.value.replace(/"/g, "&quot;")}"`)
-        .join("");
-      const style = serializeTextFieldStyle(field);
-      const styleAttr = style ? ` style="${style.replace(/"/g, "&quot;")}"` : "";
-      return `<${field.tagName}${attrs}${styleAttr}>${escapeHtmlText(field.value)}</${field.tagName}>`;
-    })
-    .join("");
-}
-
-export function buildDefaultDomEditTextField(base?: Partial<DomEditTextField>): DomEditTextField {
-  return {
-    key: `child:new:${Date.now()}`,
-    label: "Text",
-    value: "New text",
-    tagName: "span",
-    attributes: [],
-    inlineStyles: {
-      "font-family": base?.computedStyles?.["font-family"] ?? "inherit",
-      "font-size": base?.computedStyles?.["font-size"] ?? "16px",
-      "font-weight": base?.computedStyles?.["font-weight"] ?? "400",
-      color: base?.computedStyles?.color ?? "inherit",
-    },
-    computedStyles: {},
-    source: "child",
-  };
-}
+// The text-field model lives in its own module since TAB-819; re-exported here
+// so every existing import of these names keeps working.
+export {
+  buildDefaultDomEditTextField,
+  collectDomEditTextFields,
+  serializeCaptionWordSpans,
+  serializeDomEditTextFields,
+} from "./domEditingTextFields";
+import { collectDomEditTextFields } from "./domEditingTextFields";
 
 export interface DomEditChildLocator {
   childSelector: string;

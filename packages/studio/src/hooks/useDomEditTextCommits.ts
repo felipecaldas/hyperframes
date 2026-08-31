@@ -13,11 +13,9 @@ import {
 import {
   buildDomEditRichTextPatchOperation,
   buildDomEditStylePatchOperation,
-  buildDomEditTextPatchOperation,
   findElementForSelection,
   getDomEditTargetKey,
   isTextEditableSelection,
-  serializeDomEditTextFields,
   buildDefaultDomEditTextField,
   type DomEditTextField,
   type DomEditSelection,
@@ -25,7 +23,6 @@ import {
 import type { ImportedFontAsset } from "../components/editor/fontAssets";
 import type { PersistDomEditOperations } from "./domEditCommitTypes";
 import { canEditElementTextInline } from "../components/editor/domEditInlineText";
-import { buildTextFieldChildOperations } from "./domEditTextFieldCommitOps";
 import { reportDomEditPersistFailure } from "./domEditPersistFailure";
 import {
   bumpDomEditCommitMapVersion,
@@ -35,6 +32,11 @@ import {
   runReportedDomEditCommit,
   type DomEditCommitOutcome,
 } from "./domEditCommitRunner";
+import {
+  buildCaptionWordSpans,
+  buildNextDomTextFields,
+  planDomTextCommit,
+} from "./domEditTextCommitPlan";
 import { useDomEditAttributeCommits } from "./useDomEditAttributeCommits";
 import type { InlineTextEditCommit } from "./useInlineTextEdit";
 
@@ -56,13 +58,6 @@ export interface UseDomEditTextCommitsParams {
   ) => Promise<DomEditSelection | null>;
   persistDomEditOperations: PersistDomEditOperations;
   resolveImportedFontAsset: (fontFamilyValue: string) => ImportedFontAsset | null;
-}
-
-interface DomTextCommitPlan {
-  usesSerializedTextFields: boolean;
-  nextContent: string;
-  childOperations: PatchOperation[] | null;
-  operations: PatchOperation[];
 }
 
 function canCommitInlineTextSelection(selection: DomEditSelection, element: HTMLElement): boolean {
@@ -95,51 +90,6 @@ function buildDomStyleCommitOperations(
     );
   }
   return operations;
-}
-
-function buildNextDomTextFields(
-  textFields: DomEditTextField[],
-  value: string,
-  fieldKey?: string,
-): DomEditTextField[] {
-  if (textFields.length === 0) return [];
-  return textFields.map((field) => (field.key === fieldKey ? { ...field, value } : field));
-}
-
-function planDomTextCommit(
-  originalTextFields: DomEditTextField[],
-  nextTextFields: DomEditTextField[],
-  plainTextContent: string,
-): DomTextCommitPlan {
-  const usesSerializedTextFields =
-    nextTextFields.length > 1 || nextTextFields.some((field) => field.source === "child");
-  const nextContent = usesSerializedTextFields
-    ? serializeDomEditTextFields(nextTextFields)
-    : plainTextContent;
-  const childOperations = usesSerializedTextFields
-    ? buildTextFieldChildOperations(originalTextFields, nextTextFields)
-    : null;
-  // Per-child operations when the layers still line up one-for-one, and the
-  // element's whole markup when they do not.
-  //
-  // `buildTextFieldChildOperations` can only address children that already
-  // exist, so it returns null for any change in how many there are — which is
-  // every delete and every add. That used to end here with "Couldn't save this
-  // text structure change": the panel offered a remove button and an Add text
-  // field row, and neither could ever save. A structure change has one honest
-  // operation, which is to write the structure.
-  const operations =
-    childOperations ??
-    (usesSerializedTextFields
-      ? [buildDomEditRichTextPatchOperation(nextContent)]
-      : [buildDomEditTextPatchOperation(nextContent)]);
-
-  return {
-    usesSerializedTextFields,
-    nextContent,
-    childOperations,
-    operations,
-  };
 }
 
 async function resyncDomTextSelectionFromPreview(
@@ -280,7 +230,12 @@ export function useDomEditTextCommits({
       }
       const isLatestTextCommit = bumpDomEditCommitVersion(domTextCommitVersionRef);
       const nextTextFields = buildNextDomTextFields(domEditSelection.textFields, value, fieldKey);
-      const textCommit = planDomTextCommit(domEditSelection.textFields, nextTextFields, value);
+      const textCommit = planDomTextCommit(
+        domEditSelection.textFields,
+        nextTextFields,
+        value,
+        buildCaptionWordSpans(domEditSelection.element, value),
+      );
       const iframe = previewIframeRef.current;
       const doc = iframe?.contentDocument;
       let editedElement: HTMLElement | null = null;

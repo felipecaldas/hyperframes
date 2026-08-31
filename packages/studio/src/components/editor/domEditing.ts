@@ -41,6 +41,7 @@ export {
   refreshDomEditSelection,
   resolveDomEditCapabilities,
   resolveDomEditSelection,
+  serializeCaptionWordSpans,
   serializeDomEditTextFields,
 } from "./domEditingLayers";
 
