@@ -15,6 +15,7 @@ import {
   type DomEditTextField,
 } from "../components/editor/domEditing";
 import { isAtomicContainer } from "../components/editor/domEditingGroups";
+import { isHtmlElement } from "../components/editor/domEditingDom";
 import { buildTextFieldChildOperations } from "./domEditTextFieldCommitOps";
 
 export interface DomTextCommitPlan {
@@ -33,9 +34,14 @@ export interface DomTextCommitPlan {
  */
 export function buildCaptionWordSpans(element: HTMLElement, value: string): string | null {
   if (!isAtomicContainer(element)) return null;
-  const previousWords = Array.from(element.children).filter(
-    (child): child is HTMLElement => child instanceof HTMLElement,
-  );
+  // `isHtmlElement`, never `instanceof HTMLElement`. The caption lives in the
+  // preview iframe, so its spans are built by that frame's constructor and are
+  // not instances of this one. `instanceof` dropped every child here, silently:
+  // the words still came back as spans, so the caption still animated, but with
+  // no timings, no class and no pop cap on any of them. Every edit quietly
+  // demoted its caption to an even split. `isHtmlElement` tests `nodeType`, so
+  // it holds across realms.
+  const previousWords = Array.from(element.children).filter(isHtmlElement);
   return serializeCaptionWordSpans(value, previousWords) || null;
 }
 

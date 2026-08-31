@@ -230,16 +230,33 @@ export function useDomEditTextCommits({
       }
       const isLatestTextCommit = bumpDomEditCommitVersion(domTextCommitVersionRef);
       const nextTextFields = buildNextDomTextFields(domEditSelection.textFields, value, fieldKey);
-      const textCommit = planDomTextCommit(
+      const iframe = previewIframeRef.current;
+      const doc = iframe?.contentDocument;
+      let editedElement: HTMLElement | null = null;
+      let previousInnerHtml: string | null = null;
+      /**
+       * Re-planned in `capture` against the element the preview is showing.
+       *
+       * `domEditSelection.element` can be a document behind: stamping the
+       * identity ids rewrites the file, the preview reloads, and the selection
+       * still points into the replaced document. Everything else here survives
+       * that, because it reads the text-field model rather than the DOM, but a
+       * caption's word spans exist only in the DOM. Planned off the stale
+       * reference the re-split emitted four bare spans, silently dropping every
+       * word timing, class and pop cap it exists to carry, and the caption
+       * degraded to an even split on every edit. Unit tests could not see it:
+       * they hand the serializer a live element by construction.
+       *
+       * This first plan is the fallback for a preview that cannot be read at
+       * all. It keeps the spans rather than writing plain text, which is still
+       * the difference between a caption that animates and one that does not.
+       */
+      let textCommit = planDomTextCommit(
         domEditSelection.textFields,
         nextTextFields,
         value,
         buildCaptionWordSpans(domEditSelection.element, value),
       );
-      const iframe = previewIframeRef.current;
-      const doc = iframe?.contentDocument;
-      let editedElement: HTMLElement | null = null;
-      let previousInnerHtml: string | null = null;
 
       return runReportedDomEditCommit({
         capture: () => {
@@ -248,6 +265,12 @@ export function useDomEditTextCommits({
           if (!el) return;
           editedElement = el;
           previousInnerHtml = el.innerHTML;
+          textCommit = planDomTextCommit(
+            domEditSelection.textFields,
+            nextTextFields,
+            value,
+            buildCaptionWordSpans(el, value),
+          );
         },
         apply: () => {
           if (!editedElement) return;
