@@ -253,6 +253,38 @@ async function withDeadline(
 }
 
 /**
+ * Let the page's own font-dependent layout work finish before reading it
+ * (TAB-1064).
+ *
+ * A compiled Tabario project shrinks each overflowing caption to one line in a
+ * `document.fonts.ready.then(...)` callback. `waitForCompositionFonts` returns
+ * as soon as the font status is not "loading", which can be before that
+ * promise has settled and before its callbacks have run. Measured on a live
+ * project: Caption 0 read 52px on two lines at that moment and 23.22px on one
+ * line a few frames later, which is what the user sees. Awaiting the same
+ * promise from here runs after every callback the page chained on it, and the
+ * frame after that lets the resulting style land in layout. Bounded, so a page
+ * whose fonts never settle still gets measured.
+ */
+async function settleFontDependentLayout(page: import("puppeteer-core").Page): Promise<void> {
+  await page
+    .evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          const deadline = setTimeout(resolve, 1_500);
+          const ready = document.fonts?.ready ?? Promise.resolve();
+          Promise.resolve(ready).then(() =>
+            requestAnimationFrame(() => {
+              clearTimeout(deadline);
+              resolve();
+            }),
+          );
+        }),
+    )
+    .catch(() => {});
+}
+
+/**
  * One measurement: bundle, serve, seek, read. Owns its page and its server and
  * always releases both, whether it succeeded, failed, or lost the race to
  * `withDeadline`.
@@ -314,6 +346,7 @@ async function runLayoutMeasurement(
       animationFrameSettle: "double",
       waitForFontsMs: 500,
     });
+    await settleFontDependentLayout(page);
     const raw = await page.evaluate(measureInPage, opts.selectors);
     return classifyLayoutProbe(raw, seekTime);
   } catch (err) {

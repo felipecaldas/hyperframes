@@ -127,6 +127,12 @@ describe("Tabario AI provider", () => {
     expect(system.content).toContain("Never rewrite, duplicate or inline the highlight loop");
     expect(system.content).toContain("never merge or split word spans");
     expect(system.content).toContain("never copy a `data-hf-id`");
+    // TAB-1064: the fit script makes "two lines" unreachable by width alone,
+    // and the attribute that opts one caption out of it is named.
+    expect(system.content).toContain("data-caption-base-px");
+    expect(system.content).toContain(
+      "remove `data-caption-base-px` from that caption element only",
+    );
     expect(system.content).toContain("data-duration");
     expect(system.content).toContain("data-composition-src");
     // And the explicit instruction not to plead blindness.
