@@ -41,6 +41,101 @@ function hasAttrName(tagSource: string, attr: string): boolean {
   return new RegExp(`(?:^|\\s)${escaped}(?:\\s*=|\\s|/?>)`, "i").test(attrs);
 }
 
+const IMAGE_SRC_EXT = new Set([
+  "jpg",
+  "jpeg",
+  "png",
+  "gif",
+  "bmp",
+  "webp",
+  "svg",
+  "heic",
+  "heif",
+  "tiff",
+  "ico",
+]);
+const VIDEO_SRC_EXT = new Set([
+  "mp4",
+  "mov",
+  "avi",
+  "webm",
+  "mkv",
+  "flv",
+  "wmv",
+  "m4v",
+  "mpg",
+  "mpeg",
+]);
+
+const AUDIO_SRC_EXT = new Set(["mp3", "wav", "aac", "flac", "opus", "aiff", "wma"]);
+
+type SrcKind = "image" | "video" | "audio";
+
+const SRC_KIND_NOUN: Record<SrcKind, string> = {
+  image: "an image",
+  video: "a video",
+  audio: "an audio file",
+};
+
+function srcKind(src: string): SrcKind | null {
+  const stripped = src.trim();
+  if (!stripped) return null;
+  const lower = stripped.toLowerCase();
+  if (lower.startsWith("data:")) {
+    const mime = /^data:([^;,]+)/i.exec(stripped)?.[1]?.toLowerCase();
+    if (!mime) return null;
+    if (mime.startsWith("image/")) return "image";
+    if (mime.startsWith("video/")) return "video";
+    if (mime.startsWith("audio/")) return "audio";
+    return null;
+  }
+  if (lower.startsWith("blob:")) return null;
+  let pathname = stripped;
+  try {
+    if (/^https?:/i.test(stripped)) {
+      pathname = decodeURIComponent(new URL(stripped).pathname);
+    } else {
+      pathname = stripped.split("?")[0]?.split("#")[0] ?? stripped;
+    }
+  } catch {
+    pathname = stripped.split("?")[0]?.split("#")[0] ?? stripped;
+  }
+  const base = pathname.split("/").pop() ?? "";
+  const dot = base.lastIndexOf(".");
+  if (dot < 0) return null;
+  const ext = base.slice(dot + 1).toLowerCase();
+  if (IMAGE_SRC_EXT.has(ext)) return "image";
+  if (VIDEO_SRC_EXT.has(ext)) return "video";
+  if (AUDIO_SRC_EXT.has(ext)) return "audio";
+  return null;
+}
+
+function findMediaSrcKindMismatchFindings(ctx: LintContext): HyperframeLintFinding[] {
+  const findings: HyperframeLintFinding[] = [];
+  for (const tag of ctx.tags) {
+    if (tag.name !== "video" && tag.name !== "img") continue;
+    const src = readAttr(tag.raw, "src");
+    if (!src) continue;
+    const kind = srcKind(src);
+    if (kind === null) continue;
+    const expected = tag.name === "video" ? "video" : "image";
+    if (kind === expected) continue;
+    const elementId = readAttr(tag.raw, "id") || undefined;
+    findings.push({
+      code: "media_src_kind_mismatch",
+      severity: "error",
+      message: `<${tag.name}${elementId ? ` id="${elementId}"` : ""}> src is ${SRC_KIND_NOUN[kind]}, not ${SRC_KIND_NOUN[expected]}. The producer fail-closes when the tag and file kind disagree.`,
+      elementId,
+      fixHint:
+        tag.name === "video"
+          ? "Use <img> for a still, <audio> for sound, or point <video> at a video URL (mp4/webm/mov/…)."
+          : "Use <video> for a video URL, <audio> for sound, or point <img> at a still (png/jpg/webp/…).",
+      snippet: truncateSnippet(tag.raw),
+    });
+  }
+  return findings;
+}
+
 /** Parent `src`, else a descendant `<source src>` (matches engine resolveMediaElementSrc). */
 function mediaHasResolvableSrc(tag: OpenTag, tags: readonly OpenTag[]): boolean {
   if (readAttr(tag.raw, "src")) return true;
@@ -458,6 +553,9 @@ export const mediaRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = 
     }
     return findings;
   },
+
+  // media_src_kind_mismatch
+  findMediaSrcKindMismatchFindings,
 
   // placeholder_media_url
   ({ tags }) => {

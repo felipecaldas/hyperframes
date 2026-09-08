@@ -11,7 +11,7 @@
  */
 
 import { createReadStream, existsSync, mkdirSync, readFileSync } from "fs";
-import { join, dirname, resolve, basename } from "path";
+import { join, dirname, resolve, basename, relative } from "path";
 import { parseHTML } from "linkedom";
 import {
   compileTimingAttrs,
@@ -25,6 +25,9 @@ import {
   readMediaStart,
   redactTelemetryString,
   resolveNaturalMediaTimelineDurationFromValues,
+  rewriteAssetPaths,
+  rewriteCssAssetUrls,
+  rewriteInlineStyleAssetUrls,
   type ResolvedDuration,
   type UnresolvedElement,
 } from "@hyperframes/core";
@@ -103,6 +106,8 @@ export interface CompiledComposition {
   /** Ancestors of the composition root carry a background-image (gradient/url). */
   hasAncestorBackgroundImage: boolean;
 }
+
+const INFERRED_MEDIA_DURATION_ATTR = "data-hf-inferred-duration";
 
 /** Adapts linkedom's `parseHTML` to the `checkSubCompositionUsability` contract. */
 function parseSubCompHtmlForValidity(html: string): ParsableDocumentLike {
@@ -534,6 +539,23 @@ async function resolveMediaDuration(
  * Compile a single HTML file: static pass + ffprobe for unresolved media.
  * Returns compiled HTML and any unresolved composition elements that need browser resolution.
  */
+function markInferredVariableMediaDurations(
+  html: string,
+  unresolvedMedia: readonly UnresolvedElement[],
+): string {
+  const unresolvedIds = new Set(unresolvedMedia.map((element) => element.id));
+  if (unresolvedIds.size === 0) return html;
+
+  const { document } = parseHTML(html);
+  let changed = false;
+  for (const element of document.querySelectorAll("video[data-var-src], audio[data-var-src]")) {
+    if (!unresolvedIds.has(element.id)) continue;
+    element.setAttribute(INFERRED_MEDIA_DURATION_ATTR, "");
+    changed = true;
+  }
+  return changed ? document.toString() : html;
+}
+
 async function compileHtmlFile(
   html: string,
   baseDir: string,
@@ -567,8 +589,9 @@ async function compileHtmlFile(
     (r): r is ResolvedDuration => r.duration != null && Number.isFinite(r.duration),
   );
 
+  const markedStaticHtml = markInferredVariableMediaDurations(staticCompiled, mediaUnresolved);
   let compiledHtml =
-    resolutions.length > 0 ? injectDurations(staticCompiled, resolutions) : staticCompiled;
+    resolutions.length > 0 ? injectDurations(markedStaticHtml, resolutions) : markedStaticHtml;
 
   // Phase 2: Bound authored audio to playable source (parallel ffprobe).
   // Explicit video slots may outlive their source and hold the final frame.
@@ -1846,6 +1869,38 @@ function rewriteUnresolvableGsapToCdn(html: string, projectDir: string): string 
 }
 
 /**
+ * Preserve a nested entry document's browser URL base when compilation moves
+ * it to compiled/index.html. Use the same sibling-first/project-root-fallback
+ * rule as mounted sub-compositions so both supported entry modes agree.
+ */
+function rebaseDirectEntryAssetPaths(html: string, projectDir: string, htmlPath: string): string {
+  if (!isPathInside(htmlPath, projectDir)) return html;
+  const entryPath = relative(projectDir, htmlPath).replace(/\\/g, "/");
+  if (!entryPath.includes("/")) return html;
+
+  const { document } = parseHTML(html);
+  const assetExists = (path: string) => existsSync(resolve(projectDir, path));
+  rewriteAssetPaths(
+    document.querySelectorAll("[src], [href]"),
+    entryPath,
+    (el: Element, attr: string) => el.getAttribute(attr),
+    (el: Element, attr: string, value: string) => el.setAttribute(attr, value),
+    assetExists,
+  );
+  rewriteInlineStyleAssetUrls(
+    document.querySelectorAll("[style]"),
+    entryPath,
+    (el: Element) => el.getAttribute("style"),
+    (el: Element, value: string) => el.setAttribute("style", value),
+    assetExists,
+  );
+  for (const style of document.querySelectorAll("style")) {
+    style.textContent = rewriteCssAssetUrls(style.textContent || "", entryPath, assetExists);
+  }
+  return document.toString();
+}
+
+/**
  * Compile an HTML composition project into a single self-contained HTML string
  * with all media metadata resolved.
  */
@@ -1856,7 +1911,12 @@ export async function compileForRender(
   downloadDir: string,
   options: CompileForRenderOptions = {},
 ): Promise<CompiledComposition> {
-  const rawHtml = rewriteUnresolvableGsapToCdn(readFileSync(htmlPath, "utf-8"), projectDir);
+  const entryHtml = rebaseDirectEntryAssetPaths(
+    readFileSync(htmlPath, "utf-8"),
+    projectDir,
+    htmlPath,
+  );
+  const rawHtml = rewriteUnresolvableGsapToCdn(entryHtml, projectDir);
 
   // Pre-flight: every data-composition-src reference must resolve to a
   // usable file before we spend any time compiling, launching a browser, or
@@ -2101,6 +2161,8 @@ export interface BrowserMediaElement {
   start: number;
   end: number;
   duration: number;
+  /** True when compilation inferred duration from the fallback source. */
+  durationInferred: boolean;
   mediaStart: number;
   loop: boolean;
   hasAudio: boolean;
@@ -2123,6 +2185,8 @@ export async function discoverMediaFromBrowser(page: Page): Promise<BrowserMedia
       start: number;
       endRaw: string | null;
       durationRaw: string | null;
+      intrinsicDuration: number;
+      durationInferred: boolean;
       playbackStartRaw: string | null;
       mediaStartRaw: string | null;
       loop: boolean;
@@ -2169,6 +2233,10 @@ export async function discoverMediaFromBrowser(page: Page): Promise<BrowserMedia
       const start = parseFloat(htmlEl.getAttribute("data-start") || "0");
       const endRaw = htmlEl.getAttribute("data-end");
       const durationRaw = htmlEl.getAttribute("data-duration");
+      const durationInferred = htmlEl.hasAttribute("data-hf-inferred-duration");
+      const intrinsicDuration = isImage
+        ? 0
+        : (htmlEl as HTMLVideoElement | HTMLAudioElement).duration;
       const playbackStartRaw = htmlEl.getAttribute("data-playback-start");
       const mediaStartRaw = htmlEl.getAttribute("data-media-start");
       const loop = htmlEl.hasAttribute("loop");
@@ -2185,6 +2253,8 @@ export async function discoverMediaFromBrowser(page: Page): Promise<BrowserMedia
         start,
         endRaw,
         durationRaw,
+        intrinsicDuration,
+        durationInferred,
         playbackStartRaw,
         mediaStartRaw,
         loop,
@@ -2197,18 +2267,23 @@ export async function discoverMediaFromBrowser(page: Page): Promise<BrowserMedia
     return results;
   });
 
-  return elements.map(({ endRaw, durationRaw, playbackStartRaw, mediaStartRaw, ...element }) => ({
-    ...element,
-    end: parseStrictFiniteTimingNumber(endRaw) ?? 0,
-    duration: parseStrictFiniteTimingNumber(durationRaw) ?? 0,
-    mediaStart: readMediaStart({
-      getAttribute(name: string) {
-        if (name === "data-playback-start") return playbackStartRaw;
-        if (name === "data-media-start") return mediaStartRaw;
-        return null;
-      },
+  return elements.map(
+    ({ endRaw, durationRaw, intrinsicDuration, playbackStartRaw, mediaStartRaw, ...element }) => ({
+      ...element,
+      end: parseStrictFiniteTimingNumber(endRaw) ?? 0,
+      duration:
+        element.durationInferred && Number.isFinite(intrinsicDuration) && intrinsicDuration > 0
+          ? intrinsicDuration
+          : (parseStrictFiniteTimingNumber(durationRaw) ?? 0),
+      mediaStart: readMediaStart({
+        getAttribute(name: string) {
+          if (name === "data-playback-start") return playbackStartRaw;
+          if (name === "data-media-start") return mediaStartRaw;
+          return null;
+        },
+      }),
     }),
-  }));
+  );
 }
 
 export async function discoverAudioVolumeAutomationFromTimeline(

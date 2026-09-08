@@ -1,4 +1,5 @@
 import { parseHTML } from "linkedom";
+import { removeElementWithGsapCascade } from "@hyperframes/parsers";
 import postcss from "postcss";
 import selectorParser from "postcss-selector-parser";
 import { isAllowedHtmlAttribute, isSafeAttributeValue } from "@hyperframes/core/html-attr-safety";
@@ -138,7 +139,7 @@ export function removeElementFromHtml(source: string, target: SourceMutationTarg
   const element = findTargetElement(document, target);
   if (!element) return source;
 
-  element.remove();
+  removeElementWithGsapCascade(document, element);
   return wrappedFragment ? document.body.innerHTML || "" : document.toString();
 }
 
@@ -500,7 +501,8 @@ function uniqueGroupDomId(document: Document, groupId: string): string {
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "group";
+      // Normalization above leaves at most one hyphen at either edge.
+      .replace(/^-|-$/g, "") || "group";
   let id = base;
   let n = 2;
   while (document.getElementById(id)) {

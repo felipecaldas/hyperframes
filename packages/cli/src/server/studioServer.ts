@@ -7,8 +7,9 @@
 
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
-import { existsSync, readFileSync, writeFileSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { resolve, join, basename } from "node:path";
+import { readBundleFile } from "./readBundleFile.js";
 import {
   createProjectWatcher,
   shouldWatchProjectFile,
@@ -429,10 +430,9 @@ export interface StudioServer {
 export async function loadPreviewServerBuildSignature(): Promise<string> {
   const runtimeSignature = await loadRuntimeSourceSignature();
   const studioBundle = resolveStudioBundle();
-  const studioIndex =
-    studioBundle.available && existsSync(studioBundle.indexPath)
-      ? readFileSync(studioBundle.indexPath, "utf-8")
-      : "";
+  const studioIndex = studioBundle.available
+    ? (readBundleFile(studioBundle.indexPath)?.toString("utf-8") ?? "")
+    : "";
   return hashSignatureParts([
     version,
     runtimeSignature,
@@ -888,8 +888,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
   app.get("/api/runtime.js", (c) => {
     const serve = async () => {
       const runtimeSource =
-        (await loadRuntimeSource()) ??
-        (existsSync(runtimePath) ? readFileSync(runtimePath, "utf-8") : null);
+        (await loadRuntimeSource()) ?? readBundleFile(runtimePath)?.toString("utf-8") ?? null;
       if (!runtimeSource) return c.text("runtime not available", 404);
       return c.body(runtimeSource, 200, {
         "Content-Type": "text/javascript",
@@ -933,7 +932,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
         const absPath = resolve(projectDir, path);
         let version: string | null = null;
         try {
-          version = fileContentVersion(readFileSync(absPath, "utf-8"));
+          version = fileContentVersion(readFileSync(absPath));
         } catch {
           // A deletion has no current bytes to match against an API write receipt.
         }
@@ -944,11 +943,17 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
       };
       // Re-applied here because the watcher now also emits the signature
       // manifest files, which must not trigger a browser reload.
-      watcher.addListener((changedPath) => {
+      const wrappedListener = (changedPath: string) => {
         if (shouldWatchProjectFile(changedPath)) listener(changedPath);
-      });
-      while (true) {
-        await stream.sleep(30000);
+      };
+      watcher.addListener(wrappedListener);
+      stream.onAbort(() => watcher.removeListener(wrappedListener));
+      try {
+        while (true) {
+          await stream.sleep(30000);
+        }
+      } finally {
+        watcher.removeListener(wrappedListener);
       }
     });
   });
@@ -1025,8 +1030,8 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
   // Studio SPA static files
   const serveStudioStaticFile = (c: Context) => {
     const filePath = resolve(studioDir, c.req.path.slice(1));
-    if (!existsSync(filePath) || !statSync(filePath).isFile()) return c.text("not found", 404);
-    const content = readFileSync(filePath);
+    const content = readBundleFile(filePath);
+    if (content === null) return c.text("not found", 404);
     return new Response(content, {
       headers: { "Content-Type": getMimeType(filePath), "Cache-Control": "no-store" },
     });
@@ -1054,7 +1059,8 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
   // SPA fallback
   app.get("*", (c) => {
     const indexPath = resolve(studioDir, "index.html");
-    if (!existsSync(indexPath)) {
+    const indexContent = readBundleFile(indexPath);
+    if (indexContent === null) {
       return c.html(
         `<!doctype html>
 <html>
@@ -1110,7 +1116,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
         500,
       );
     }
-    let html = readFileSync(indexPath, "utf-8");
+    let html = indexContent.toString("utf-8");
     // Inject before the studio bundle runs. Identity script first (see
     // buildStudioHeadScripts) so the CLI distinct id is on `window` by the time
     // telemetry init reads it.

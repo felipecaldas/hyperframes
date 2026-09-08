@@ -1526,6 +1526,13 @@ describe("adaptive missing-frame retry helpers", () => {
     expect(
       isRecoverableParallelCaptureError(
         new Error(
+          "[Parallel] Capture failed: Worker 2: Page.captureScreenshot timed out. Increase the 'protocolTimeout' setting in launch/connect calls for a higher timeout if needed.",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      isRecoverableParallelCaptureError(
+        new Error(
           "[Parallel] Capture failed: Worker 0: drawElement worker encode timed out (frame 42)",
         ),
       ),
@@ -1598,14 +1605,14 @@ describe("resolveDeviceScaleFactor", () => {
     ).toThrow(/hdrMode='force-hdr'/);
   });
 
-  it("rejects alpha + outputResolution (the alpha capture path doesn't apply DPR yet)", () => {
-    expect(() =>
+  it("returns the requested DPR for alpha + outputResolution", () => {
+    expect(
       resolveDeviceScaleFactor({
         ...defaults,
         outputResolution: "landscape-4k",
         alphaRequested: true,
       }),
-    ).toThrow(/alpha output/);
+    ).toBe(2);
   });
 
   it("rejects orientation mismatch (landscape comp → portrait-4k)", () => {
@@ -2559,6 +2566,18 @@ describe("shouldRetryViaPinnedFallback (widen the self-verify retry to generic c
         isVerifyError: true,
         isCancellation: true,
         deWorkerInversion: undefined,
+        deParallelRouter: undefined,
+      }),
+    ).toBe(false);
+  });
+
+  it("never hides an encoder host interruption behind the same-host pinned fallback", () => {
+    expect(
+      shouldRetryViaPinnedFallback({
+        isVerifyError: false,
+        isCancellation: false,
+        isEncoderInterrupted: true,
+        deWorkerInversion: "inverted",
         deParallelRouter: undefined,
       }),
     ).toBe(false);

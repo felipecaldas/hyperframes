@@ -1,5 +1,6 @@
 import type { Hono } from "hono";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
+import { Readable } from "node:stream";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { injectScriptsIntoHtml, stripEmbeddedRuntimeScripts } from "@hyperframes/core/compiler";
@@ -19,6 +20,7 @@ import {
 import { ensureHfIds } from "@hyperframes/parsers/hf-ids";
 import { persistHfIdsIfNeeded, stampFileHfIds } from "../helpers/hfIdPersist.js";
 import { isVariablesPayload, VARIABLES_PAYLOAD_ERROR } from "../helpers/variablesPayload.js";
+import { injectPreviewVariables } from "../helpers/previewVariables.js";
 import {
   resolveProxy,
   ProxyCapacityError,
@@ -206,32 +208,6 @@ function injectGsapCdnFallback(html: string): string {
   if (html.includes("data-hf-gsap-fallback")) return html;
   if (html.includes("<head>")) return html.replace("<head>", "<head>" + GSAP_CDN_FALLBACK_SCRIPT);
   return GSAP_CDN_FALLBACK_SCRIPT + html;
-}
-
-/**
- * Inject preview variable overrides: `?variables=<json>` becomes
- * `window.__hfVariables` set before any composition script runs — the exact
- * global the engine sets via evaluateOnNewDocument at render time
- * (engine/src/services/frameCapture.ts), so preview-with-values cannot
- * diverge from render behavior. The runtime's getVariables() merges these
- * overrides over the declared defaults.
- */
-function injectPreviewVariables(html: string, values: Record<string, unknown>): string {
-  // <-escape prevents a string value containing "</script>" from
-  // breaking out of the injected tag.
-  const json = JSON.stringify(values).replace(/</g, "\\u003c");
-  const tag = `<script data-hf-preview-variables>window.__hfVariables=${json};</script>`;
-  // Insert as early as possible without ever landing before the doctype —
-  // content before <!doctype> flips the document into quirks mode, so the
-  // fallback chain is <head…> → <html…> → after the doctype → prepend.
-  for (const pattern of [/<head[^>]*>/i, /<html[^>]*>/i, /^\s*<!doctype[^>]*>/i]) {
-    const match = pattern.exec(html);
-    if (match) {
-      const at = match.index + match[0].length;
-      return html.slice(0, at) + tag + html.slice(at);
-    }
-  }
-  return tag + html;
 }
 
 /**
@@ -581,7 +557,7 @@ export function registerPreviewRoutes(api: Hono, adapter: PreviewApiAdapter): vo
     const cacheHeaders: Record<string, string> = isText
       ? { "Cache-Control": "no-store" }
       : {
-          "Cache-Control": "private, max-age=3600, must-revalidate",
+          "Cache-Control": "private, no-cache",
           ETag: etag,
         };
 
@@ -610,34 +586,49 @@ export function registerPreviewRoutes(api: Hono, adapter: PreviewApiAdapter): vo
       servedContentType = PROXY_VARIANT_CONFIG[proxyVariant].contentType;
     }
 
-    const buffer: Buffer = isText
-      ? Buffer.from(readFileSync(file, "utf-8"), "utf-8")
-      : readFileSync(servedPath);
-    const totalSize = buffer.length;
+    // Text is small and keeps its utf-8 round trip in memory. Binary media
+    // streams only the requested window: Chrome refills a playing <video> or
+    // <audio> with a fresh Range request every few hundred milliseconds, and a
+    // 1KB slice of a multi-hundred-MB source must not readFileSync the whole
+    // file on each one. The full read also blocked the event loop, so every
+    // other Studio request (SSE, saves, the voice track) waited behind it.
+    const textBuffer = isText ? Buffer.from(readFileSync(file, "utf-8"), "utf-8") : null;
+    const totalSize = textBuffer ? textBuffer.length : statSync(servedPath).size;
+    const bodyFor = (start: number, end: number): BodyInit =>
+      textBuffer
+        ? new Uint8Array(textBuffer.subarray(start, end + 1))
+        : // Node's web stream type and the DOM one do not overlap for tsc on
+          // every platform's lib set; the double cast is the documented bridge.
+          (Readable.toWeb(
+            createReadStream(servedPath, { start, end }),
+          ) as unknown as ReadableStream);
 
     // Support byte-range requests so browsers can seek audio/video elements.
     const rangeHeader = c.req.header("Range");
-    if (rangeHeader) {
-      const match = /bytes=(\d+)-(\d*)/.exec(rangeHeader);
-      if (match) {
-        const start = parseInt(match[1]!, 10);
-        const end = match[2] ? parseInt(match[2], 10) : totalSize - 1;
-        const safeEnd = Math.min(end, totalSize - 1);
-        const chunkSize = safeEnd - start + 1;
-        return new Response(new Uint8Array(buffer.slice(start, safeEnd + 1)), {
-          status: 206,
-          headers: {
-            ...cacheHeaders,
-            "Content-Type": servedContentType,
-            "Content-Range": `bytes ${start}-${safeEnd}/${totalSize}`,
-            "Accept-Ranges": "bytes",
-            "Content-Length": String(chunkSize),
-          },
+    const match = rangeHeader ? /bytes=(\d+)-(\d*)/.exec(rangeHeader) : null;
+    if (match) {
+      const start = parseInt(match[1]!, 10);
+      const end = match[2] ? parseInt(match[2], 10) : totalSize - 1;
+      const safeEnd = Math.min(end, totalSize - 1);
+      if (start > safeEnd) {
+        return new Response(null, {
+          status: 416,
+          headers: { ...cacheHeaders, "Content-Range": `bytes */${totalSize}` },
         });
       }
+      return new Response(bodyFor(start, safeEnd), {
+        status: 206,
+        headers: {
+          ...cacheHeaders,
+          "Content-Type": servedContentType,
+          "Content-Range": `bytes ${start}-${safeEnd}/${totalSize}`,
+          "Accept-Ranges": "bytes",
+          "Content-Length": String(safeEnd - start + 1),
+        },
+      });
     }
 
-    return new Response(new Uint8Array(buffer), {
+    return new Response(totalSize > 0 ? bodyFor(0, totalSize - 1) : null, {
       headers: {
         ...cacheHeaders,
         "Content-Type": servedContentType,

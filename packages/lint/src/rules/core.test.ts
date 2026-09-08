@@ -601,6 +601,25 @@ describe("core rules", () => {
   });
 
   describe("non_deterministic_code", () => {
+    it("gives randomness guidance for crypto and clock guidance for wall time", async () => {
+      const result = await lintHyperframeHtml(`<html><body>
+        <div data-composition-id="c1" data-width="1920" data-height="1080"></div>
+        <script>
+          crypto.getRandomValues(new Uint32Array(1));
+          Date.now();
+          window.__timelines = { c1: gsap.timeline({ paused: true }) };
+        </script>
+      </body></html>`);
+      const crypto = result.findings.find((finding) =>
+        finding.message.includes("crypto.getRandomValues"),
+      );
+      const clock = result.findings.find((finding) => finding.message.includes("Date.now"));
+      expect(crypto).toMatchObject({ code: "non_deterministic_code", severity: "error" });
+      expect(crypto?.fixHint).toContain("seeded PRNG");
+      expect(crypto?.fixHint).not.toContain("time-dependent");
+      expect(clock?.fixHint).toContain("wall-clock time");
+    });
+
     it("detects Math.random() in script content", async () => {
       const html = `
 <html><body>
@@ -775,6 +794,22 @@ describe("core rules", () => {
         comp(`window.__timelines = { wrongid: gsap.timeline({ paused: true }) };`),
       );
       expect(result.findings.find((f) => f.code === "timeline_id_mismatch")).toBeDefined();
+    });
+  });
+
+  describe("css_parse_error — malformed CSS is reported instead of silently swallowed", () => {
+    it("reports a css_parse_error finding for unparseable CSS", async () => {
+      const html = `<html><body>
+        <style>.stage { transform: xPercent: -10; }</style>
+        <div data-composition-id="main" data-width="1920" data-height="1080" data-start="0" data-duration="5"></div>
+        <script src="gsap.min.js"></script>
+        <script>window.__timelines = { main: gsap.timeline({ paused: true }) };</script>
+      </body></html>`;
+      const result = await lintHyperframeHtml(html);
+      const finding = result.findings.find((f) => f.code === "css_parse_error");
+      expect(finding).toBeDefined();
+      expect(finding?.severity).toBe("error");
+      expect(finding?.message).toContain("Missed semicolon");
     });
   });
 });

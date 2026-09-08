@@ -3,9 +3,11 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mountReactHarness } from "../hooks/domSelectionTestHarness";
 import { writeStudioUiPreferences } from "../utils/studioUiPreferences";
+import { mintElementHandle } from "./handles";
 import { useStudioAgentTools, type StudioAgentToolsDeps } from "./useStudioAgentTools";
 import type { ModelContext, ModelContextRegisterToolOptions, ModelContextTool } from "./types";
 import type { StudioLookSnapshot } from "./tools/lookTools";
+import { previewDoc, selectionFor } from "./webmcpTestUtils";
 
 const trackEvent = vi.hoisted(() => vi.fn());
 vi.mock("../telemetry/client", () => ({ trackEvent }));
@@ -22,10 +24,80 @@ function snapshot(overrides: Partial<StudioLookSnapshot> = {}): StudioLookSnapsh
     duration: 10,
     isPlaying: false,
     elements: [],
+    scene: { status: "ready", items: [], drillInItem: null },
     selection: null,
     selectionAnimationCount: 0,
     history: { canUndo: false, canRedo: false, undoLabel: null, redoLabel: null },
     ...overrides,
+  };
+}
+
+/** Full deps with inert defaults; override only what the test is about. */
+function deps(overrides: Partial<StudioAgentToolsDeps> = {}): StudioAgentToolsDeps {
+  return {
+    getSnapshot: () => snapshot(),
+    getPreviewDocument: () => null,
+    buildSelection: async () => null,
+    applySelection: () => undefined,
+    requestSeek: () => undefined,
+    readPlayhead: () => ({ currentTime: 0, duration: 10, isPlaying: false }),
+    getProjectId: () => "demo",
+    getCompositionPath: () => "index.html",
+    probeFrame: async () => ({ ok: true, status: 200 }),
+    wait: async () => undefined,
+    getCurrentSelection: () => null,
+    getWriteBlockedReason: () => null,
+    setText: async () => ({ ok: true }),
+    setStyle: async () => ({ ok: true }),
+    readBox: () => ({ x: 0, y: 0, width: 100, height: 50 }),
+    moveTo: async () => undefined,
+    resizeTo: async () => undefined,
+    rotateTo: async () => undefined,
+    addAnimation: async () => true,
+    updateAnimation: async () => true,
+    addKeyframe: async () => undefined,
+    deleteAnimation: async () => true,
+    getAnimationsForSelection: async () => [],
+    getGsapDiagnostics: () => ({
+      animations: [],
+      multipleTimelines: false,
+      unsupportedTimelinePattern: false,
+    }),
+    ...overrides,
+  };
+}
+
+async function executeRegistered<T>(
+  registered: ModelContextTool[],
+  name: string,
+  input: object,
+  signal: AbortSignal = new AbortController().signal,
+): Promise<T> {
+  const tool = registered.find((candidate) => candidate.name === name);
+  if (!tool) throw new Error(`expected ${name} to be registered`);
+  return (await tool.execute(input, { signal })) as T;
+}
+
+function mountedTargetDeps(overrides: Partial<StudioAgentToolsDeps> = {}) {
+  const doc = previewDoc('<h1 id="human">Human</h1><h1 id="agent">Agent</h1>');
+  const human = doc.getElementById("human") as HTMLElement;
+  const agent = doc.getElementById("agent") as HTMLElement;
+  const agentHandle = mintElementHandle({
+    projectId: "demo",
+    domId: "agent",
+    sourceFile: "index.html",
+    activeCompositionPath: "index.html",
+  });
+  if (!agentHandle) throw new Error("expected agent handle");
+  return {
+    agent,
+    agentHandle,
+    currentSelection: selectionFor(human),
+    deps: deps({
+      getPreviewDocument: () => doc,
+      buildSelection: async (element) => selectionFor(element),
+      ...overrides,
+    }),
   };
 }
 
@@ -46,16 +118,22 @@ function installModelContext() {
   return { registered, registerTool };
 }
 
+async function executeFirstRegistered<T>(registered: ModelContextTool[]): Promise<T> {
+  const look = registered[0];
+  if (!look) throw new Error("expected studio_look to be registered");
+  return (await look.execute({}, { signal: new AbortController().signal })) as T;
+}
+
 function removeModelContext() {
   Reflect.deleteProperty(document, "modelContext");
 }
 
-function mountTools(deps: StudioAgentToolsDeps) {
+function mountTools(initial: StudioAgentToolsDeps) {
   function Probe({ current }: { current: StudioAgentToolsDeps }) {
     useStudioAgentTools(current);
     return null;
   }
-  const root = mountReactHarness(<Probe current={deps} />);
+  const root = mountReactHarness(<Probe current={initial} />);
   cleanup = () => act(() => root.unmount());
   return {
     rerenderWith(next: StudioAgentToolsDeps) {
@@ -82,10 +160,23 @@ describe("useStudioAgentTools", () => {
     const { registered } = installModelContext();
 
     await act(async () => {
-      mountTools({ getSnapshot: () => snapshot() });
+      mountTools(deps({ getSnapshot: () => snapshot() }));
     });
 
-    expect(registered.map((tool) => tool.name)).toEqual(["studio_look"]);
+    expect(registered.map((tool) => tool.name)).toEqual([
+      "studio_look",
+      "studio_select",
+      "studio_seek",
+      "studio_frame",
+      "studio_inspect",
+      "studio_set_text",
+      "studio_set_style",
+      "studio_transform",
+      "studio_add_animation",
+      "studio_update_animation",
+      "studio_add_keyframe",
+      "studio_delete_animation",
+    ]);
     expect(trackEvent).toHaveBeenCalledWith("webmcp.native_present");
   });
 
@@ -97,16 +188,16 @@ describe("useStudioAgentTools", () => {
 
     let harness: ReturnType<typeof mountTools> | null = null;
     await act(async () => {
-      harness = mountTools({ getSnapshot: () => snapshot() });
+      harness = mountTools(deps({ getSnapshot: () => snapshot() }));
     });
-    expect(registerTool).toHaveBeenCalledTimes(1);
+    expect(registerTool).toHaveBeenCalledTimes(12);
 
     await act(async () => {
-      harness?.rerenderWith({ getSnapshot: () => snapshot({ currentTime: 5 }) });
-      harness?.rerenderWith({ getSnapshot: () => snapshot({ currentTime: 6 }) });
+      harness?.rerenderWith(deps({ getSnapshot: () => snapshot({ currentTime: 5 }) }));
+      harness?.rerenderWith(deps({ getSnapshot: () => snapshot({ currentTime: 6 }) }));
     });
 
-    expect(registerTool).toHaveBeenCalledTimes(1);
+    expect(registerTool).toHaveBeenCalledTimes(12);
   });
 
   it("executes against the LATEST deps, not the ones present at registration", async () => {
@@ -116,19 +207,17 @@ describe("useStudioAgentTools", () => {
 
     let harness: ReturnType<typeof mountTools> | null = null;
     await act(async () => {
-      harness = mountTools({ getSnapshot: () => snapshot({ currentTime: 1 }) });
+      harness = mountTools(deps({ getSnapshot: () => snapshot({ currentTime: 1 }) }));
     });
 
     await act(async () => {
-      harness?.rerenderWith({ getSnapshot: () => snapshot({ currentTime: 42 }) });
+      harness?.rerenderWith(deps({ getSnapshot: () => snapshot({ currentTime: 42 }) }));
     });
 
-    const look = registered[0];
-    if (!look) throw new Error("expected studio_look to be registered");
-    const result = (await look.execute({}, { signal: new AbortController().signal })) as {
+    const result = await executeFirstRegistered<{
       ok: boolean;
       playhead: number;
-    };
+    }>(registered);
 
     expect(result.ok).toBe(true);
     expect(result.playhead).toBe(42);
@@ -138,7 +227,7 @@ describe("useStudioAgentTools", () => {
     const { registerTool } = installModelContext();
 
     await act(async () => {
-      mountTools({ getSnapshot: () => snapshot() });
+      mountTools(deps({ getSnapshot: () => snapshot() }));
     });
     const signal = registerTool.mock.calls[0]?.[1]?.signal;
     expect(signal?.aborted).toBe(false);
@@ -153,7 +242,7 @@ describe("useStudioAgentTools", () => {
     removeModelContext();
 
     await act(async () => {
-      mountTools({ getSnapshot: () => snapshot() });
+      mountTools(deps({ getSnapshot: () => snapshot() }));
     });
 
     // The assertion is that mounting did not throw; a browser without the
@@ -166,7 +255,7 @@ describe("useStudioAgentTools", () => {
     const { registerTool } = installModelContext();
 
     await act(async () => {
-      mountTools({ getSnapshot: () => snapshot() });
+      mountTools(deps({ getSnapshot: () => snapshot() }));
     });
 
     expect(registerTool).not.toHaveBeenCalled();
@@ -176,10 +265,10 @@ describe("useStudioAgentTools", () => {
     const { registerTool } = installModelContext();
 
     await act(async () => {
-      mountTools({ getSnapshot: () => snapshot() });
+      mountTools(deps({ getSnapshot: () => snapshot() }));
     });
 
-    expect(registerTool).toHaveBeenCalledTimes(1);
+    expect(registerTool).toHaveBeenCalledTimes(12);
   });
 
   it("reports a non-abort registration failure through production telemetry", async () => {
@@ -187,7 +276,7 @@ describe("useStudioAgentTools", () => {
     registerTool.mockRejectedValue(new DOMException("blocked", "NotAllowedError"));
 
     await act(async () => {
-      mountTools({ getSnapshot: () => snapshot() });
+      mountTools(deps({ getSnapshot: () => snapshot() }));
     });
 
     expect(trackEvent).toHaveBeenCalledWith("webmcp_registration_failed", {
@@ -200,22 +289,282 @@ describe("useStudioAgentTools", () => {
     const { registered } = installModelContext();
 
     await act(async () => {
-      mountTools({
-        getSnapshot: () => {
-          throw new TypeError("handler signature moved");
-        },
-      });
+      mountTools(
+        deps({
+          getSnapshot: () => {
+            throw new TypeError("handler signature moved");
+          },
+        }),
+      );
     });
     vi.spyOn(console, "error").mockImplementation(() => {});
 
-    const look = registered[0];
-    if (!look) throw new Error("expected studio_look to be registered");
-    const result = (await look.execute({}, { signal: new AbortController().signal })) as {
+    const result = await executeFirstRegistered<{
       ok: boolean;
       kind: string;
-    };
+    }>(registered);
 
     expect(result.ok).toBe(false);
     expect(result.kind).toBe("internal");
+  });
+
+  it("requires a source-safe handle on every source-writing tool", async () => {
+    const { registered } = installModelContext();
+    await act(async () => mountTools(deps()));
+
+    for (const name of [
+      "studio_set_text",
+      "studio_set_style",
+      "studio_transform",
+      "studio_add_animation",
+      "studio_update_animation",
+      "studio_add_keyframe",
+      "studio_delete_animation",
+    ]) {
+      const schema = registered.find((tool) => tool.name === name)?.inputSchema as {
+        required?: string[];
+      };
+      expect(schema.required, name).toContain("handle");
+    }
+  });
+
+  it("binds a text write to the explicit handle even when human selection points elsewhere", async () => {
+    const { registered } = installModelContext();
+    const targeted = mountedTargetDeps();
+    const setText = vi.fn(
+      async () =>
+        ({
+          ok: true,
+          persistence: {
+            sourceFile: "index.html",
+            version: '"sha256:after"',
+            changed: true,
+          },
+        }) as const,
+    );
+    await act(async () => mountTools({ ...targeted.deps, setText }));
+
+    const result = await executeRegistered<{
+      ok: boolean;
+      stage: string;
+      changed: boolean;
+      target: { handle: string; sourceFile: string };
+    }>(registered, "studio_set_text", {
+      handle: targeted.agentHandle,
+      text: "Edited by agent",
+    });
+
+    expect(setText).toHaveBeenCalledWith(
+      expect.objectContaining({ element: targeted.agent }),
+      "Edited by agent",
+      "self",
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      stage: "saved",
+      changed: true,
+      target: { handle: targeted.agentHandle, sourceFile: "index.html" },
+    });
+  });
+
+  it("refuses a locked target and an early abort before invoking the write actor", async () => {
+    const { registered } = installModelContext();
+    const setText = vi.fn();
+    const targeted = mountedTargetDeps({
+      buildSelection: async (element) => selectionFor(element, { isInsideLockedComposition: true }),
+    });
+    await act(async () => mountTools({ ...targeted.deps, setText }));
+
+    const locked = await executeRegistered<{ ok: boolean; stage: string }>(
+      registered,
+      "studio_set_text",
+      { handle: targeted.agentHandle, text: "No" },
+    );
+    const controller = new AbortController();
+    controller.abort();
+    const aborted = await executeRegistered<{ ok: boolean; stage: string; cancelRequested: true }>(
+      registered,
+      "studio_set_text",
+      { handle: targeted.agentHandle, text: "No" },
+      controller.signal,
+    );
+
+    expect(locked).toMatchObject({ ok: false, stage: "refused" });
+    expect(aborted).toMatchObject({ ok: false, stage: "refused", cancelRequested: true });
+    expect(setText).not.toHaveBeenCalled();
+  });
+
+  it("reports dispatched, saved, and verified only from their corresponding evidence", async () => {
+    const { registered } = installModelContext();
+    const targeted = mountedTargetDeps();
+    const box = { x: 0, y: 0, width: 100, height: 50 };
+    await act(async () =>
+      mountTools({
+        ...targeted.deps,
+        setText: async () => ({
+          ok: true,
+          persistence: {
+            sourceFile: "index.html",
+            version: '"sha256:after"',
+            changed: true,
+          },
+        }),
+        addAnimation: async () => true,
+        readBox: () => ({ ...box }),
+        resizeTo: async (_selection, next) => {
+          Object.assign(box, next);
+          return {
+            ok: true,
+            persistence: {
+              sourceFile: "index.html",
+              version: '"sha256:transform"',
+              changed: true,
+            },
+          } as const;
+        },
+      }),
+    );
+
+    const dispatched = await executeRegistered<{ stage: string }>(
+      registered,
+      "studio_add_animation",
+      { handle: targeted.agentHandle, method: "to" },
+    );
+    const saved = await executeRegistered<{ stage: string }>(registered, "studio_set_text", {
+      handle: targeted.agentHandle,
+      text: "Saved",
+    });
+    const verified = await executeRegistered<{ stage: string }>(registered, "studio_transform", {
+      handle: targeted.agentHandle,
+      width: 200,
+      height: 80,
+    });
+
+    expect(dispatched.stage).toBe("dispatched");
+    expect(saved.stage).toBe("saved");
+    expect(verified.stage).toBe("verified");
+  });
+
+  it("reports a matched no-op with its durable version without fabricating a change", async () => {
+    const { registered } = installModelContext();
+    const targeted = mountedTargetDeps();
+    await act(async () =>
+      mountTools({
+        ...targeted.deps,
+        setText: async () => ({
+          ok: true,
+          persistence: {
+            sourceFile: "index.html",
+            version: '"sha256:current"',
+            changed: false,
+          },
+        }),
+      }),
+    );
+
+    const result = await executeRegistered<{
+      ok: boolean;
+      stage: string;
+      changed: boolean;
+      evidence: { version: string };
+    }>(registered, "studio_set_text", {
+      handle: targeted.agentHandle,
+      text: "Agent",
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      stage: "saved",
+      changed: false,
+      evidence: { version: '"sha256:current"' },
+    });
+  });
+
+  it("reports the actual saved outcome and late cancellation without promising rollback", async () => {
+    const { registered } = installModelContext();
+    const targeted = mountedTargetDeps();
+    let finish: (() => void) | undefined;
+    const setText = vi.fn(
+      () =>
+        new Promise<{
+          ok: true;
+          persistence: { sourceFile: string; version: string; changed: true };
+        }>((resolve) => {
+          finish = () =>
+            resolve({
+              ok: true,
+              persistence: {
+                sourceFile: "index.html",
+                version: '"sha256:late"',
+                changed: true,
+              },
+            });
+        }),
+    );
+    await act(async () => mountTools({ ...targeted.deps, setText }));
+    const controller = new AbortController();
+
+    const pending = executeRegistered<{
+      ok: boolean;
+      stage: string;
+      cancelRequested?: boolean;
+    }>(
+      registered,
+      "studio_set_text",
+      { handle: targeted.agentHandle, text: "Late" },
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(setText).toHaveBeenCalledTimes(1));
+    controller.abort();
+    finish?.();
+
+    expect(await pending).toMatchObject({
+      ok: true,
+      stage: "saved",
+      cancelRequested: true,
+    });
+    expect(setText).toHaveBeenCalledTimes(1);
+  });
+
+  it("aggregates partial style evidence and uses the weakest applied assurance", async () => {
+    const { registered } = installModelContext();
+    const targeted = mountedTargetDeps();
+    const setStyle = vi.fn(async (_selection, property: string) => {
+      if (property === "left") return { ok: false, reason: "geometry-property" } as const;
+      if (property === "opacity") return { ok: true } as const;
+      return {
+        ok: true,
+        persistence: {
+          sourceFile: "index.html",
+          version: '"sha256:color"',
+          changed: true,
+        },
+      } as const;
+    });
+    await act(async () => mountTools({ ...targeted.deps, setStyle }));
+
+    const result = await executeRegistered<{
+      ok: boolean;
+      stage: string;
+      partial: boolean;
+      applied: Record<string, string>;
+      rejected: Record<string, string>;
+      propertyReceipts: Record<string, { stage: string }>;
+    }>(registered, "studio_set_style", {
+      handle: targeted.agentHandle,
+      styles: { color: "red", left: "10px", opacity: "0.5" },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      stage: "dispatched",
+      partial: true,
+      applied: { color: "red", opacity: "0.5" },
+      rejected: { left: "geometry-property" },
+      propertyReceipts: {
+        color: { stage: "saved" },
+        opacity: { stage: "dispatched" },
+      },
+    });
   });
 });

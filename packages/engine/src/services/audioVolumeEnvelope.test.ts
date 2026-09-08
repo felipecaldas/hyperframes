@@ -1,10 +1,21 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import * as fs from "fs";
 import { tmpdir } from "node:os";
 import { getFfmpegBinary } from "../utils/ffmpegBinaries.js";
 import { applyVolumeEnvelopeToWav } from "./audioVolumeEnvelope.js";
+
+vi.mock("fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    writeFileSync: vi.fn(actual.writeFileSync),
+    renameSync: vi.fn(actual.renameSync),
+    rmSync: vi.fn(actual.rmSync),
+  };
+});
 
 const SAMPLE_RATE = 48000;
 const CHANNELS = 2;
@@ -48,6 +59,53 @@ describe("applyVolumeEnvelopeToWav", () => {
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 
+  it.each(["write", "rename"])(
+    "preserves the WAV and removes staging after a %s failure",
+    async (stage) => {
+      const dir = tmp();
+      const path = join(dir, "failure.wav");
+      writeConstantWav(path, 16, 10000);
+      const original = readFileSync(path);
+      const actual = await vi.importActual<typeof import("node:fs")>("fs");
+      if (stage === "write") {
+        vi.mocked(fs.writeFileSync).mockImplementationOnce((...args) => {
+          // Simulate a write that leaves a partial staging file before failing.
+          Reflect.apply(actual.writeFileSync, actual, args);
+          throw new Error("injected write failure");
+        });
+      } else {
+        vi.mocked(fs.renameSync).mockImplementationOnce(() => {
+          throw new Error("injected rename failure");
+        });
+      }
+      expect(applyVolumeEnvelopeToWav(path, [{ time: 0, volume: 0 }], 0, 0)).toBe(false);
+      expect(readFileSync(path)).toEqual(original);
+      expect(readdirSync(dir)).toEqual(["failure.wav"]);
+    },
+  );
+
+  it("uses a private sibling directory and preserves success if cleanup fails", async () => {
+    const dir = tmp();
+    const path = join(dir, "private.wav");
+    writeConstantWav(path, 16, 10000);
+    const actual = await vi.importActual<typeof import("node:fs")>("fs");
+    let stagingDir = "";
+    vi.mocked(fs.writeFileSync).mockImplementationOnce((...args) => {
+      stagingDir = dirname(String(args[0]));
+      expect(dirname(stagingDir)).toBe(dir);
+      expect(stagingDir).not.toBe(dir);
+      if (process.platform !== "win32")
+        expect(actual.statSync(stagingDir).mode & 0o777).toBe(0o700);
+      Reflect.apply(actual.writeFileSync, actual, args);
+    });
+    vi.mocked(fs.rmSync).mockImplementationOnce(() => {
+      throw new Error("injected cleanup failure");
+    });
+    expect(applyVolumeEnvelopeToWav(path, [{ time: 0, volume: 0 }], 0, 0)).toBe(true);
+    expect(sampleAt(path, 0)).toBe(0);
+    expect(readdirSync(stagingDir)).toEqual([]);
+  });
+
   it("applies a linear fade sample-accurately", () => {
     const path = join(tmp(), "a.wav");
     const frames = SAMPLE_RATE; // 1 second
@@ -64,6 +122,7 @@ describe("applyVolumeEnvelopeToWav", () => {
       0,
     );
     expect(applied).toBe(true);
+    expect(readdirSync(dirname(path))).toEqual(["a.wav"]);
 
     expect(sampleAt(path, 0)).toBe(0); // gain 0
     expect(sampleAt(path, frames / 2)).toBeCloseTo(5000, -2); // gain ~0.5

@@ -6,7 +6,15 @@
  * Supports CPU (libx264) and GPU encoding.
  */
 
-import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "fs";
 import { join, dirname, extname } from "path";
 import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
 import {
@@ -17,7 +25,7 @@ import {
 } from "../utils/gpuEncoder.js";
 import { type HdrTransfer, getHdrEncoderColorParams } from "../utils/hdr.js";
 import { withEvenDimensionPad } from "../utils/evenDimensions.js";
-import { formatFfmpegError, runFfmpeg } from "../utils/runFfmpeg.js";
+import { formatFfmpegError, isExternalFfmpegInterruption, runFfmpeg } from "../utils/runFfmpeg.js";
 import { extractAudioMetadata } from "../utils/ffprobe.js";
 import { type Fps, fpsToFfmpegArg } from "@hyperframes/core";
 import type { EncoderOptions, EncodeResult, MuxResult } from "./chunkEncoder.types.js";
@@ -518,6 +526,7 @@ export async function encodeFramesFromDir(
         result.terminationReason === "deadline",
         encodeTimeout,
       ),
+      failureReason: isExternalFfmpegInterruption(result) ? "external_interruption" : undefined,
     };
   }
   const fileSize = existsSync(outputPath) ? statSync(outputPath).size : 0;
@@ -555,8 +564,10 @@ export async function encodeFramesChunkedConcat(
   }
   const chunkSize = Math.max(30, Math.floor(chunkSizeFrames));
   const chunkCount = Math.ceil(files.length / chunkSize);
-  const chunkDir = join(dirname(outputPath), "chunk-encode");
-  if (!existsSync(chunkDir)) mkdirSync(chunkDir, { recursive: true });
+  mkdirSync(dirname(outputPath), { recursive: true });
+  // Keep intermediates under the caller-owned output directory for its existing
+  // cleanup/debug policy, but never reuse another invocation's chunk files.
+  const chunkDir = mkdtempSync(join(dirname(outputPath), "chunk-encode-"));
   const chunkPaths: string[] = [];
 
   for (let i = 0; i < chunkCount; i++) {
@@ -612,6 +623,9 @@ export async function encodeFramesChunkedConcat(
         framesEncoded: 0,
         fileSize: 0,
         error: chunkResult.error,
+        failureReason: isExternalFfmpegInterruption(processResult)
+          ? "external_interruption"
+          : undefined,
       };
     }
     chunkPaths.push(chunkPath);
@@ -650,6 +664,9 @@ export async function encodeFramesChunkedConcat(
       framesEncoded: 0,
       fileSize: 0,
       error: concatResult.error,
+      failureReason: isExternalFfmpegInterruption(concatProcessResult)
+        ? "external_interruption"
+        : undefined,
     };
   }
 
@@ -739,6 +756,7 @@ export async function muxVideoWithAudio(
     outputPath,
     durationMs: result.durationMs,
     error: !result.success ? formatFfmpegError(result.exitCode, result.stderr) : undefined,
+    failureReason: result.failureReason,
   };
 }
 
@@ -781,5 +799,6 @@ export async function applyFaststart(
     outputPath,
     durationMs: result.durationMs,
     error: !result.success ? formatFfmpegError(result.exitCode, result.stderr) : undefined,
+    failureReason: result.failureReason,
   };
 }

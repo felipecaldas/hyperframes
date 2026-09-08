@@ -153,6 +153,12 @@ you a clear error pointing at `init --example`.
 pull from and where files land. If it is missing but the directory has an
 `index.html`, a default one is written on first use.
 
+When an item declares `registryDependencies`, `add` installs its dependencies
+first, resolving them transitively. Before installing any item files, it checks
+`minCliVersion` on every resolved item and reports upgrade guidance for an
+incompatible CLI. A `deprecated` message produces a warning without blocking
+installation.
+
 ### `catalog`
 
 Browse the registry.
@@ -186,8 +192,33 @@ npx hyperframes capture https://example.com --json
 
   Screenshots: 12
   Assets: 45
+  Dropped: 9 (6 size-floor, 3 cap-reached)
   Sections: 15
   Fonts: sohne-var
+```
+
+`Dropped` is how many assets the page referenced that are **not** in the
+folder, and why. It is printed only when it is non-zero, and `--json` always
+carries it as a `dropped` object. Without it, a capture of a spare page and a
+capture that a limit truncated are the same three-line summary, and the only
+way to tell them apart is to open the page yourself.
+
+| Reason             | What it means                                                                                          |
+| ------------------ | ------------------------------------------------------------------------------------------------------ |
+| `size-floor`       | Fetched, then judged too small to be a real asset rather than a spacer or tracking pixel.               |
+| `budget-exhausted` | `--capture-budget` ran out before this one was reached. Raise it, or pass `--skip-vision` to buy time.  |
+| `cap-reached`      | A per-run or per-family limit was already met: 30 inline SVGs, 30 fonts, 6 faces per family.            |
+| `unavailable`      | The request or the write failed: network error, timeout, refused address, bad status, disk.             |
+
+Three of those are decisions the capture made and one is a failure it hit, so a
+run that is thin with an all-zero `dropped` is a thin page, and a run that is
+thin with counts on it was cut short.
+
+```json
+{
+  "assets": 45,
+  "dropped": { "size-floor": 6, "budget-exhausted": 0, "cap-reached": 3, "unavailable": 0 }
+}
 ```
 
 | Flag                | Description                                                                                                                                       |
@@ -207,7 +238,8 @@ metadata, and contact sheets — plus whatever Lottie, video, and WebGL context
 the page exposed. It is raw material for an agent, not a finished composition;
 the `/product-launch-video` workflow uses it when a real product has to appear
 on screen. Dynamic sites, protected pages, and unusual media loaders produce
-partial results, so read the warnings and contact sheets before you build.
+partial results, so read `dropped`, the warnings, and the contact sheets before
+you build.
 
 For AI image descriptions, set `GEMINI_API_KEY` in a `.env` file
 (~$0.001/image), or `OPENROUTER_API_KEY` to route any vision model through
@@ -624,7 +656,7 @@ drift), `*.motion.json` assertions, and WCAG AA contrast.
 | `--timeout`                                  | Render-ready budget in ms; also raises page navigation above its 10s floor (default 3000)                                   |
 | `--no-contrast`                              | Skip the WCAG pass while iterating                                                                                         |
 | `--strict`                                   | Exit non-zero on warnings too (default: errors only)                                                                        |
-| `--caption-zone "<x0=..;y0=..;x1=..;y1=..>"` | Opt-in band gate. Flags content whose centre sits inside the fractional band. Optional `severity` and `seek`.               |
+| `--caption-zone "<x0=..;y0=..;x1=..;y1=..>"` | Opt-in band gate. Flags a text element's DOM box that overlaps the fractional band. Optional `severity` and `seek`.         |
 | `--frame-check`                              | Opt-in out-of-frame detection for `img`, `svg`, `video`, and `canvas`                                                       |
 | `--layout`                                   | Layout knobs, currently `proseCoverageFloor=0.05` (0–1, default 0.15)                                                       |
 | `--browser-gpu` / `--no-browser-gpu`         | Hardware GPU capture, or deterministic SwiftShader (default: auto-detect)                                                   |
@@ -696,6 +728,7 @@ Capture specific frames as PNGs, without waiting for a full render.
 npx hyperframes snapshot my-project --at 2.9,10.4,18.7
 npx hyperframes snapshot my-project --frames 10
 npx hyperframes snapshot my-project --zoom '#headline'
+npx hyperframes snapshot my-project --at 1.5,4.3 --against ref.mp4
 ```
 
 ```
@@ -714,6 +747,7 @@ npx hyperframes snapshot my-project --zoom '#headline'
 | `--output, -o`          | Where the PNGs go (default `<project>/snapshots`)                                                                                                                   |
 | `--end` / `--no-end`    | Always add a readable end-of-timeline frame (default: on). `--no-end` captures only your `--at` times.                                                              |
 | `--zoom`                | Crop to a CSS selector or an exact `x,y,w,h` region, using a raised device scale factor. Layout is untouched — never CSS zoom or a resized viewport. A selector that matches nothing is an error. |
+| `--against`             | A reference video, such as footage you are rebuilding. For every captured time also saves its frame-exact frame (`ref-XX-…png`) and a labelled render / reference pair (`pair-XX-…jpg`). |
 | `--zoom-scale`          | Pixel density for `--zoom` crops (default 3)                                                                                                                        |
 | `--angle`               | Orthogonal 3D camera for depth and occlusion checks: `front`, `iso`, `top`, `side`, or `yaw,pitch` in degrees. Tilts the whole stage, so you get real pixels.        |
 | `--describe`            | Gemini vision analysis of each frame. Runs by default when `GEMINI_API_KEY` is set. Pass a question to override the prompt, or `--describe false` to opt out.        |

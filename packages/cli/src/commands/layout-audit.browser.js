@@ -439,7 +439,7 @@
     return false;
   }
 
-  function textOverflowIssues(element, root, rootRect, time, tolerance) {
+  function textOverflowIssues(element, root, rootRect, time, tolerance, clippedIssue) {
     const textRect = textRectFor(element, true);
     if (!textRect) return [];
     const text = textContentFor(element, true);
@@ -462,8 +462,15 @@
       ? tolerance
       : Math.max(tolerance, parsePx(elementStyle.fontSize) * 0.2);
     const containerOverflow = overflowFor(textRect, containerRect, tolerance, verticalTolerance);
+    const billedAsClippedText =
+      container === element &&
+      clippedIssue != null &&
+      containerOverflow != null &&
+      containerOverflow.left == null &&
+      containerOverflow.top == null;
     if (
       containerOverflow &&
+      !billedAsClippedText &&
       !hasTextClipOptOut(element) &&
       !clippedByAncestor(element, container)
     ) {
@@ -663,8 +670,8 @@
       code: "content_overlap",
       severity: "warning",
       time,
-      selector: selectorFor(a.element),
-      containerSelector: selectorFor(b.element),
+      selector: uniqueSelectorFor(a.element),
+      containerSelector: uniqueSelectorFor(b.element),
       text: textContentFor(a.element),
       message: "Two text blocks overlap and may render unreadable.",
       rect: a.rect,
@@ -1021,8 +1028,8 @@
       code: "text_occluded",
       severity: "error",
       time,
-      selector: selectorFor(element),
-      containerSelector: selectorFor(occluder),
+      selector: uniqueSelectorFor(element),
+      containerSelector: uniqueSelectorFor(occluder),
       text,
       message: "Text is hidden beneath an opaque element.",
       rect: textRect,
@@ -1444,7 +1451,7 @@
         if (!hasOwnTextCandidate(element)) continue;
         const clipped = clippedTextIssue(element, time, tolerance);
         if (clipped) issues.push(clipped);
-        issues.push(...textOverflowIssues(element, root, rootRect, time, tolerance));
+        issues.push(...textOverflowIssues(element, root, rootRect, time, tolerance, clipped));
         const occluded = occludedTextIssue(element, time, proseCoverageFloor);
         if (occluded) issues.push(occluded);
         const invisible = invisibleTextIssue(element, time);
@@ -1520,7 +1527,18 @@
     const parts = elements.map((element) => {
       const rect = toRect(element.getBoundingClientRect());
       const opacity = round(opacityChain(element));
-      return `${rect.left},${rect.top},${rect.width},${rect.height},${opacity}`;
+      // Variable-font axis animation (font-variation-settings) is a real,
+      // visible motion channel that moves no geometry and no opacity, so a
+      // box+opacity fingerprint reads it as a frozen timeline. Worse in a
+      // DUPLEXED face (Recursive holds an identical advance width at every
+      // weight by design), where not even the line width shifts — the whole
+      // run then false-positives sweep_static. Fold the computed axis string
+      // in; it is "normal" for every element that does not use it, so this
+      // adds nothing to the fingerprint of an ordinary composition.
+      const axes = getComputedStyle(element).fontVariationSettings;
+      return `${rect.left},${rect.top},${rect.width},${rect.height},${opacity},${
+        axes && axes !== "normal" ? axes : ""
+      }`;
     });
     for (const media of root.querySelectorAll("canvas, video")) {
       if (!isVisibleElement(media)) continue;

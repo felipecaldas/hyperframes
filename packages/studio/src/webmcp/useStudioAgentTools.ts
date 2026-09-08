@@ -14,6 +14,71 @@ import {
   type StudioLookInput,
   type StudioLookSnapshot,
 } from "./tools/lookTools";
+import {
+  studioSeek,
+  studioSelect,
+  STUDIO_SEEK_DESCRIPTION,
+  STUDIO_SEEK_INPUT_SCHEMA,
+  STUDIO_SELECT_DESCRIPTION,
+  STUDIO_SELECT_INPUT_SCHEMA,
+  type SelectionToolDeps,
+  type StudioSeekResult,
+  type StudioSelectResult,
+} from "./tools/selectionTools";
+import {
+  studioFrame,
+  STUDIO_FRAME_DESCRIPTION,
+  STUDIO_FRAME_INPUT_SCHEMA,
+  type FrameToolDeps,
+  type StudioFrameInput,
+  type StudioFrameResult,
+} from "./tools/frameTools";
+import {
+  studioInspect,
+  STUDIO_INSPECT_DESCRIPTION,
+  STUDIO_INSPECT_INPUT_SCHEMA,
+  type InspectToolDeps,
+  type StudioInspectInput,
+  type StudioInspectResult,
+} from "./tools/inspectTools";
+import {
+  studioSetStyle,
+  studioSetText,
+  STUDIO_SET_STYLE_DESCRIPTION,
+  STUDIO_SET_STYLE_INPUT_SCHEMA,
+  STUDIO_SET_TEXT_DESCRIPTION,
+  STUDIO_SET_TEXT_INPUT_SCHEMA,
+  type ContentToolDeps,
+  type StudioSetStyleResult,
+  type StudioSetTextResult,
+} from "./tools/contentTools";
+import {
+  studioTransform,
+  STUDIO_TRANSFORM_DESCRIPTION,
+  STUDIO_TRANSFORM_INPUT_SCHEMA,
+  type StudioTransformInput,
+  type StudioTransformResult,
+  type TransformToolDeps,
+} from "./tools/transformTools";
+import {
+  studioAddAnimation,
+  studioAddKeyframe,
+  studioDeleteAnimation,
+  studioUpdateAnimation,
+  STUDIO_ADD_ANIMATION_DESCRIPTION,
+  STUDIO_ADD_ANIMATION_INPUT_SCHEMA,
+  STUDIO_ADD_KEYFRAME_DESCRIPTION,
+  STUDIO_ADD_KEYFRAME_INPUT_SCHEMA,
+  STUDIO_DELETE_ANIMATION_DESCRIPTION,
+  STUDIO_DELETE_ANIMATION_INPUT_SCHEMA,
+  STUDIO_UPDATE_ANIMATION_DESCRIPTION,
+  STUDIO_UPDATE_ANIMATION_INPUT_SCHEMA,
+  type AnimationToolDeps,
+  type StudioAddAnimationResult,
+  type StudioAddKeyframeResult,
+  type StudioDeleteAnimationResult,
+  type StudioUpdateAnimationResult,
+} from "./tools/animationTools";
 
 const log = makeStudioDebugLogger("webmcp");
 
@@ -27,7 +92,14 @@ function reportRegistration(report: ToolRegistrationReport, native: boolean): vo
   }
 }
 
-export interface StudioAgentToolsDeps {
+export interface StudioAgentToolsDeps
+  extends
+    SelectionToolDeps,
+    FrameToolDeps,
+    InspectToolDeps,
+    ContentToolDeps,
+    TransformToolDeps,
+    AnimationToolDeps {
   /** Read Studio's current state. Called per tool invocation, never cached. */
   getSnapshot: () => StudioLookSnapshot;
 }
@@ -57,7 +129,141 @@ function buildStudioTools(depsRef: { readonly current: StudioAgentToolsDeps }): 
           buildStudioLook(depsRef.current.getSnapshot(), input as StudioLookInput),
         ),
     },
+    {
+      name: "studio_select",
+      title: "Select an element",
+      description: STUDIO_SELECT_DESCRIPTION,
+      inputSchema: STUDIO_SELECT_INPUT_SCHEMA,
+      annotations: { readOnlyHint: false, untrustedContentHint: true },
+      execute: (input): Promise<ToolResult<StudioSelectResult>> =>
+        runToolBody("studio_select", () =>
+          studioSelect(depsRef.current, readStringInput(input, "handle")),
+        ),
+    },
+    {
+      name: "studio_seek",
+      title: "Move the playhead",
+      description: STUDIO_SEEK_DESCRIPTION,
+      inputSchema: STUDIO_SEEK_INPUT_SCHEMA,
+      annotations: { readOnlyHint: false },
+      execute: (input): Promise<ToolResult<StudioSeekResult>> =>
+        runToolBody("studio_seek", async () =>
+          studioSeek(depsRef.current, readNumberInput(input, "time")),
+        ),
+    },
+    {
+      name: "studio_frame",
+      title: "See the composition",
+      description: STUDIO_FRAME_DESCRIPTION,
+      inputSchema: STUDIO_FRAME_INPUT_SCHEMA,
+      annotations: { readOnlyHint: true, untrustedContentHint: true },
+      execute: (input): Promise<ToolResult<StudioFrameResult>> =>
+        runToolBody("studio_frame", () => studioFrame(depsRef.current, input as StudioFrameInput)),
+    },
+    {
+      name: "studio_inspect",
+      title: "Inspect one element",
+      description: STUDIO_INSPECT_DESCRIPTION,
+      inputSchema: STUDIO_INSPECT_INPUT_SCHEMA,
+      annotations: { readOnlyHint: true, untrustedContentHint: true },
+      execute: (input): Promise<ToolResult<StudioInspectResult>> =>
+        runToolBody("studio_inspect", () =>
+          studioInspect(depsRef.current, input as StudioInspectInput),
+        ),
+    },
+    {
+      name: "studio_set_text",
+      title: "Set an element's text",
+      description: STUDIO_SET_TEXT_DESCRIPTION,
+      inputSchema: STUDIO_SET_TEXT_INPUT_SCHEMA,
+      annotations: { readOnlyHint: false, untrustedContentHint: true },
+      execute: (input, { signal }): Promise<ToolResult<StudioSetTextResult>> =>
+        runToolBody<StudioSetTextResult>("studio_set_text", () =>
+          studioSetText(depsRef.current, input, signal),
+        ),
+    },
+    {
+      name: "studio_set_style",
+      title: "Set an element's styles",
+      description: STUDIO_SET_STYLE_DESCRIPTION,
+      inputSchema: STUDIO_SET_STYLE_INPUT_SCHEMA,
+      annotations: { readOnlyHint: false },
+      execute: (input, { signal }): Promise<ToolResult<StudioSetStyleResult>> =>
+        runToolBody<StudioSetStyleResult>("studio_set_style", () =>
+          studioSetStyle(depsRef.current, input, signal),
+        ),
+    },
+    {
+      name: "studio_transform",
+      title: "Move, resize or rotate",
+      description: STUDIO_TRANSFORM_DESCRIPTION,
+      inputSchema: STUDIO_TRANSFORM_INPUT_SCHEMA,
+      annotations: { readOnlyHint: false },
+      execute: (input, { signal }): Promise<ToolResult<StudioTransformResult>> =>
+        runToolBody<StudioTransformResult>("studio_transform", () =>
+          studioTransform(depsRef.current, input as StudioTransformInput, signal),
+        ),
+    },
+    {
+      name: "studio_add_animation",
+      title: "Add an animation",
+      description: STUDIO_ADD_ANIMATION_DESCRIPTION,
+      inputSchema: STUDIO_ADD_ANIMATION_INPUT_SCHEMA,
+      annotations: { readOnlyHint: false },
+      execute: (input, { signal }): Promise<ToolResult<StudioAddAnimationResult>> =>
+        runToolBody<StudioAddAnimationResult>("studio_add_animation", () =>
+          studioAddAnimation(depsRef.current, input, signal),
+        ),
+    },
+    {
+      name: "studio_update_animation",
+      title: "Change an animation",
+      description: STUDIO_UPDATE_ANIMATION_DESCRIPTION,
+      inputSchema: STUDIO_UPDATE_ANIMATION_INPUT_SCHEMA,
+      annotations: { readOnlyHint: false },
+      execute: (input, { signal }): Promise<ToolResult<StudioUpdateAnimationResult>> =>
+        runToolBody<StudioUpdateAnimationResult>("studio_update_animation", () =>
+          studioUpdateAnimation(depsRef.current, input, signal),
+        ),
+    },
+    {
+      name: "studio_add_keyframe",
+      title: "Add a keyframe",
+      description: STUDIO_ADD_KEYFRAME_DESCRIPTION,
+      inputSchema: STUDIO_ADD_KEYFRAME_INPUT_SCHEMA,
+      annotations: { readOnlyHint: false },
+      execute: (input, { signal }): Promise<ToolResult<StudioAddKeyframeResult>> =>
+        runToolBody<StudioAddKeyframeResult>("studio_add_keyframe", () =>
+          studioAddKeyframe(depsRef.current, input, signal),
+        ),
+    },
+    {
+      name: "studio_delete_animation",
+      title: "Remove an animation",
+      description: STUDIO_DELETE_ANIMATION_DESCRIPTION,
+      inputSchema: STUDIO_DELETE_ANIMATION_INPUT_SCHEMA,
+      annotations: { readOnlyHint: false },
+      execute: (input, { signal }): Promise<ToolResult<StudioDeleteAnimationResult>> =>
+        runToolBody<StudioDeleteAnimationResult>("studio_delete_animation", () =>
+          studioDeleteAnimation(depsRef.current, input, signal),
+        ),
+    },
   ];
+}
+
+/**
+ * Nothing in the platform validates the input object against `inputSchema`, so
+ * a tool receives whatever the agent sent. These read a field without asserting
+ * its type; the tools themselves reject what they cannot use.
+ */
+function readStringInput(input: object, key: string): string {
+  const value = Reflect.get(input, key);
+  return typeof value === "string" ? value : "";
+}
+
+function readNumberInput(input: object, key: string): number {
+  const value = Reflect.get(input, key);
+  return typeof value === "number" ? value : Number.NaN;
 }
 
 /**

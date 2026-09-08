@@ -34,11 +34,16 @@ describe("discoverMediaFromBrowser", () => {
     html: string,
     currentSrcById: Record<string, string>,
     serializeCallback = false,
+    intrinsicDurationById: Record<string, number> = {},
   ) {
     const { document } = parseHTML(html);
     for (const [id, currentSrc] of Object.entries(currentSrcById)) {
       const element = document.getElementById(id);
       if (element) Object.defineProperty(element, "currentSrc", { value: currentSrc });
+    }
+    for (const [id, duration] of Object.entries(intrinsicDurationById)) {
+      const element = document.getElementById(id);
+      if (element) Object.defineProperty(element, "duration", { value: duration });
     }
     const previousDocument = Reflect.get(globalThis, "document");
     Reflect.set(globalThis, "document", document);
@@ -80,6 +85,21 @@ describe("discoverMediaFromBrowser", () => {
 
     expect(media).toHaveLength(1);
     expect(media[0]).toMatchObject({ id: "hf-img-1", tagName: "image" });
+  });
+
+  it("uses intrinsic duration only for variable media with an inferred duration", async () => {
+    const media = await discover(
+      `<audio id="inferred" src="fallback.wav" data-start="0" data-duration="3" data-end="3" data-var-src="track" data-hf-inferred-duration></audio>
+       <audio id="authored" src="fallback.wav" data-start="0" data-duration="3" data-end="3" data-var-src="track"></audio>`,
+      { inferred: "selected.wav", authored: "selected.wav" },
+      false,
+      { inferred: 6.530612, authored: 6.530612 },
+    );
+
+    expect(media.find((item) => item.id === "inferred")?.duration).toBe(6.530612);
+    expect(media.find((item) => item.id === "inferred")?.durationInferred).toBe(true);
+    expect(media.find((item) => item.id === "authored")?.duration).toBe(3);
+    expect(media.find((item) => item.id === "authored")?.durationInferred).toBe(false);
   });
 
   it("discovers the owning image for a variable-bound picture source", async () => {
@@ -631,6 +651,32 @@ describe("detectRenderModeHints", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it("rebases a direct nested entry's sibling assets without changing project-root assets", async () => {
+    const projectDir = mkdtempSync(join(tmpdir(), "hf-direct-entry-base-"));
+    const compositionsDir = join(projectDir, "compositions");
+    mkdirSync(compositionsDir, { recursive: true });
+    writeFileSync(join(compositionsDir, "sibling.png"), "sibling");
+    writeFileSync(join(projectDir, "root.png"), "root");
+    const entryPath = join(compositionsDir, "scene.html");
+    writeFileSync(
+      entryPath,
+      `<!doctype html><html><body>
+  <div data-composition-id="scene" data-width="100" data-height="100" data-duration="1">
+    <img id="sibling" src="sibling.png" />
+    <img id="root" src="root.png" />
+  </div>
+</body></html>`,
+    );
+
+    const compiled = await compileForRender(projectDir, entryPath, projectDir);
+    const { document } = parseHTML(compiled.html);
+
+    expect(document.querySelector("#sibling")?.getAttribute("src")).toBe(
+      "compositions/sibling.png",
+    );
+    expect(document.querySelector("#root")?.getAttribute("src")).toBe("root.png");
   });
 
   // Shared fixture builder for the assertSubCompositionsUsable / EmptyCompositionError

@@ -312,7 +312,12 @@ export const coreRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
       let root: postcss.Root;
       try {
         root = postcss.parse(style.content);
-      } catch {
+      } catch (error) {
+        findings.push({
+          code: "css_parse_error",
+          severity: "error",
+          message: `CSS parse error: ${error instanceof Error ? error.message : "unknown"}`,
+        });
         continue;
       }
       root.walkRules((rule) => {
@@ -473,7 +478,7 @@ export const coreRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
       {
         pattern: /crypto\.getRandomValues\s*\(/,
         label: "crypto.getRandomValues()",
-        hint: "Remove time-dependent code. Use a seeded PRNG for deterministic renders.",
+        hint: "Use a seeded PRNG (e.g. a simple mulberry32) so renders are deterministic across frames.",
       },
       {
         pattern: /gsap\.utils\.random\s*\(/,

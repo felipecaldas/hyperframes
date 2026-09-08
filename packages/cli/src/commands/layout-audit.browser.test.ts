@@ -106,6 +106,79 @@ describe("layout-audit.browser", () => {
     expect(revealed).not.toBe(fading);
   });
 
+  // Variable-font axis animation (registry block `weight-wave`): a crest of
+  // weight travels along a headline by rewriting each character's
+  // font-variation-settings, and NOTHING else changes — no geometry, no
+  // opacity, no canvas. A duplexed face makes it total: Recursive holds one
+  // advance width at every weight by design, so not even the line width
+  // shifts and all six sweep samples hashed identically until the axis string
+  // joined the fingerprint. `check` then failed a working composition with
+  // sweep_static, and the documented remedies (spread the reveal, keep an
+  // element animating) cannot help — the motion is real, the fingerprint was
+  // just blind to it.
+  it("changes the sweep fingerprint when only font-variation-settings moves", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="640" data-height="360">
+        <div id="line"><span id="char">P</span></div>
+      </div>
+    `;
+
+    let axes = '"wght" 400, "slnt" 0';
+    installGeometry(
+      {
+        root: rect({ left: 0, top: 0, width: 640, height: 360 }),
+        line: rect({ left: 40, top: 40, width: 560, height: 48 }),
+        char: rect({ left: 40, top: 40, width: 18, height: 48 }),
+      },
+      {
+        char: {
+          get fontVariationSettings() {
+            return axes;
+          },
+        } as Partial<CSSStyleDeclaration>,
+      },
+    );
+
+    installAuditScript();
+    const collect = (window as unknown as { __hyperframesLayoutGeometry: () => string })
+      .__hyperframesLayoutGeometry;
+
+    const rest = collect();
+    axes = '"wght" 1000, "slnt" -12'; // the crest arrives over this character
+    const crest = collect();
+
+    expect(crest).not.toBe(rest);
+  });
+
+  // The other direction, and it guards the more dangerous failure: a
+  // fingerprint that varies on its own would make sweep_static unfireable and
+  // every green layout verdict meaningless. Identical scene, axes included,
+  // must hash identically.
+  it("keeps the sweep fingerprint identical when nothing moves, font axes included", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="640" data-height="360">
+        <div id="line"><span id="char">P</span></div>
+      </div>
+    `;
+
+    installGeometry(
+      {
+        root: rect({ left: 0, top: 0, width: 640, height: 360 }),
+        line: rect({ left: 40, top: 40, width: 560, height: 48 }),
+        char: rect({ left: 40, top: 40, width: 18, height: 48 }),
+      },
+      {
+        char: { fontVariationSettings: '"wght" 400, "slnt" 0' } as Partial<CSSStyleDeclaration>,
+      },
+    );
+
+    installAuditScript();
+    const collect = (window as unknown as { __hyperframesLayoutGeometry: () => string })
+      .__hyperframesLayoutGeometry;
+
+    expect(collect()).toBe(collect());
+  });
+
   it("uses authored canvas dimensions when the root bounding rect is degenerate", () => {
     document.body.innerHTML = `
       <div id="root" data-composition-id="main" data-width="640" data-height="360">
@@ -219,12 +292,94 @@ describe("layout-audit.browser", () => {
         .map((issue) => issue.code)
         .filter((code) => code === "clipped_text" || code === "text_box_overflow");
 
-    expect(textOverflowCodes()).toEqual(["clipped_text", "text_box_overflow"]);
+    expect(textOverflowCodes()).toEqual(["clipped_text"]);
     document.querySelector("#overflow-optout")?.setAttribute("data-layout-allow-overflow", "");
     expect(textOverflowCodes()).toEqual([]);
     document.querySelector("#overflow-optout")?.removeAttribute("data-layout-allow-overflow");
     headline.setAttribute("data-layout-bleed", "true");
     expect(textOverflowCodes()).toEqual([]);
+  });
+
+  it("still flags a clipping self-constraint whose scroll metrics round below tolerance", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="640" data-height="360">
+        <div id="headline" style="overflow: hidden">Intentional long truncated label</div>
+      </div>
+    `;
+    const headline = document.querySelector("#headline");
+    if (!(headline instanceof HTMLElement)) throw new Error("missing headline");
+    Object.defineProperties(headline, {
+      clientWidth: { configurable: true, value: 200 },
+      scrollWidth: { configurable: true, value: 202 },
+      clientHeight: { configurable: true, value: 20 },
+      scrollHeight: { configurable: true, value: 20 },
+    });
+    installGeometry(
+      {
+        root: rect({ left: 0, top: 0, width: 640, height: 360 }),
+        headline: rect({ left: 40, top: 60, width: 200, height: 20 }),
+        text: rect({ left: 40, top: 60, width: 203.4, height: 20 }),
+      },
+      {
+        headline: { overflow: "hidden", overflowX: "hidden", overflowY: "hidden" },
+      },
+    );
+    installAuditScript();
+    const codes = runAudit()
+      .map((issue) => issue.code)
+      .filter((code) => code === "clipped_text" || code === "text_box_overflow");
+
+    expect(codes).toEqual(["text_box_overflow"]);
+  });
+
+  it("still flags a clipping self-constraint whose text runs off to the left", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="640" data-height="360">
+        <div id="headline" style="overflow: hidden">Intentional long truncated label</div>
+      </div>
+    `;
+    const headline = document.querySelector("#headline");
+    if (!(headline instanceof HTMLElement)) throw new Error("missing headline");
+    Object.defineProperties(headline, {
+      clientWidth: { configurable: true, value: 100 },
+      scrollWidth: { configurable: true, value: 100 },
+      clientHeight: { configurable: true, value: 20 },
+      scrollHeight: { configurable: true, value: 20 },
+    });
+    installGeometry(
+      {
+        root: rect({ left: 0, top: 0, width: 640, height: 360 }),
+        headline: rect({ left: 140, top: 60, width: 100, height: 20 }),
+        text: rect({ left: 40, top: 60, width: 200, height: 20 }),
+      },
+      {
+        headline: { overflow: "hidden", overflowX: "hidden", overflowY: "hidden" },
+      },
+    );
+    installAuditScript();
+
+    const found = runAudit().filter((issue) => issue.code === "text_box_overflow");
+    expect(found).toHaveLength(1);
+    expect(found[0]?.overflow?.left).toBe(100);
+    expect(runAudit().some((issue) => issue.code === "clipped_text")).toBe(false);
+  });
+
+  it("still flags a painted, NON-clipping box that is its own nearest constraint", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="640" data-height="360">
+        <div id="bubble">Enterprise plan includes unlimited renders</div>
+      </div>
+    `;
+    installGeometry({
+      root: rect({ left: 0, top: 0, width: 640, height: 360 }),
+      bubble: rect({ left: 40, top: 60, width: 200, height: 40 }),
+      text: rect({ left: 40, top: 65, width: 520, height: 30 }),
+    });
+    installAuditScript();
+
+    const found = runAudit().filter((issue) => issue.code === "text_box_overflow");
+    expect(found).toHaveLength(1);
+    expect(found[0]?.selector).toBe("#bubble");
   });
 
   it("does not flag glyph-ink vertical spill within the font-metric band on a non-clipping box", () => {

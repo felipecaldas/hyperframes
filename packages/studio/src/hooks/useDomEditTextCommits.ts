@@ -1,5 +1,4 @@
 import { useCallback, useRef } from "react";
-import type { PatchOperation } from "../utils/sourcePatcher";
 import {
   isImageBackgroundValue,
   isManualGeometryStyleProperty,
@@ -12,7 +11,6 @@ import {
 } from "../utils/studioFontHelpers";
 import {
   buildDomEditRichTextPatchOperation,
-  buildDomEditStylePatchOperation,
   findElementForSelection,
   getDomEditTargetKey,
   isTextEditableSelection,
@@ -22,11 +20,9 @@ import {
 } from "../components/editor/domEditing";
 import type { ImportedFontAsset } from "../components/editor/fontAssets";
 import type { PersistDomEditOperations } from "./domEditCommitTypes";
-import { canEditElementTextInline } from "../components/editor/domEditInlineText";
 import { reportDomEditPersistFailure } from "./domEditPersistFailure";
 import {
   bumpDomEditCommitMapVersion,
-  bumpDomEditCommitVersion,
   domEditCommitDeclined,
   runDomEditCommit,
   runReportedDomEditCommit,
@@ -39,6 +35,12 @@ import {
 } from "./domEditTextCommitPlan";
 import { useDomEditAttributeCommits } from "./useDomEditAttributeCommits";
 import type { InlineTextEditCommit } from "./useInlineTextEdit";
+import {
+  buildDomStyleCommitOperations,
+  canCommitInlineTextSelection,
+  ownsCurrentPreviewElement,
+  resyncDomTextSelectionFromPreview,
+} from "./domEditCommitHelpers";
 
 // ── Types ──
 
@@ -60,53 +62,6 @@ export interface UseDomEditTextCommitsParams {
   resolveImportedFontAsset: (fontFamilyValue: string) => ImportedFontAsset | null;
 }
 
-function canCommitInlineTextSelection(selection: DomEditSelection, element: HTMLElement): boolean {
-  if (selection.isCompositionHost || selection.isInsideLockedComposition) return false;
-  return canEditElementTextInline(element);
-}
-
-function ownsCurrentPreviewElement(
-  selection: DomEditSelection,
-  element: HTMLElement,
-  document: Document | null | undefined,
-): document is Document {
-  if (!document || !element.isConnected) return false;
-  return element === selection.element && element.ownerDocument === document;
-}
-
-function buildDomStyleCommitOperations(
-  property: string,
-  value: string,
-  isImageBackgroundCommit: boolean,
-): PatchOperation[] {
-  const operations: PatchOperation[] = [
-    buildDomEditStylePatchOperation(property, normalizeDomEditStyleValue(property, value)),
-  ];
-  if (isImageBackgroundCommit) {
-    operations.push(
-      buildDomEditStylePatchOperation("background-position", "center"),
-      buildDomEditStylePatchOperation("background-repeat", "no-repeat"),
-      buildDomEditStylePatchOperation("background-size", "contain"),
-    );
-  }
-  return operations;
-}
-
-async function resyncDomTextSelectionFromPreview(
-  doc: Document | null | undefined,
-  selection: DomEditSelection,
-  activeCompPath: string | null,
-  buildDomSelectionFromTarget: UseDomEditTextCommitsParams["buildDomSelectionFromTarget"],
-  applyDomSelection: UseDomEditTextCommitsParams["applyDomSelection"],
-): Promise<void> {
-  if (!doc) return;
-  const refreshed = findElementForSelection(doc, selection, activeCompPath);
-  if (!refreshed) return;
-  const nextSelection = await buildDomSelectionFromTarget(refreshed);
-  if (!nextSelection) return;
-  applyDomSelection(nextSelection, { revealPanel: false, preserveGroup: true });
-}
-
 // ── Hook ──
 
 export function useDomEditTextCommits({
@@ -120,8 +75,8 @@ export function useDomEditTextCommits({
   persistDomEditOperations,
   resolveImportedFontAsset,
 }: UseDomEditTextCommitsParams) {
-  const domTextCommitVersionRef = useRef(0);
-  const domStyleCommitVersionRef = useRef(new Map<string, number>());
+  const domTextCommitVersionRef = useRef(new Map<string, symbol>());
+  const domStyleCommitVersionRef = useRef(new Map<string, symbol>());
 
   const {
     handleDomAttributeCommit,
@@ -138,15 +93,18 @@ export function useDomEditTextCommits({
     persistDomEditOperations,
   });
 
-  const handleDomStyleCommit = useCallback(
-    async (property: string, value: string): Promise<DomEditCommitOutcome> => {
-      if (!domEditSelection) return domEditCommitDeclined("no-selection");
+  const handleDomStyleCommitForSelection = useCallback(
+    async (
+      selection: DomEditSelection,
+      property: string,
+      value: string,
+    ): Promise<DomEditCommitOutcome> => {
       if (isManualGeometryStyleProperty(property))
         return domEditCommitDeclined("geometry-property");
-      if (!domEditSelection.capabilities.canEditStyles) {
+      if (!selection.capabilities.canEditStyles) {
         return domEditCommitDeclined("styles-not-editable");
       }
-      const styleCommitKey = `${getDomEditTargetKey(domEditSelection)}:${property}`;
+      const styleCommitKey = `${getDomEditTargetKey(selection)}:${property}`;
       const isLatestStyleCommit = bumpDomEditCommitMapVersion(
         domStyleCommitVersionRef.current,
         styleCommitKey,
@@ -169,7 +127,7 @@ export function useDomEditTextCommits({
       return runReportedDomEditCommit({
         capture: () => {
           if (!doc) return;
-          const el = findElementForSelection(doc, domEditSelection, activeCompPath);
+          const el = findElementForSelection(doc, selection, activeCompPath);
           if (!el) return;
           editedElement = el;
           previousInlineValue = el.style.getPropertyValue(property);
@@ -188,7 +146,7 @@ export function useDomEditTextCommits({
           }
         },
         persist: () =>
-          persistDomEditOperations(domEditSelection, operations, {
+          persistDomEditOperations(selection, operations, {
             label: "Edit layer style",
             skipRefresh,
             prepareContent: importedFont
@@ -205,15 +163,14 @@ export function useDomEditTextCommits({
             editedElement.style.setProperty(property, previousInlineValue);
           }
         },
-        onError: (error) =>
-          reportDomEditPersistFailure(domEditSelection, operations, error, showToast),
+        onError: (error) => reportDomEditPersistFailure(selection, operations, error, showToast),
         shouldResync: isLatestStyleCommit,
-        resync: () => refreshDomEditSelectionFromPreview(domEditSelection),
+        resync: () => refreshDomEditSelectionFromPreview(selection),
+        onFinally: isLatestStyleCommit.release,
       });
     },
     [
       activeCompPath,
-      domEditSelection,
       persistDomEditOperations,
       refreshDomEditSelectionFromPreview,
       resolveImportedFontAsset,
@@ -222,14 +179,28 @@ export function useDomEditTextCommits({
     ],
   );
 
-  const handleDomTextCommit = useCallback(
-    async (value: string, fieldKey?: string): Promise<DomEditCommitOutcome> => {
-      if (!domEditSelection) return domEditCommitDeclined("no-selection");
-      if (!isTextEditableSelection(domEditSelection)) {
+  const handleDomStyleCommit = useCallback(
+    (property: string, value: string): Promise<DomEditCommitOutcome> =>
+      domEditSelection
+        ? handleDomStyleCommitForSelection(domEditSelection, property, value)
+        : Promise.resolve(domEditCommitDeclined("no-selection")),
+    [domEditSelection, handleDomStyleCommitForSelection],
+  );
+
+  const handleDomTextCommitForSelection = useCallback(
+    async (
+      selection: DomEditSelection,
+      value: string,
+      fieldKey?: string,
+    ): Promise<DomEditCommitOutcome> => {
+      if (!isTextEditableSelection(selection)) {
         return domEditCommitDeclined("not-text-editable");
       }
-      const isLatestTextCommit = bumpDomEditCommitVersion(domTextCommitVersionRef);
-      const nextTextFields = buildNextDomTextFields(domEditSelection.textFields, value, fieldKey);
+      const isLatestTextCommit = bumpDomEditCommitMapVersion(
+        domTextCommitVersionRef.current,
+        getDomEditTargetKey(selection),
+      );
+      const nextTextFields = buildNextDomTextFields(selection.textFields, value, fieldKey);
       const iframe = previewIframeRef.current;
       const doc = iframe?.contentDocument;
       let editedElement: HTMLElement | null = null;
@@ -237,7 +208,7 @@ export function useDomEditTextCommits({
       /**
        * Re-planned in `capture` against the element the preview is showing.
        *
-       * `domEditSelection.element` can be a document behind: stamping the
+       * `selection.element` can be a document behind: stamping the
        * identity ids rewrites the file, the preview reloads, and the selection
        * still points into the replaced document. Everything else here survives
        * that, because it reads the text-field model rather than the DOM, but a
@@ -252,21 +223,21 @@ export function useDomEditTextCommits({
        * the difference between a caption that animates and one that does not.
        */
       let textCommit = planDomTextCommit(
-        domEditSelection.textFields,
+        selection.textFields,
         nextTextFields,
         value,
-        buildCaptionWordSpans(domEditSelection.element, value),
+        buildCaptionWordSpans(selection.element, value),
       );
 
       return runReportedDomEditCommit({
         capture: () => {
           if (!doc) return;
-          const el = findElementForSelection(doc, domEditSelection, activeCompPath);
+          const el = findElementForSelection(doc, selection, activeCompPath);
           if (!el) return;
           editedElement = el;
           previousInnerHtml = el.innerHTML;
           textCommit = planDomTextCommit(
-            domEditSelection.textFields,
+            selection.textFields,
             nextTextFields,
             value,
             buildCaptionWordSpans(el, value),
@@ -280,40 +251,47 @@ export function useDomEditTextCommits({
             editedElement.textContent = value;
           }
         },
-        persist: async () => {
-          await persistDomEditOperations(domEditSelection, textCommit.operations, {
+        persist: () =>
+          persistDomEditOperations(selection, textCommit.operations, {
             label: "Edit text",
             skipRefresh: true,
             shouldSave: isLatestTextCommit,
-          });
-        },
+          }),
         shouldRevert: () => isLatestTextCommit(),
         revert: () => {
           if (!editedElement || previousInnerHtml === null) return;
           editedElement.innerHTML = previousInnerHtml;
         },
         onError: (error) =>
-          reportDomEditPersistFailure(domEditSelection, textCommit.operations, error, showToast),
+          reportDomEditPersistFailure(selection, textCommit.operations, error, showToast),
         shouldResync: isLatestTextCommit,
         resync: () =>
           resyncDomTextSelectionFromPreview(
             doc,
-            domEditSelection,
+            selection,
             activeCompPath,
             buildDomSelectionFromTarget,
             applyDomSelection,
           ),
+        onFinally: isLatestTextCommit.release,
       });
     },
     [
       activeCompPath,
       applyDomSelection,
       buildDomSelectionFromTarget,
-      domEditSelection,
       persistDomEditOperations,
       previewIframeRef,
       showToast,
     ],
+  );
+
+  const handleDomTextCommit = useCallback(
+    (value: string, fieldKey?: string): Promise<DomEditCommitOutcome> =>
+      domEditSelection
+        ? handleDomTextCommitForSelection(domEditSelection, value, fieldKey)
+        : Promise.resolve(domEditCommitDeclined("no-selection")),
+    [domEditSelection, handleDomTextCommitForSelection],
   );
 
   /**
@@ -344,7 +322,10 @@ export function useDomEditTextCommits({
       // A preview reload replaces the document. Never resolve this commit onto
       // the replacement node: it did not own the edit or its rollback snapshot.
       if (!ownsCurrentPreviewElement(domEditSelection, element, doc)) return;
-      const isLatestTextCommit = bumpDomEditCommitVersion(domTextCommitVersionRef);
+      const isLatestTextCommit = bumpDomEditCommitMapVersion(
+        domTextCommitVersionRef.current,
+        getDomEditTargetKey(domEditSelection),
+      );
       const operations = [buildDomEditRichTextPatchOperation(html)];
       let appliedHtml = "";
 
@@ -382,6 +363,7 @@ export function useDomEditTextCommits({
             buildDomSelectionFromTarget,
             applyDomSelection,
           ),
+        onFinally: isLatestTextCommit.release,
       });
     },
     [
@@ -401,7 +383,10 @@ export function useDomEditTextCommits({
       nextTextFields: DomEditTextField[],
       options?: { importedFont?: ImportedFontAsset | null },
     ) => {
-      const isLatestTextCommit = bumpDomEditCommitVersion(domTextCommitVersionRef);
+      const isLatestTextCommit = bumpDomEditCommitMapVersion(
+        domTextCommitVersionRef.current,
+        getDomEditTargetKey(selection),
+      );
       const textCommit = planDomTextCommit(
         selection.textFields,
         nextTextFields,
@@ -454,6 +439,7 @@ export function useDomEditTextCommits({
             buildDomSelectionFromTarget,
             applyDomSelection,
           ),
+        onFinally: isLatestTextCommit.release,
       });
     },
     [
@@ -557,12 +543,14 @@ export function useDomEditTextCommits({
 
   return {
     handleDomStyleCommit,
+    handleDomStyleCommitForSelection,
     handleDomAttributeCommit,
     handleDomAttributeLiveCommit,
     handleDomAttributeQuietCommit,
     handleDomHtmlAttributeCommit,
     handleDomAttributesCommit,
     handleDomTextCommit,
+    handleDomTextCommitForSelection,
     handleDomRichTextCommit,
     commitDomTextFields,
     handleDomTextFieldStyleCommit,

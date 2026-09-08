@@ -304,6 +304,10 @@
       "type": "hyperframes:block"
     },
     {
+      "name": "hw-write-title",
+      "type": "hyperframes:block"
+    },
+    {
       "name": "instagram-follow",
       "type": "hyperframes:block"
     },
@@ -996,6 +1000,10 @@
       "type": "hyperframes:component"
     },
     {
+      "name": "kinetic-center-build",
+      "type": "hyperframes:component"
+    },
+    {
       "name": "kinetic-type-swap",
       "type": "hyperframes:component"
     },
@@ -1533,6 +1541,6 @@
     }
   ],
   "catalogArtifact": {
-    "revision": "fb089c68adca459318a6d28b88c09a3ea9ead77d58ef8459bcf90ec79d0b61d9"
+    "revision": "fa440b4e9cf8dd760a65776d39a118a57e02fb52c1b0efd9c1d2e9ec04b11930"
   }
 }
