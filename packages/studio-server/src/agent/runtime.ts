@@ -25,6 +25,7 @@ import {
   type AgentRunLedger,
 } from "./files.js";
 import { detectProvider, runTabarioModel } from "./providers.js";
+import { describeSelectedElement } from "./selection.js";
 import type {
   AgentChangedFile,
   AgentProvider,
@@ -77,21 +78,25 @@ function readJsonObject(path: string): Record<string, unknown> | null {
   }
 }
 
+type TranscriptEntry = AgentThreadSummary["transcript"][number];
+
+/** One persisted turn, or null when the record is not one. */
+function readTranscriptEntry(entry: unknown): TranscriptEntry | null {
+  if (!entry || typeof entry !== "object") return null;
+  const item = Object.fromEntries(Object.entries(entry));
+  if (item.role !== "user" && item.role !== "assistant") return null;
+  if (typeof item.text !== "string" || typeof item.at !== "string") return null;
+  return {
+    role: item.role,
+    text: item.text,
+    at: item.at,
+    ...(typeof item.context === "string" ? { context: item.context } : {}),
+  };
+}
+
 function readTranscript(value: unknown): AgentThreadSummary["transcript"] {
   if (!Array.isArray(value)) return [];
-  const transcript: AgentThreadSummary["transcript"] = [];
-  for (const entry of value) {
-    if (!entry || typeof entry !== "object") continue;
-    const item = Object.fromEntries(Object.entries(entry));
-    if (
-      (item.role === "user" || item.role === "assistant") &&
-      typeof item.text === "string" &&
-      typeof item.at === "string"
-    ) {
-      transcript.push({ role: item.role, text: item.text, at: item.at });
-    }
-  }
-  return transcript;
+  return value.map(readTranscriptEntry).filter((entry) => entry !== null);
 }
 
 function readThread(path: string): PersistedThread {
@@ -302,6 +307,7 @@ export class AgentRuntime {
       text: job.request.prompt,
       at: new Date().toISOString(),
       kind: job.request.kind,
+      ...(job.request.selection ? { context: describeSelectedElement(job.request.selection) } : {}),
     });
     thread.updatedAt = new Date().toISOString();
     this.writeThread(job.project.dir, thread);

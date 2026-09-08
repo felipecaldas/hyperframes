@@ -5,6 +5,8 @@ import type {
   AgentProvider,
   AgentRunEvent,
 } from "@hyperframes/studio-server";
+import { selectedElementForAgent } from "../components/agentSelection";
+import { usePlayerStore } from "../player";
 import { finishAgentRun, setAgentRunActive, type StudioAgentRequest } from "../utils/agentBridge";
 import { openEventStream, type EventStreamHandle } from "../utils/eventStream";
 
@@ -57,6 +59,30 @@ function mutationErrorMessage(body: MutationErrorBody, action: string): string {
 export interface AgentRunCapabilities {
   enabled: boolean;
   nonce?: string;
+}
+
+/**
+ * The body of a run request. The selection is read at send time, not render
+ * time: the element the user had selected while typing is the one "this"
+ * refers to (TAB-1063). Only a typed chat message carries it; the explicit
+ * kinds already name their elements in the prompt they build.
+ */
+function runRequestBody(
+  provider: AgentProvider,
+  request: StudioAgentRequest | null,
+  prompt: string,
+): Record<string, unknown> {
+  const kind = request?.kind ?? "chat";
+  const player = usePlayerStore.getState();
+  const selection =
+    kind === "chat" ? selectedElementForAgent(player.elements, player.selectedElementId) : null;
+  return {
+    provider,
+    kind,
+    prompt,
+    ...(request?.registryItem ? { registryItem: request.registryItem } : {}),
+    ...(selection ? { selection } : {}),
+  };
 }
 
 export interface UseAgentRunOptions {
@@ -219,12 +245,7 @@ export function useAgentRun(options: UseAgentRunOptions) {
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/agent/runs`, {
         method: "POST",
         headers: nonceHeaders(nonce),
-        body: JSON.stringify({
-          provider,
-          kind: request?.kind ?? "chat",
-          prompt,
-          ...(request?.registryItem ? { registryItem: request.registryItem } : {}),
-        }),
+        body: JSON.stringify(runRequestBody(provider, request, prompt)),
       });
       if (response.ok) {
         const body = (await response.json()) as { jobId: string };

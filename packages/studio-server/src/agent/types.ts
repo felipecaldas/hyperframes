@@ -18,6 +18,31 @@ export interface AgentRunRequest {
   prompt: string;
   registryItem?: string;
   newThread?: boolean;
+  /** The element selected on the timeline when the message was sent, if any. */
+  selection?: AgentSelectedElement;
+}
+
+/**
+ * What Studio knows about the element the user had selected when they typed
+ * (TAB-1063).
+ *
+ * A chat request used to carry the bare prompt. "Make this caption two lines"
+ * could not resolve "this" without the model going to look, and one live run
+ * did not look: it asked the user for the caption's text instead. The label is
+ * the name shown on the timeline, the id is the element's `id` in the file,
+ * so the model can go straight to it. Nothing here is trusted as content; the
+ * words on screen are still read from the project.
+ */
+export interface AgentSelectedElement {
+  /** The element's `id` attribute, or Studio's timeline id when it has none. */
+  id: string;
+  /** The name the user sees on the timeline, from `data-hf-label` when present. */
+  label: string;
+  /** Seconds into the timeline. */
+  start: number;
+  duration: number;
+  /** The file that owns the element, when known; `index.html` otherwise. */
+  sourceFile?: string;
 }
 
 export type AgentEventType =
@@ -97,6 +122,12 @@ export interface AgentThreadSummary {
     text: string;
     at: string;
     kind?: AgentRequestKind;
+    /**
+     * What the model is told alongside a user turn and the user is not shown:
+     * the selected element, in a sentence (TAB-1063). Kept apart from `text`
+     * so the drawer's history shows what the user typed and nothing else.
+     */
+    context?: string;
   }>;
 }
 

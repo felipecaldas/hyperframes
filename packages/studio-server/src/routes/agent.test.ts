@@ -46,6 +46,11 @@ function toolCall(id: string, name: string, args: Record<string, unknown>) {
   return { id, type: "function", function: { name, arguments: JSON.stringify(args) } };
 }
 
+/** A run that looked before it spoke; the gate since TAB-1063 sends back one that did not. */
+function readIndexFirst(): Response {
+  return completion("", [toolCall("r0", "read_file", { path: "index.html" })]);
+}
+
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "tabario-agent-api-"));
   const projectDir = join(root, "project");
@@ -359,7 +364,10 @@ describe("Tabario AI API", () => {
     seedProject(setup.projectDir, INHERITED_HTML);
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValueOnce(completion("There is no video between 4s and 7s because …")),
+      vi
+        .fn()
+        .mockResolvedValueOnce(readIndexFirst())
+        .mockResolvedValueOnce(completion("There is no video between 4s and 7s because …")),
     );
     const app = createStudioApi(adapter(setup.projectDir));
     const token = await nonce(app);
@@ -439,6 +447,7 @@ describe("Tabario AI API", () => {
       "fetch",
       vi
         .fn()
+        .mockResolvedValueOnce(readIndexFirst())
         .mockResolvedValueOnce(completion("No changes needed."))
         .mockImplementationOnce(
           (_url: string, init?: RequestInit) =>
@@ -473,8 +482,60 @@ describe("Tabario AI API", () => {
     expect(await events(app, activeJob)).toContain("event: cancelled");
   });
 
+  /**
+   * TAB-1063. A chat request may carry the element selected on the timeline.
+   * The model reads it ahead of the user's words; the thread keeps the two
+   * apart so the drawer's history shows only what was typed. A malformed
+   * selection is a bad request, not a silently dropped field.
+   */
+  it("carries the timeline selection to the model and keeps it out of the user's bubble", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(readIndexFirst())
+      .mockImplementation(async () => completion("Caption 0 says: before."));
+    vi.stubGlobal("fetch", fetchMock);
+    const app = createStudioApi(adapter(setup.projectDir));
+    const token = await nonce(app);
+    const jobId = await start(app, token, "make this two lines", {
+      selection: { id: "caption-0", label: "Caption 0", start: 0, duration: 3.2 },
+    });
+    expect(await events(app, jobId)).toContain("event: complete");
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const user = body.messages.find((message: { role: string }) => message.role === "user");
+    expect(user.content).toContain('Selected on the timeline: "Caption 0"');
+    expect(user.content).toContain('id "caption-0" in index.html');
+    expect(user.content.endsWith("\n\nmake this two lines")).toBe(true);
+
+    const threads = (await (
+      await app.request("http://localhost/projects/demo/agent/threads", { headers: headers() })
+    ).json()) as { threads: Array<{ transcript: Array<{ role: string; text: string }> }> };
+    expect(threads.threads[0].transcript[0]).toMatchObject({
+      role: "user",
+      text: "make this two lines",
+    });
+
+    const rejected = await app.request("http://localhost/projects/demo/agent/runs", {
+      method: "POST",
+      headers: headers(token),
+      body: JSON.stringify({
+        provider: "tabario",
+        kind: "chat",
+        prompt: "x",
+        selection: { id: "caption-0", label: "Caption 0", start: -1, duration: 3.2 },
+      }),
+    });
+    expect(rejected.status).toBe(400);
+  });
+
   it("stages registry installation inside the same undoable transaction", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(completion("Added the registry component.")));
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(readIndexFirst())
+        .mockImplementation(async () => completion("Added the registry component.")),
+    );
     const app = createStudioApi(adapter(setup.projectDir));
     const token = await nonce(app);
     const jobId = await start(app, token, "Add the accent", {

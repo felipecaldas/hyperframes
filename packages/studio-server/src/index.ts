@@ -6,6 +6,7 @@ export type {
   AgentRunEvent,
   AgentChangedFile,
   AgentMeasurementReceipt,
+  AgentSelectedElement,
   AgentToolTranscriptEntry,
   AgentProviderCapability,
   AgentThreadSummary,

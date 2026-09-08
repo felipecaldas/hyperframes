@@ -125,6 +125,7 @@ The user's request kind is ${kind}. Inspect the project before changing it. Use 
 
 A HyperFrames project's timeline IS its HTML — reading the files is how you inspect the video:
 - \`index.html\` is the host timeline. Every timed element carries \`data-start\` and \`data-duration\` in seconds, plus \`data-track-index\` for its layer.
+- The name the user sees on the timeline is the element's \`data-hf-label\`, or its \`id\` when it has none. "Caption 0" is the element carrying \`data-hf-label="Caption 0"\`, and its text is the words inside it. When a request names an element, search the files for that label and read the element before you do anything else. Never ask the user what an element says or where it is: that is in the file.
 - Scenes are mounted from \`compositions/*.html\` via \`data-composition-src\`; their own timings are relative to where the parent mounts them.
 - Media live in \`assets/\` and are referenced by \`<video>\`, \`<img>\` and \`<audio>\` elements; captions are text elements on their own track.
 - Motion is the GSAP block in \`index.html\`: \`tl.to\`, \`tl.fromTo\` and \`tl.set\` calls, each with a position in seconds.
@@ -143,7 +144,7 @@ Lint is not sight. \`validate_project\` only proves the HTML parses — it canno
 
 Act on the request — do not merely describe what you would do. The request kind above is a transport label, not the user's intent: everything typed into Studio's chat arrives as \`chat\`, so decide from what the user actually said.
 - If they report a problem, say something looks wrong, or ask for a change, and you understand what they mean, then make the change now, in this turn, with the write tools. "The captions are too high" is a request to move them; it does not need the words "fix it".
-- Answer without editing only when the message is genuinely a question about the project, or when you cannot proceed without something only the user can tell you — in that case ask exactly one specific question and stop.
+- Answer without editing only when the message is genuinely a question about the project, or when you cannot proceed without something only the user can tell you — in that case ask exactly one specific question and stop. Anything that is in the files is not something only the user can tell you; read first, and ask only about what the files cannot say.
 - Never end a turn with a plan you have not carried out. Do not say what you "will" do; do it, then say what you did.
 
 How to reply — you are talking to someone editing a video, not reading code:
@@ -745,6 +746,13 @@ async function requestCompletion(
 
 /** What a round of tools did, for the gate that runs when the model tries to finish. */
 interface ToolRunState {
+  /**
+   * Any tool ran at all, including one that threw. A run that never looked at
+   * the project cannot answer for it (TAB-1063): the live run that motivated
+   * this asked "What is the exact text of caption 0?" with the caption's text
+   * sitting in index.html, having called nothing.
+   */
+  calledAnyTool: boolean;
   /** A write to a file whose layout can be measured actually landed. */
   changedRenderable: boolean;
   /**
@@ -824,6 +832,7 @@ async function executeToolCalls(
     if (options.signal.aborted) throw new DOMException("Tabario AI run cancelled.", "AbortError");
     options.onTool(call.function.name);
     options.onActivity();
+    state.calledAnyTool = true;
     let result: unknown;
     try {
       result = await executeTool(call, options);
@@ -836,6 +845,24 @@ async function executeToolCalls(
     messages.push({ role: "tool", tool_call_id: call.id, content });
   }
 }
+
+/**
+ * What the run says to the model when it tried to finish without having looked
+ * at the project at all. One nudge; a model that still answers from nothing
+ * gets to, and its reply stands on its own.
+ *
+ * The prompt already says "Inspect the project before changing it" and
+ * separately permits one question to the user. The live run behind TAB-1063
+ * took the second path without the first and asked for a caption's text that
+ * was in index.html. Same shape as TAB-791 and TAB-1061: an instruction the
+ * model can decline is not a gate. This is asked at the only moment that
+ * matters, when it tries to finish.
+ */
+const INSPECT_BEFORE_ANSWERING =
+  "You have not looked at the project. Read index.html now, and any composition it mounts " +
+  "that the request concerns, and find the element the user named by its data-hf-label or id. " +
+  "Then either make the change or answer from what you read. Only ask the user something the " +
+  "files cannot tell you. Always end with a reply — never finish silently.";
 
 /**
  * What the run says to the model when it changed the look of something and then
@@ -944,10 +971,21 @@ function requireApiKey(): string {
   return apiKey;
 }
 
+/**
+ * A transcript entry as the model reads it. A user turn sent with an element
+ * selected carries that element's description ahead of the words, so "this
+ * caption" resolves before the model has to guess (TAB-1063). The drawer shows
+ * `text` alone; only the model sees the join.
+ */
+function chatMessage(entry: TabarioModelOptions["transcript"][number]): ChatMessage {
+  const content = entry.context ? `${entry.context}\n\n${entry.text}` : entry.text;
+  return { role: entry.role, content };
+}
+
 function initialMessages(options: TabarioModelOptions): ChatMessage[] {
   return [
     { role: "system", content: systemPrompt(options.kind) },
-    ...options.transcript.slice(-24).map((entry) => ({ role: entry.role, content: entry.text })),
+    ...options.transcript.slice(-24).map(chatMessage),
   ];
 }
 
@@ -955,17 +993,23 @@ function initialMessages(options: TabarioModelOptions): ChatMessage[] {
  * What the run has to say before the model may end the turn, or null when it
  * may end it now.
  *
- * Two demands, each made at most once per run, each only after a write landed
- * on something whose layout can be measured:
+ * Three demands, each made at most once per run:
  *
- * - nothing measured since that write: go and measure (TAB-805's gate);
+ * - no tool ran at all: go and read the project (TAB-1063's gate);
+ * - a write landed on something measurable and nothing was measured since:
+ *   go and measure (TAB-805's);
  * - measured since that write: here are your numbers, answer from them
  *   (TAB-1061's).
  *
- * Bounded at two extra rounds, so a model that ignores both still finishes and
- * its reply stands on its own — next to a receipt that does not.
+ * Bounded at three extra rounds, so a model that ignores them all still
+ * finishes and its reply stands on its own — next to a receipt that does not.
  */
 function demandBeforeFinishing(state: ToolRunState, asked: FinishDemands): string | null {
+  if (!state.calledAnyTool) {
+    if (asked.inspect) return null;
+    asked.inspect = true;
+    return INSPECT_BEFORE_ANSWERING;
+  }
   if (!state.changedRenderable) return null;
   if (!state.measuredSinceWrite) {
     if (asked.measure) return null;
@@ -978,6 +1022,7 @@ function demandBeforeFinishing(state: ToolRunState, asked: FinishDemands): strin
 }
 
 interface FinishDemands {
+  inspect: boolean;
   measure: boolean;
   reconcile: boolean;
 }
@@ -988,8 +1033,12 @@ export async function runTabarioModel(options: TabarioModelOptions): Promise<Tab
   const messages = initialMessages(options);
   const fetchImpl = options.fetchImpl ?? fetch;
   let assistantText = "";
-  const state: ToolRunState = { changedRenderable: false, measuredSinceWrite: null };
-  const asked: FinishDemands = { measure: false, reconcile: false };
+  const state: ToolRunState = {
+    calledAnyTool: false,
+    changedRenderable: false,
+    measuredSinceWrite: null,
+  };
+  const asked: FinishDemands = { inspect: false, measure: false, reconcile: false };
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     if (options.signal.aborted) throw new DOMException("Tabario AI run cancelled.", "AbortError");

@@ -2,6 +2,7 @@ import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { ResolvedProject, StudioApiAdapter } from "../types.js";
 import { AgentRuntime } from "../agent/runtime.js";
+import { isAgentSelectedElement } from "../agent/selection.js";
 import {
   isAgentProvider,
   isAgentRequestKind,
@@ -80,7 +81,8 @@ function hasValidRunFields(body: RequestRecord): boolean {
 function hasValidRunOptions(body: RequestRecord): boolean {
   const registryItemOk = body.registryItem === undefined || typeof body.registryItem === "string";
   const newThreadOk = body.newThread === undefined || typeof body.newThread === "boolean";
-  return registryItemOk && newThreadOk;
+  const selectionOk = body.selection === undefined || isAgentSelectedElement(body.selection);
+  return registryItemOk && newThreadOk && selectionOk;
 }
 
 function parseRunRequest(value: unknown): AgentRunRequest | null {
@@ -92,6 +94,7 @@ function parseRunRequest(value: unknown): AgentRunRequest | null {
     prompt: body.prompt as string,
     ...(typeof body.registryItem === "string" ? { registryItem: body.registryItem } : {}),
     ...(typeof body.newThread === "boolean" ? { newThread: body.newThread } : {}),
+    ...(isAgentSelectedElement(body.selection) ? { selection: body.selection } : {}),
   };
 }
 

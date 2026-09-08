@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentDrawer } from "./AgentDrawer";
 import { openAgentBridge, toggleAgentBridge } from "../utils/agentBridge";
+import { usePlayerStore } from "../player";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -160,6 +161,19 @@ describe("AgentDrawer", () => {
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
+    // TAB-1063: the element selected on the timeline travels with the message.
+    usePlayerStore.getState().setElements([
+      {
+        id: "caption-0",
+        domId: "caption-0",
+        label: "Caption 0",
+        tag: "div",
+        start: 0,
+        duration: 3.2,
+        track: 2,
+      },
+    ]);
+    usePlayerStore.getState().setSelection(["caption-0"]);
     await act(async () => {
       root.render(<AgentDrawer projectId="demo" beforeRun={beforeRun} onRefresh={onRefresh} />);
     });
@@ -169,7 +183,10 @@ describe("AgentDrawer", () => {
     await act(async () => buttonByText(host, "Send").click());
     expect(beforeRun).toHaveBeenCalledOnce();
     const runCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/agent/runs"));
-    expect(JSON.parse(String(runCall?.[1]?.body))).toMatchObject({ provider: "tabario" });
+    expect(JSON.parse(String(runCall?.[1]?.body))).toMatchObject({
+      provider: "tabario",
+      selection: { id: "caption-0", label: "Caption 0", start: 0, duration: 3.2 },
+    });
     const source = FakeEventSource.instances[0];
     if (!source) throw new Error("event source missing");
     await act(async () => {

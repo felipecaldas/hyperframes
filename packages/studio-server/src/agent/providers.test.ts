@@ -24,6 +24,15 @@ function call(id: string, name: string, args: Record<string, unknown>) {
   return { id, type: "function", function: { name, arguments: JSON.stringify(args) } };
 }
 
+/**
+ * The first round of a run that looked before it spoke. Since TAB-1063 a run
+ * that calls no tool at all is sent back once to read the project, so a test
+ * about the reply alone scripts this read ahead of it.
+ */
+function readIndexFirst(): Response {
+  return completion("", [call("r0", "read_file", { path: "index.html" })]);
+}
+
 function adapter(): StudioApiAdapter {
   return {
     listProjects: () => [],
@@ -83,7 +92,10 @@ describe("Tabario AI provider", () => {
   it("tells the model that the project HTML is the timeline", async () => {
     const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
     writeFileSync(join(root, "index.html"), HTML);
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(completion("An answer."));
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readIndexFirst())
+      .mockResolvedValueOnce(completion("An answer."));
 
     await runTabarioModel({
       adapter: adapter(),
@@ -365,7 +377,10 @@ describe("Tabario AI provider", () => {
   it("tells the model to act on a stated problem rather than propose a plan", async () => {
     const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
     writeFileSync(join(root, "index.html"), HTML);
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(completion("Lowered them."));
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readIndexFirst())
+      .mockResolvedValueOnce(completion("Lowered them."));
 
     await runTabarioModel({
       adapter: adapter(),
@@ -461,7 +476,10 @@ describe("Tabario AI provider", () => {
       "",
       "I lowered the `Caption Layer` and it now fits on one line.",
     ].join("\n");
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(completion(reply));
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readIndexFirst())
+      .mockResolvedValueOnce(completion(reply));
     const assistant: string[] = [];
 
     const result = await runTabarioModel({
@@ -500,7 +518,10 @@ describe("Tabario AI provider", () => {
     const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
     writeFileSync(join(root, "index.html"), HTML);
     const reply = ["```css", ".hf-captions { top: 85%; }", "```"].join("\n");
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(completion(reply));
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readIndexFirst())
+      .mockResolvedValueOnce(completion(reply));
 
     const result = await runTabarioModel({
       adapter: adapter(),
@@ -1037,7 +1058,10 @@ describe("Tabario AI provider", () => {
   it("tells the model that a set at 0s is a pinned box, and that lint is not sight", async () => {
     const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
     writeFileSync(join(root, "index.html"), HTML);
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(completion("An answer."));
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readIndexFirst())
+      .mockResolvedValueOnce(completion("An answer."));
 
     await runTabarioModel({
       adapter: adapter(),
@@ -1186,6 +1210,115 @@ describe("Tabario AI provider", () => {
     expect(result.assistantText).toBe("The caption runs from 5.2s to 7.3s.");
     // Nothing renderable changed, so there is no measurement to owe.
     expect(result.verification).toBeNull();
+  });
+
+  /**
+   * TAB-1063. The first run after the TAB-1061 deploy was asked to put caption
+   * 0 on two lines and replied "What is the exact text of caption 0?" having
+   * called no tool at all. The text was in index.html. The prompt permits one
+   * question to the user, and the model took that path without the read the
+   * prompt also asks for, so the read is now demanded at the finish, once.
+   */
+  it("sends a run that called nothing back to read the project, once", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(completion("What is the exact text of caption 0?"))
+      .mockResolvedValueOnce(completion("", [call("r", "read_file", { path: "index.html" })]))
+      .mockResolvedValueOnce(completion("Caption 0 says: before."));
+    const tools: string[] = [];
+
+    const result = await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [
+        { role: "user", text: "Caption 0 should be two lines", at: new Date().toISOString() },
+      ],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: (name) => tools.push(name),
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    const second = JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body));
+    const demand = second.messages.at(-1);
+    expect(demand.role).toBe("user");
+    expect(demand.content).toContain("You have not looked at the project");
+    expect(demand.content).toContain("data-hf-label");
+    expect(tools).toEqual(["read_file"]);
+    expect(result.assistantText).toBe("Caption 0 says: before.");
+  });
+
+  it("lets a run that still calls nothing finish on its second answer", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(completion("Hello!"))
+      .mockResolvedValueOnce(completion("Hello again."));
+
+    const result = await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "hi", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    // Asked once, never looped.
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(result.assistantText).toBe("Hello again.");
+    expect(result.verification).toBeNull();
+  });
+
+  /**
+   * The other half of TAB-1063: the name the user types is an attribute the
+   * model can search for, and a selected element travels with the message. The
+   * drawer shows the user's words alone; the model reads the selection first.
+   */
+  it("names data-hf-label in the prompt and puts the selection ahead of the user's words", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readIndexFirst())
+      .mockResolvedValueOnce(completion("Done."));
+
+    await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [
+        {
+          role: "user",
+          text: "make this two lines",
+          at: new Date().toISOString(),
+          context:
+            'Selected on the timeline: "Caption 0", the element with id "caption-0" in index.html, on screen from 0.0s to 3.2s.',
+        },
+      ],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    const body = JSON.parse(String((fetchImpl.mock.calls[0]?.[1] as RequestInit)?.body));
+    const system = body.messages.find((message: { role: string }) => message.role === "system");
+    expect(system.content).toContain("data-hf-label");
+    expect(system.content).toContain("Never ask the user what an element says");
+    const user = body.messages.find((message: { role: string }) => message.role === "user");
+    expect(user.content).toBe(
+      'Selected on the timeline: "Caption 0", the element with id "caption-0" in index.html, on screen from 0.0s to 3.2s.\n\nmake this two lines',
+    );
   });
 
   /**
