@@ -5,6 +5,8 @@ export type {
   AgentRunRequest,
   AgentRunEvent,
   AgentChangedFile,
+  AgentMeasurementReceipt,
+  AgentToolTranscriptEntry,
   AgentProviderCapability,
   AgentThreadSummary,
 } from "./agent/types.js";

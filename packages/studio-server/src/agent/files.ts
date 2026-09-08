@@ -14,7 +14,11 @@ import {
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import type { AgentChangedFile } from "./types.js";
+import type {
+  AgentChangedFile,
+  AgentMeasurementReceipt,
+  AgentToolTranscriptEntry,
+} from "./types.js";
 
 const IGNORED_DIRS = new Set([
   ".git",
@@ -61,6 +65,14 @@ export interface AgentRunLedger {
   undoCovered: boolean;
   before: AgentFileSnapshot;
   changedFiles: AgentChangedFile[];
+  /**
+   * Every tool call and its result, in order (TAB-1061). Before this, working
+   * out what the agent had measured meant counting browser launches in a
+   * session log; the ledger said "complete" and nothing else.
+   */
+  transcript?: AgentToolTranscriptEntry[];
+  /** What the probe said after the last renderable write, when there was one. */
+  verification?: AgentMeasurementReceipt;
 }
 
 function normalizedRelative(projectDir: string, path: string): string | null {

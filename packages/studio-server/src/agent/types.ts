@@ -1,3 +1,5 @@
+import type { LayoutMeasurement } from "../helpers/layoutProbe.js";
+
 export type AgentProvider = "tabario";
 
 export type AgentRequestKind =
@@ -24,6 +26,7 @@ export type AgentEventType =
   | "tool"
   | "changed-files"
   | "lint"
+  | "measurement"
   | "complete"
   | "cancelled"
   | "failure";
@@ -41,7 +44,33 @@ export interface AgentRunEvent {
     file?: string;
     fixHint?: string;
   }>;
+  measurement?: AgentMeasurementReceipt;
   critical?: boolean;
+}
+
+/**
+ * What the run measured after its last change, said by code rather than by
+ * the model (TAB-1061).
+ *
+ * The reply is the model's account of what it did. This is the probe's. They
+ * are shown side by side because a live run measured a caption at one line
+ * and replied "It is now two lines" — the measurement gate only checked that
+ * `measure_layout` had been called, never what it said. `measurement` is null
+ * when a renderable file changed and nothing was measured after the change,
+ * and that null is itself the finding.
+ */
+export interface AgentMeasurementReceipt {
+  /** The last measurement taken after the last write to a renderable file. */
+  measurement: LayoutMeasurement | null;
+}
+
+/** One tool call and what it returned, kept in the run ledger for audit. */
+export interface AgentToolTranscriptEntry {
+  at: string;
+  name: string;
+  arguments: unknown;
+  /** JSON of the result, truncated when large; the shape is the tool's own. */
+  result: string;
 }
 
 export interface AgentChangedFile {

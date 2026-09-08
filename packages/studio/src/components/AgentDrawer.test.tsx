@@ -206,10 +206,36 @@ describe("AgentDrawer", () => {
           },
         ],
       });
-      source.emit("complete", { id: 4, type: "complete", at: "now", message: "done" });
+      // TAB-1061: the probe's reading, shown beside the reply it may contradict.
+      source.emit("measurement", {
+        id: 4,
+        type: "measurement",
+        at: "now",
+        measurement: {
+          measurement: {
+            measured: true,
+            seekTime: 0,
+            frame: { width: 720, height: 1280 },
+            elements: [
+              {
+                selector: "#caption-0",
+                box: { x: 58, y: 947, width: 604, height: 86 },
+                lines: 1,
+                overflows: false,
+                text: "seven words",
+              },
+              { selector: "#caption-9", unmeasurable: "nothing matches this selector." },
+            ],
+          },
+        },
+      });
+      source.emit("complete", { id: 5, type: "complete", at: "now", message: "done" });
       await Promise.resolve();
     });
     expect(host.textContent).toContain("modified · index.html");
+    expect(host.textContent).toContain("Measured after the change");
+    expect(host.textContent).toContain("#caption-0: 1 line · 604 × 86 px");
+    expect(host.textContent).toContain("#caption-9: could not be measured. nothing matches");
     expect(host.textContent).toContain("2 lint findings · 1 error · 1 warning");
     expect(host.textContent).toContain("warning · index.html: Missing label — Add aria-label");
     const lintDetails = [...host.querySelectorAll("details")].find((details) =>

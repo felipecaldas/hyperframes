@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AgentChangedFile, AgentProvider, AgentRunEvent } from "@hyperframes/studio-server";
+import type {
+  AgentChangedFile,
+  AgentMeasurementReceipt,
+  AgentProvider,
+  AgentRunEvent,
+} from "@hyperframes/studio-server";
 import { finishAgentRun, setAgentRunActive, type StudioAgentRequest } from "../utils/agentBridge";
 import { openEventStream, type EventStreamHandle } from "../utils/eventStream";
 
@@ -9,6 +14,7 @@ const EVENT_TYPES = [
   "tool",
   "changed-files",
   "lint",
+  "measurement",
   "complete",
   "cancelled",
   "failure",
@@ -96,6 +102,12 @@ export function useAgentRun(options: UseAgentRunOptions) {
   const [jobId, setJobId] = useState<string | null>(null);
   const [events, setEvents] = useState<AgentRunEvent[]>([]);
   const [changedFiles, setChangedFiles] = useState<AgentChangedFile[]>([]);
+  /**
+   * The probe's account of the run, shown beside the reply (TAB-1061). The
+   * reply is what the model says it did; this is what the staged project
+   * measured as after its last change, and it is written by code.
+   */
+  const [receipt, setReceipt] = useState<AgentMeasurementReceipt | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   /**
@@ -133,7 +145,13 @@ export function useAgentRun(options: UseAgentRunOptions) {
   }, [events]);
 
   const activity = useMemo(
-    () => events.filter((event) => event.type !== "assistant" && event.type !== "changed-files"),
+    () =>
+      events.filter(
+        (event) =>
+          event.type !== "assistant" &&
+          event.type !== "changed-files" &&
+          event.type !== "measurement",
+      ),
     [events],
   );
 
@@ -167,6 +185,7 @@ export function useAgentRun(options: UseAgentRunOptions) {
         const event = JSON.parse(raw.data) as AgentRunEvent;
         setEvents((current) => [...current, event]);
         if (event.files) setChangedFiles(event.files);
+        if (event.measurement) setReceipt(event.measurement);
         if (!TERMINAL_EVENTS.has(event.type)) return;
         if (event.type === "failure") setError(event.message ?? "Agent run failed.");
         closeStream();
@@ -245,6 +264,7 @@ export function useAgentRun(options: UseAgentRunOptions) {
     setError(null);
     setEvents([]);
     setChangedFiles([]);
+    setReceipt(null);
     setBusy(true);
     setAgentRunActive(true);
 
@@ -302,6 +322,7 @@ export function useAgentRun(options: UseAgentRunOptions) {
     if (!response.ok) return;
     onThreadReset();
     setEvents([]);
+    setReceipt(null);
     setJobId(null);
     setPendingPrompt(null);
     setStartedAt(null);
@@ -321,6 +342,7 @@ export function useAgentRun(options: UseAgentRunOptions) {
     mutateRun,
     newChat,
     pendingPrompt,
+    receipt,
     setError,
     startRun,
   };

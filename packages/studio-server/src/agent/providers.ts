@@ -11,9 +11,19 @@ import {
 import { dirname, join, relative, resolve, sep } from "node:path";
 import type { StudioApiAdapter } from "../types.js";
 import { lintProject } from "../helpers/projectLint.js";
-import { unavailableMeasurement } from "../helpers/layoutProbe.js";
+import {
+  unavailableMeasurement,
+  type LayoutElementMeasurement,
+  type LayoutMeasurement,
+} from "../helpers/layoutProbe.js";
 import { isSupportedAgentSource, snapshotAgentFiles } from "./files.js";
-import type { AgentProviderCapability, AgentRequestKind, AgentThreadSummary } from "./types.js";
+import type {
+  AgentMeasurementReceipt,
+  AgentProviderCapability,
+  AgentRequestKind,
+  AgentThreadSummary,
+  AgentToolTranscriptEntry,
+} from "./types.js";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_MODEL = "google/gemini-2.5-flash";
@@ -43,12 +53,19 @@ export interface TabarioModelOptions {
   onAssistant: (text: string) => void;
   onTool: (summary: string) => void;
   onActivity: () => void;
+  /** Every tool call and its result, for the run ledger (TAB-1061). */
+  onToolResult?: (entry: AgentToolTranscriptEntry) => void;
   fetchImpl?: typeof fetch;
 }
 
 export interface TabarioModelResult {
   assistantText: string;
   model: string;
+  /**
+   * The probe's account of the run, or null when no renderable file changed
+   * and there is nothing for a measurement to be about.
+   */
+  verification: AgentMeasurementReceipt | null;
 }
 
 export function detectProvider(): AgentProviderCapability {
@@ -119,6 +136,7 @@ So questions about what is on screen, when, for how long, or why something is mi
 Never invent file contents or paths. Never embed remote assets, secrets, or network calls in project code.
 Media filenames cannot be guessed — call list_media to see what the project actually contains, and reference only those. A write whose src points at a file the project does not have is rejected, and the rejection lists the files that do exist.
 Change an existing file with edit_file, never by rewriting it whole: name the exact snippet you are replacing and everything else is left untouched. write_file only creates files that do not exist yet. This matters because re-typing a file you were asked to make one change to is how unrelated lines get silently altered.
+A CSS class rule reaches every element that carries the class. When the request names one element, such as one caption or one title, change that element: a pinned-box override for its id, or an inline style on it. Editing the shared rule to fix one caption changes all of them. A run that did that was asked about caption 0 and rewrote eleven.
 Preserve the existing template, media references, duration, captions, and voiceover unless the user asks to change them.
 All edits are staged and linted before Studio applies them. Call validate_project after edits and repair lint errors.
 Lint is not sight. \`validate_project\` only proves the HTML parses — it cannot tell you how many lines a caption takes, whether an element overflows its box, or where it sits in the frame. \`measure_layout\` renders the staged project and measures it. Use it to check any claim about how something looks, and use it again after a layout change, before you say it worked. If it reports an element as unmeasurable, that is not "nothing wrong" — say what you could not measure.
@@ -729,12 +747,66 @@ async function requestCompletion(
 interface ToolRunState {
   /** A write to a file whose layout can be measured actually landed. */
   changedRenderable: boolean;
-  /** `measure_layout` was called — whether or not it could measure. */
-  measured: boolean;
+  /**
+   * What `measure_layout` returned after the most recent renderable write, or
+   * null when nothing has been measured since that write.
+   *
+   * TAB-1061: this used to be a boolean set by the presence of the call. A
+   * live run measured a caption at one line three times and replied "It is
+   * now two lines" — the gate had passed on the first call and never read
+   * what any of them said. It also never reset, so measure, write, finish
+   * passed on a measurement older than the change. Now a write clears it, and
+   * what is kept is the reading itself, so the finish gate can quote it back.
+   */
+  measuredSinceWrite: LayoutMeasurement | null;
 }
 
 function isRenderable(path: unknown): boolean {
   return typeof path === "string" && /\.(html|css)$/i.test(path);
+}
+
+function isLayoutMeasurement(value: unknown): value is LayoutMeasurement {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { measured?: unknown }).measured === "boolean" &&
+    Array.isArray((value as { elements?: unknown }).elements)
+  );
+}
+
+/** Enough of a tool result to audit a run from its ledger; never the whole file. */
+const MAX_TRANSCRIPT_RESULT_CHARS = 4000;
+
+function transcriptEntry(call: ToolCall, content: string): AgentToolTranscriptEntry {
+  const over = content.length - MAX_TRANSCRIPT_RESULT_CHARS;
+  return {
+    at: new Date().toISOString(),
+    name: call.function.name,
+    arguments: parseArguments(call),
+    result:
+      over > 0
+        ? `${content.slice(0, MAX_TRANSCRIPT_RESULT_CHARS)}…[truncated ${over} chars]`
+        : content,
+  };
+}
+
+/**
+ * What a tool that ran without throwing did to the run's verification state.
+ *
+ * Only a write that survived every gate counts as a change worth measuring; a
+ * rejected edit left the project exactly as it was. A change invalidates
+ * whatever was measured before it: those numbers describe a project that no
+ * longer exists. And an `unavailable` probe still counts as a reading — it
+ * says "could not measure", which is what the model must then say too. Only a
+ * thrown error leaves nothing to quote.
+ */
+function noteToolOutcome(state: ToolRunState, call: ToolCall, result: unknown): void {
+  if (WRITE_TOOLS.has(call.function.name) && isRenderable(parseArguments(call).path)) {
+    state.changedRenderable = true;
+    state.measuredSinceWrite = null;
+  }
+  if (call.function.name === "measure_layout" && isLayoutMeasurement(result))
+    state.measuredSinceWrite = result;
 }
 
 async function executeToolCalls(
@@ -755,15 +827,13 @@ async function executeToolCalls(
     let result: unknown;
     try {
       result = await executeTool(call, options);
-      // Only a write that survived every gate counts as a change worth
-      // measuring; a rejected edit left the project exactly as it was.
-      if (WRITE_TOOLS.has(call.function.name) && isRenderable(parseArguments(call).path))
-        state.changedRenderable = true;
+      noteToolOutcome(state, call, result);
     } catch (error) {
       result = { error: error instanceof Error ? error.message : String(error) };
     }
-    if (call.function.name === "measure_layout") state.measured = true;
-    messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result) });
+    const content = JSON.stringify(result);
+    options.onToolResult?.(transcriptEntry(call, content));
+    messages.push({ role: "tool", tool_call_id: call.id, content });
   }
 }
 
@@ -779,6 +849,50 @@ const MEASURE_BEFORE_ANSWERING =
   "as always: say what you changed and what the measurement shows. If the numbers do not match " +
   "what was asked, either change what the measurement points at or say plainly what it is now and " +
   "what you could not achieve. Always end with a reply — never finish silently.";
+
+/** One element's reading in a sentence the model, and the user, can check. */
+function describeMeasuredElement(el: LayoutElementMeasurement): string {
+  if (el.unmeasurable) return `${el.selector}: could not be measured (${el.unmeasurable})`;
+  const parts: string[] = [];
+  if (typeof el.lines === "number") parts.push(`${el.lines} line${el.lines === 1 ? "" : "s"}`);
+  if (el.box) parts.push(`box ${el.box.width} x ${el.box.height} at (${el.box.x}, ${el.box.y})`);
+  if (el.overflows) parts.push("content overflows its box");
+  if (el.pinnedByManualEdit) {
+    const pin = [el.pinnedByManualEdit.width, el.pinnedByManualEdit.height].filter(Boolean);
+    parts.push(`pinned by a manual resize to ${pin.join(" x ")}`);
+  }
+  return `${el.selector}: ${parts.join(", ") || "measured, no dimensions reported"}`;
+}
+
+/** The whole reading, one line per element, or the reason there is none. */
+function describeMeasurement(measurement: LayoutMeasurement): string {
+  if (measurement.unavailable) return `Nothing was measured: ${measurement.unavailable}`;
+  const frame = measurement.frame
+    ? ` in a ${measurement.frame.width} x ${measurement.frame.height} frame`
+    : "";
+  const at = `at ${measurement.seekTime}s${frame}`;
+  return [at, ...measurement.elements.map(describeMeasuredElement)].join("\n");
+}
+
+/**
+ * What the run says when the model changed something, measured it, and now
+ * wants to finish. The numbers it is about to describe are put in front of it
+ * one more time, because the live run that motivated TAB-1061 had them in its
+ * context and contradicted them anyway. This is not a gate on the wording —
+ * nothing here can parse "two lines" — it is the last thing the model reads
+ * before it writes the reply. The receipt shown to the user is the gate.
+ */
+function reconcileWithMeasurement(measurement: LayoutMeasurement): string {
+  return (
+    "Before you reply, this is what your own measurement after the last change reports:\n" +
+    `${describeMeasurement(measurement)}\n` +
+    "Reply from these numbers, in the same plain language as always: say what you changed and " +
+    "what the measurement shows. If the numbers do not match what was asked — for example the " +
+    "line count is not the one requested — either change what the measurement points at, or " +
+    "say plainly what it is now and what you could not achieve. Do not report a result these " +
+    "numbers do not show. Always end with a reply — never finish silently."
+  );
+}
 
 /** Said when stripping code leaves nothing at all — never an empty bubble. */
 const NOTHING_LEFT_TO_SAY = "I've finished. Let me know if you'd like anything adjusted.";
@@ -838,13 +952,34 @@ function initialMessages(options: TabarioModelOptions): ChatMessage[] {
 }
 
 /**
- * Whether the model may end the turn, or has to go and look first.
+ * What the run has to say before the model may end the turn, or null when it
+ * may end it now.
  *
- * True only when a write actually landed on something whose layout can be
- * measured, nothing was measured, and it has not already been asked once.
+ * Two demands, each made at most once per run, each only after a write landed
+ * on something whose layout can be measured:
+ *
+ * - nothing measured since that write: go and measure (TAB-805's gate);
+ * - measured since that write: here are your numbers, answer from them
+ *   (TAB-1061's).
+ *
+ * Bounded at two extra rounds, so a model that ignores both still finishes and
+ * its reply stands on its own — next to a receipt that does not.
  */
-function mustMeasureFirst(state: ToolRunState, alreadyAsked: boolean): boolean {
-  return state.changedRenderable && !state.measured && !alreadyAsked;
+function demandBeforeFinishing(state: ToolRunState, asked: FinishDemands): string | null {
+  if (!state.changedRenderable) return null;
+  if (!state.measuredSinceWrite) {
+    if (asked.measure) return null;
+    asked.measure = true;
+    return MEASURE_BEFORE_ANSWERING;
+  }
+  if (asked.reconcile) return null;
+  asked.reconcile = true;
+  return reconcileWithMeasurement(state.measuredSinceWrite);
+}
+
+interface FinishDemands {
+  measure: boolean;
+  reconcile: boolean;
 }
 
 export async function runTabarioModel(options: TabarioModelOptions): Promise<TabarioModelResult> {
@@ -853,8 +988,8 @@ export async function runTabarioModel(options: TabarioModelOptions): Promise<Tab
   const messages = initialMessages(options);
   const fetchImpl = options.fetchImpl ?? fetch;
   let assistantText = "";
-  const state: ToolRunState = { changedRenderable: false, measured: false };
-  let measurementDemanded = false;
+  const state: ToolRunState = { changedRenderable: false, measuredSinceWrite: null };
+  const asked: FinishDemands = { measure: false, reconcile: false };
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     if (options.signal.aborted) throw new DOMException("Tabario AI run cancelled.", "AbortError");
@@ -872,10 +1007,10 @@ export async function runTabarioModel(options: TabarioModelOptions): Promise<Tab
       // reported project it changed the caption's pinned box and then answered
       // "it should now display correctly" without ever measuring — which is the
       // same unchecked claim TAB-805 exists to stop, one cause later. Asked
-      // once, at the only moment that matters: when it tries to finish.
-      if (mustMeasureFirst(state, measurementDemanded)) {
-        measurementDemanded = true;
-        messages.push({ role: "user", content: MEASURE_BEFORE_ANSWERING });
+      // at the only moment that matters: when it tries to finish.
+      const demand = demandBeforeFinishing(state, asked);
+      if (demand) {
+        messages.push({ role: "user", content: demand });
         continue;
       }
       // Never finish silently. `assistantText` is only ever set from a
@@ -884,11 +1019,25 @@ export async function runTabarioModel(options: TabarioModelOptions): Promise<Tab
       // no word about them — which is what two live TAB-805 runs did. TAB-795
       // already decided an empty bubble is not acceptable; this is the same
       // rule applied to the turn as a whole rather than to one stripped reply.
-      const reply = assistantText || NOTHING_LEFT_TO_SAY;
-      options.onAssistant(reply);
-      return { assistantText: reply, model };
+      return finishTurn(assistantText, model, state, options);
     }
     await executeToolCalls(completion.toolCalls, messages, options, state);
   }
   throw new Error(`Tabario AI exceeded ${MAX_TOOL_ROUNDS} tool rounds.`);
+}
+
+/** The turn's reply, said out loud, with the probe's account beside it. */
+function finishTurn(
+  assistantText: string,
+  model: string,
+  state: ToolRunState,
+  options: TabarioModelOptions,
+): TabarioModelResult {
+  const reply = assistantText || NOTHING_LEFT_TO_SAY;
+  options.onAssistant(reply);
+  return {
+    assistantText: reply,
+    model,
+    verification: state.changedRenderable ? { measurement: state.measuredSinceWrite } : null,
+  };
 }

@@ -2,10 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Robot, X, ArrowCounterClockwise, Stop, Plus, CircleNotch } from "@phosphor-icons/react";
 import type {
   AgentChangedFile,
+  AgentMeasurementReceipt,
   AgentProvider,
   AgentProviderCapability,
   AgentRunEvent,
   AgentThreadSummary,
+  LayoutElementMeasurement,
 } from "@hyperframes/studio-server";
 import {
   subscribeAgentRequests,
@@ -172,6 +174,56 @@ function AgentChangedFilesPanel({ changedFiles }: { changedFiles: AgentChangedFi
   );
 }
 
+/** One measured element as a person reads it: what it is, how many lines, how big. */
+function measuredElementLine(el: LayoutElementMeasurement): string {
+  if (el.unmeasurable) return `${el.selector}: could not be measured. ${el.unmeasurable}`;
+  const parts: string[] = [];
+  if (typeof el.lines === "number") parts.push(`${el.lines} line${el.lines === 1 ? "" : "s"}`);
+  if (el.box) parts.push(`${el.box.width} × ${el.box.height} px`);
+  if (el.overflows) parts.push("overflows its box");
+  return `${el.selector}: ${parts.join(" · ") || "measured"}`;
+}
+
+/**
+ * The probe's account of the run, next to the model's (TAB-1061).
+ *
+ * A live run measured a caption at one line and replied "It is now two
+ * lines". The reply is the model's; this panel is the browser's, and it is
+ * written here in code so nothing the model says can change it. A run that
+ * changed the look of something and never measured afterwards says so, because
+ * that absence is the finding.
+ */
+function AgentMeasurementPanel({ receipt }: { receipt: AgentMeasurementReceipt | null }) {
+  if (!receipt) return null;
+  const measurement = receipt.measurement;
+  return (
+    <details open className="rounded border border-neutral-800 p-2">
+      <summary className="cursor-pointer text-[10px] uppercase text-neutral-500">
+        Measured after the change
+      </summary>
+      <div className="mt-1 space-y-0.5 font-mono text-[10px] text-neutral-400">
+        {!measurement ? (
+          <div>Tabario AI did not measure the result after its last change.</div>
+        ) : measurement.unavailable ? (
+          <div>Nothing was measured. {measurement.unavailable}</div>
+        ) : (
+          <>
+            <div className="text-neutral-500">
+              at {measurement.seekTime}s
+              {measurement.frame
+                ? ` in a ${measurement.frame.width} × ${measurement.frame.height} frame`
+                : ""}
+            </div>
+            {measurement.elements.map((el) => (
+              <div key={el.selector}>{measuredElementLine(el)}</div>
+            ))}
+          </>
+        )}
+      </div>
+    </details>
+  );
+}
+
 function AgentNotices({
   capabilities,
   provider,
@@ -328,6 +380,7 @@ export function AgentDrawer({ projectId, beforeRun, onRefresh }: AgentDrawerProp
     mutateRun,
     newChat,
     pendingPrompt,
+    receipt,
     setError,
     startRun,
   } = useAgentRun({
@@ -393,6 +446,7 @@ export function AgentDrawer({ projectId, beforeRun, onRefresh }: AgentDrawerProp
         {busy && <PendingReply status={latestStatus} elapsedMs={elapsedMs} />}
         <AgentActivityPanel activity={activity} busy={busy} />
         <AgentChangedFilesPanel changedFiles={changedFiles} />
+        <AgentMeasurementPanel receipt={receipt} />
         {request && (
           <details className="rounded border border-neutral-800 p-2">
             <summary className="cursor-pointer text-[10px] uppercase text-neutral-500">

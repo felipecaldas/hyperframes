@@ -26,6 +26,7 @@ import {
 } from "./files.js";
 import { detectProvider, runTabarioModel } from "./providers.js";
 import type {
+  AgentChangedFile,
   AgentProvider,
   AgentProviderCapability,
   AgentRunEvent,
@@ -391,8 +392,12 @@ export class AgentRuntime {
         },
         onTool: (message) => this.emit(job, { type: "tool", message }),
         onActivity: timeouts.touch,
+        onToolResult: (entry) => {
+          (ledger.transcript ??= []).push(entry);
+        },
       });
       assistantText ||= result.assistantText;
+      if (result.verification) ledger.verification = result.verification;
       if (!job.cancelled && !timeouts.reason()) {
         failure = await this.validateAndApply(job, before, ledger, stagingDir);
       }
@@ -474,8 +479,20 @@ export class AgentRuntime {
       return `Project changed while Tabario AI was working: ${conflicts.join(", ")}`;
     ledger.changedFiles = staged.changedFiles;
     ledger.completedAt = new Date().toISOString();
-    this.emit(job, { type: "changed-files", files: staged.changedFiles });
+    this.emitApplied(job, ledger, staged.changedFiles);
     return null;
+  }
+
+  /**
+   * The change has landed: say which files, then what the probe read
+   * (TAB-1061). The receipt goes out only here, once the apply succeeded, so
+   * its numbers describe the project the user is now looking at and never a
+   * staging dir that was thrown away.
+   */
+  private emitApplied(job: AgentRunJob, ledger: AgentRunLedger, files: AgentChangedFile[]): void {
+    this.emit(job, { type: "changed-files", files });
+    if (ledger.verification)
+      this.emit(job, { type: "measurement", measurement: ledger.verification });
   }
 
   private finishRun(

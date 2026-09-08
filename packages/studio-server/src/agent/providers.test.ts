@@ -1097,7 +1097,9 @@ describe("Tabario AI provider", () => {
       // Answers without measuring — this is the turn the gate refuses to accept.
       .mockResolvedValueOnce(completion("It should now display correctly."))
       .mockResolvedValueOnce(completion("", [call("m", "measure_layout", { selectors: ["p"] })]))
-      .mockResolvedValueOnce(completion("It is one line now."));
+      .mockResolvedValueOnce(completion("It is one line now."))
+      // TAB-1061: a measured change gets its numbers quoted back once more.
+      .mockResolvedValueOnce(completion("It is one line now, measured."));
 
     const result = await runTabarioModel({
       adapter: { ...adapter(), measureLayout },
@@ -1112,7 +1114,7 @@ describe("Tabario AI provider", () => {
     });
 
     expect(measureLayout).toHaveBeenCalledOnce();
-    expect(result.assistantText).toBe("It is one line now.");
+    expect(result.assistantText).toBe("It is one line now, measured.");
     const third = JSON.parse(String(fetchImpl.mock.calls[2]?.[1]?.body));
     const demand = third.messages[third.messages.length - 1];
     expect(demand.role).toBe("user");
@@ -1182,6 +1184,137 @@ describe("Tabario AI provider", () => {
 
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(result.assistantText).toBe("The caption runs from 5.2s to 7.3s.");
+    // Nothing renderable changed, so there is no measurement to owe.
+    expect(result.verification).toBeNull();
+  });
+
+  /**
+   * TAB-1061. A live run measured a caption three times, read `lines: 1` each
+   * time, and replied "It is now two lines, as you requested." The gate had
+   * checked that measure_layout was called, and it had been. So the numbers
+   * are put in front of the model once more at the moment it tries to finish,
+   * and the same numbers go to the user as a receipt it cannot rewrite.
+   */
+  it("quotes the measurement back before the model may finish, then lets the answer stand", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    const source =
+      '<html data-composition-id="demo"><body><p id="caption-0">WIDE</p></body></html>\n';
+    writeFileSync(join(root, "index.html"), source);
+    const hash = createHash("sha256").update(source).digest("hex");
+    const measureLayout = vi.fn().mockResolvedValue({
+      measured: true,
+      seekTime: 0,
+      frame: { width: 720, height: 1280 },
+      elements: [
+        {
+          selector: "#caption-0",
+          box: { x: 58, y: 947, width: 604, height: 86 },
+          lines: 1,
+          overflows: false,
+          text: "seven words that fit on one line",
+        },
+      ],
+    });
+    const transcript: Array<{ name: string; result: string }> = [];
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("e", "edit_file", {
+            path: "index.html",
+            old_string: "WIDE",
+            new_string: "WIDER",
+            expected_hash: hash,
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(
+        completion("", [call("m", "measure_layout", { selectors: ["#caption-0"] })]),
+      )
+      // The claim the live run made, against a reading of one line.
+      .mockResolvedValueOnce(completion("It is now two lines, as you requested."))
+      .mockResolvedValueOnce(completion("It is still on one line; I could not make it wrap."));
+
+    const result = await runTabarioModel({
+      adapter: { ...adapter(), measureLayout },
+      stagingDir: root,
+      kind: "chat",
+      transcript: [
+        { role: "user", text: "make caption 0 two lines", at: new Date().toISOString() },
+      ],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      onToolResult: (entry) => transcript.push({ name: entry.name, result: entry.result }),
+      fetchImpl,
+    });
+
+    // Four completions: asked once with the numbers, then the reply stands.
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(result.assistantText).toBe("It is still on one line; I could not make it wrap.");
+    const fourth = JSON.parse(String(fetchImpl.mock.calls[3]?.[1]?.body));
+    const demand = fourth.messages[fourth.messages.length - 1];
+    expect(demand.role).toBe("user");
+    expect(demand.content).toContain("#caption-0: 1 line, box 604 x 86");
+    expect(demand.content).toContain("Do not report a result these numbers do not show");
+
+    // The receipt is the probe's reading, not the model's sentence.
+    expect(result.verification?.measurement?.elements[0]?.lines).toBe(1);
+
+    // And the ledger can now say what the tools returned.
+    expect(transcript.map((entry) => entry.name)).toEqual(["edit_file", "measure_layout"]);
+    expect(JSON.parse(transcript[1]!.result).elements[0].lines).toBe(1);
+  });
+
+  /**
+   * TAB-1061's second hole. The old flag never reset, so measure, write,
+   * finish passed on a reading older than the change. A write now clears it.
+   */
+  it("does not let a measurement taken before the change stand in for one after it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    const source = '<html data-composition-id="demo"><body><p>WIDE</p></body></html>\n';
+    writeFileSync(join(root, "index.html"), source);
+    const hash = createHash("sha256").update(source).digest("hex");
+    const measureLayout = vi.fn().mockResolvedValue({
+      measured: true,
+      seekTime: 0,
+      elements: [{ selector: "p", box: { x: 0, y: 0, width: 100, height: 39 }, lines: 1 }],
+    });
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(completion("", [call("m", "measure_layout", { selectors: ["p"] })]))
+      .mockResolvedValueOnce(
+        completion("", [
+          call("e", "edit_file", {
+            path: "index.html",
+            old_string: "WIDE",
+            new_string: "NARROW",
+            expected_hash: hash,
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(completion("It should now display correctly."))
+      .mockResolvedValueOnce(completion("I have not checked it."));
+
+    const result = await runTabarioModel({
+      adapter: { ...adapter(), measureLayout },
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "make it one line", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    const fourth = JSON.parse(String(fetchImpl.mock.calls[3]?.[1]?.body));
+    const demand = fourth.messages[fourth.messages.length - 1];
+    expect(demand.content).toContain("have not measured the result");
+    expect(result.assistantText).toBe("I have not checked it.");
+    // A change happened and nothing measured it afterwards: the receipt says so.
+    expect(result.verification).toEqual({ measurement: null });
   });
 
   /**
