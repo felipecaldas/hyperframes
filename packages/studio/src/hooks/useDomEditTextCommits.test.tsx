@@ -2,6 +2,7 @@
 import { act } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DomEditSelection, DomEditTextField } from "../components/editor/domEditing";
+import type { PatchOperation } from "../utils/sourcePatcher";
 import { mountReactHarness } from "./domSelectionTestHarness";
 import { useDomEditTextCommits, type UseDomEditTextCommitsParams } from "./useDomEditTextCommits";
 
@@ -369,5 +370,67 @@ describe("useDomEditTextCommits", () => {
     );
     expect(ambientElement.textContent).toBe("Ambient");
     expect(agentElement.textContent).toBe("Edited");
+  });
+
+  /**
+   * Guards the seam where TAB-818/819 meets upstream #3581 (TAB-1056).
+   *
+   * #3581 turned this commit into `handleDomTextCommitForSelection`, taking the
+   * selection as an argument instead of closing over `domEditSelection`. Our
+   * caption re-split lives inside that body, so merging v0.8.31 meant repointing
+   * it at the argument. Reading the closed-over selection instead still compiles,
+   * still passes every other test in this file, and silently plans the word spans
+   * off whichever element the panel happened to be showing.
+   *
+   * `domEditTextCommitPlan.test.ts` cannot catch that: it calls
+   * `buildCaptionWordSpans` with an element it was handed, so it can never
+   * disagree about which element that should be. The disagreement only exists
+   * here, one layer up.
+   */
+  it("plans caption word spans from the live preview element, not the selection's stale one", async () => {
+    const { iframe, element: liveCaption } = previewElement(
+      '<div id="cap" class="hf-captions">' +
+        '<span data-w-start="0" data-w-end="0.4" data-pop-scale="1.2">Hello</span> ' +
+        '<span data-w-start="0.4" data-w-end="0.9">world</span>' +
+        "</div>" +
+        '<div id="ambient">Ambient</div>',
+      "cap",
+    );
+
+    // The selection the hook is handed points at a document that has already been
+    // replaced: same id, but its word spans are gone. Planning off this element
+    // re-splits into bare spans and drops every timing the caption exists to carry.
+    const staleCaption = document.createElement("div");
+    staleCaption.id = "cap";
+    staleCaption.className = "hf-captions";
+    staleCaption.textContent = "Hello world";
+    const staleSelection = { ...selectionFor(staleCaption), sourceFile: "index.html" };
+
+    // The panel is sitting on something else entirely, so reading the closed-over
+    // selection rather than the argument plans the wrong element's fields.
+    const ambient = iframe.contentDocument?.getElementById("ambient") as HTMLElement;
+    const persistDomEditOperations = vi.fn().mockResolvedValue(undefined);
+    const hook = renderTextCommitHook(
+      commitParams({
+        previewIframeRef: { current: iframe },
+        domEditSelection: selectionFor(ambient),
+        persistDomEditOperations,
+      }),
+    );
+
+    await act(async () => {
+      await hook.handleDomTextCommitForSelection(staleSelection, "Hello world", "self");
+    });
+
+    const [, operations] = persistDomEditOperations.mock.calls[0] as [unknown, PatchOperation[]];
+    const richText = operations.find((operation) => operation.type === "rich-text");
+    // Word count is unchanged, so the live spans' timings must carry across.
+    expect(richText?.value).toContain('data-w-start="0"');
+    expect(richText?.value).toContain('data-w-end="0.9"');
+    expect(richText?.value).toContain('data-pop-scale="1.2"');
+    // And it is still word spans rather than the plain string that would mean the
+    // caption stopped animating altogether.
+    expect(richText?.value).toContain("<span");
+    expect(liveCaption.querySelectorAll("span")).toHaveLength(2);
   });
 });
