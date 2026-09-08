@@ -75,6 +75,35 @@ export function revealIframe(iframe: HTMLIFrameElement | null): void {
 }
 
 /**
+ * How long a hidden preview waits before it is shown regardless (TAB-1062).
+ *
+ * A normal full reload is a few hundred milliseconds and `initializeAdapter`
+ * reveals right after its restore seek, so this only fires when nothing else
+ * did. It sits above the 5s give-up in `onIframeLoad` so the reveal there,
+ * which follows a real load, keeps winning whenever a load happens at all.
+ */
+export const REVEAL_FALLBACK_MS = 8000;
+
+/**
+ * Arm an unhide that does not depend on the iframe ever firing `load`.
+ *
+ * "Every reload completion + failure path funnels through here" was true of
+ * paths that start from a load event. `refreshPlayer` hides the iframe and
+ * assigns a new `src`; if no `load` follows, `onIframeLoad` never runs, the
+ * 5s give-up timer inside it is never scheduled, and the preview stays hidden
+ * while its audio keeps playing. A Studio user reported exactly that after a
+ * Tabario AI run and had to leave Studio to see the video again. Hiding now
+ * arms its own reveal. Returns the cancel, for the next hide to call.
+ */
+export function armRevealFallback(
+  iframe: HTMLIFrameElement,
+  delayMs: number = REVEAL_FALLBACK_MS,
+): () => void {
+  const timer = setTimeout(() => revealIframe(iframe), delayMs);
+  return () => clearTimeout(timer);
+}
+
+/**
  * The transport TOTAL a clip-manifest message should write to the store.
  *
  * The manifest's `durationInFrames` measures the runtime timeline; some runtimes

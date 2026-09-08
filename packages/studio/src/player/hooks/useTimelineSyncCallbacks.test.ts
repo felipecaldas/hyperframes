@@ -1,6 +1,8 @@
 // @vitest-environment happy-dom
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  armRevealFallback,
+  REVEAL_FALLBACK_MS,
   resolveReloadSeekTime,
   resolveTimelineTotalDuration,
   revealIframe,
@@ -28,6 +30,41 @@ describe("revealIframe", () => {
 
   it("no-ops on a null iframe", () => {
     expect(() => revealIframe(null)).not.toThrow();
+  });
+});
+
+/**
+ * TAB-1062. Every reveal used to start from the iframe's `load` event, the 5s
+ * give-up included, so a `src` that never loaded left the preview hidden with
+ * its audio still playing. The hide now arms its own reveal.
+ */
+describe("armRevealFallback", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("reveals a hidden iframe after the delay when no load event ever arrives", () => {
+    const iframe = fakeIframe("hidden");
+    armRevealFallback(iframe);
+    vi.advanceTimersByTime(REVEAL_FALLBACK_MS - 1);
+    expect(iframe.style.visibility).toBe("hidden");
+    vi.advanceTimersByTime(1);
+    expect(iframe.style.visibility).toBe("");
+  });
+
+  it("is a no-op when a real reveal already happened", () => {
+    const iframe = fakeIframe("hidden");
+    armRevealFallback(iframe);
+    revealIframe(iframe);
+    vi.advanceTimersByTime(REVEAL_FALLBACK_MS);
+    expect(iframe.style.visibility).toBe("");
+  });
+
+  it("can be cancelled by the next hide so a stale timer cannot reveal a fresh one early", () => {
+    const iframe = fakeIframe("hidden");
+    const cancel = armRevealFallback(iframe, 100);
+    cancel();
+    vi.advanceTimersByTime(1000);
+    expect(iframe.style.visibility).toBe("hidden");
   });
 });
 

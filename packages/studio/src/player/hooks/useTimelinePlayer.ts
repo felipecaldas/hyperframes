@@ -2,7 +2,7 @@ import { useRef, useCallback, useEffect } from "react";
 import { usePlayerStore, liveTime, type TimelineElement } from "../store/playerStore";
 import { useMountEffect } from "../../hooks/useMountEffect";
 import { usePlaybackKeyboard } from "./usePlaybackKeyboard";
-import { useTimelineSyncCallbacks } from "./useTimelineSyncCallbacks";
+import { armRevealFallback, useTimelineSyncCallbacks } from "./useTimelineSyncCallbacks";
 import { useTimelinePlayerLoop } from "./useTimelinePlayerLoop";
 import { logReload } from "../../utils/reloadDebug";
 
@@ -454,6 +454,7 @@ export function useTimelinePlayer() {
     stopReverseLoop();
     setIsPlaying(false);
   }, [getAdapter, stopRAFLoop, setIsPlaying, stopReverseLoop]);
+  const revealFallbackRef = useRef<(() => void) | null>(null);
   const refreshPlayer = useCallback(() => {
     const iframe = iframeRef.current;
     if (!iframe) return;
@@ -469,6 +470,10 @@ export function useTimelinePlayer() {
     // Only the FULL-reload edits (drops/inserts) hit this — timing edits now take
     // the soft-reload path and never touch refreshPlayer.
     iframe.style.visibility = "hidden";
+    // Every reveal path below hangs off the iframe's `load` event. If that
+    // never fires, nothing unhides it (TAB-1062), so the hide arms its own.
+    revealFallbackRef.current?.();
+    revealFallbackRef.current = armRevealFallback(iframe);
     const src = iframe.src;
     const url = new URL(src, window.location.origin);
     url.searchParams.set("_t", String(Date.now()));
