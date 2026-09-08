@@ -240,7 +240,11 @@ describe("Studio bundle file reads", () => {
     fs.unlinkSync(path.join(hooks.studioDir, "index.html"));
     const response = await server.app.request("/");
     expect(response.status).toBe(500);
-    expect(await response.text()).toContain("HyperFrames Studio unavailable");
+    // Tabario fork (TAB-697). The customer-facing Studio is white-labelled, so
+    // the diagnostic page carries the fork's brand, not upstream's. The point of
+    // the test is that a missing bundle still yields a diagnostic rather than a
+    // blank 500, which the fork's own string proves just as well.
+    expect(await response.text()).toContain("Tabario Studio unavailable");
   });
 
   it("still injects runtime environment into the SPA fallback", async () => {

@@ -1523,7 +1523,12 @@ describe("HyperframesPlayer srcdoc attribute", () => {
 
     const srcdoc = player.iframe.getAttribute("srcdoc") ?? "";
     expect(srcdoc).not.toContain("evil.example.com");
-    expect(srcdoc).toContain("hyperframe.runtime.iife.js");
+    // Tabario fork (TAB-746/TAB-783). Upstream asserts the CDN bundle filename;
+    // this fork injects the runtime from its own origin, so the filename never
+    // appears. Assert the intent — the foreign origin was rejected in favour of
+    // a runtime we serve — plus the fork's own same-origin guarantee.
+    expect(srcdoc).toContain('<script src="/api/runtime.js">');
+    expect(srcdoc).not.toMatch(/src="https?:\/\//);
 
     player.remove();
   });
@@ -1536,7 +1541,9 @@ describe("HyperframesPlayer srcdoc attribute", () => {
 
     const srcdoc = player.iframe.getAttribute("srcdoc") ?? "";
     expect(srcdoc).not.toContain("javascript:");
-    expect(srcdoc).toContain("hyperframe.runtime.iife.js");
+    // Tabario fork (TAB-746/TAB-783). See the foreign-origin case above: the
+    // fork's fallback is its own origin, not the CDN bundle filename.
+    expect(srcdoc).toContain('<script src="/api/runtime.js">');
 
     player.remove();
   });
