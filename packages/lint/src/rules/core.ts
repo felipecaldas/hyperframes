@@ -10,6 +10,7 @@ import {
   extractCompositionIdsFromCss,
   extractTimelineRegistryKeys,
   getInlineScriptSyntaxError,
+  hasUnquotedLessThan,
   TIMELINE_REGISTRY_INIT_PATTERN,
   TIMELINE_REGISTRY_ASSIGN_PATTERN,
   TIMELINE_REGISTRY_OBJECT_LITERAL_PATTERN,
@@ -95,6 +96,53 @@ function resolvedRuleSelectors(rule: postcss.Rule): string[] {
       return `${parentSelector} ${childSelector}`;
     }),
   );
+}
+
+function selectorAliasesRuntimeHiddenStyle(selector: string): boolean {
+  let unsafe = false;
+  try {
+    selectorParser((root) => {
+      root.each((selectorNode) => {
+        const subject: selectorParser.Node[] = [];
+        selectorNode.each((node) => {
+          if (node.type === "combinator") subject.length = 0;
+          else subject.push(node);
+        });
+
+        const hostScoped = subject.some(
+          (node) =>
+            node.type === "attribute" &&
+            ["data-composition-src", "data-composition-file"].includes(
+              node.attribute.toLowerCase(),
+            ),
+        );
+        if (hostScoped) return;
+
+        if (
+          subject.some((node) => {
+            if (node.type !== "attribute" || node.attribute.toLowerCase() !== "style") return false;
+            if (node.operator !== "*=" || !node.value) return false;
+            const needle = node.insensitive ? node.value.toLowerCase() : node.value;
+            if (!needle.includes("visibility") && !needle.includes("hidden")) return false;
+            return "visibility: hidden !important;".includes(needle);
+          })
+        ) {
+          unsafe = true;
+        }
+      });
+    }).processSync(selector);
+  } catch {
+    return false;
+  }
+  return unsafe;
+}
+
+function ruleForcesOpacityZero(rule: postcss.Rule): boolean {
+  let forcesOpacityZero = false;
+  rule.walkDecls(/^opacity$/i, (declaration) => {
+    if (Number(declaration.value.trim()) === 0) forcesOpacityZero = true;
+  });
+  return forcesOpacityZero;
 }
 
 function isStudioTimelineElement(tag: { raw: string; name: string }): boolean {
@@ -231,6 +279,35 @@ export const coreRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
     return findings;
   },
 
+  // unbalanced_style_tags
+  ({ source }) => {
+    let opens = 0;
+    let closes = 0;
+    let firstTag = "";
+    for (const match of source.matchAll(
+      /<script\b[\s\S]*?<\/script[^>]*>|<style\b|<\/style\s*>/gi,
+    )) {
+      const token = match[0].toLowerCase();
+      if (token.startsWith("<script")) continue;
+      if (token.startsWith("</style")) closes += 1;
+      else opens += 1;
+      if (!firstTag) firstTag = match[0];
+    }
+    if (opens === closes) return [];
+    return [
+      {
+        code: "unbalanced_style_tags",
+        severity: "error",
+        message:
+          opens > closes
+            ? "A <style> block is never closed, so following markup is parsed as CSS and disappears from the frame."
+            : "An extra </style> closes the stylesheet early, so trailing CSS renders as visible on-screen text.",
+        fixHint: "Keep <style> and </style> paired. One extra closer dumps CSS into the body.",
+        snippet: truncateSnippet(firstTag || "<style>"),
+      },
+    ];
+  },
+
   // visible_markup_comment
   ({ source }) => {
     const snippet = findVisibleMarkupCommentLeak(source);
@@ -304,10 +381,11 @@ export const coreRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
     return findings;
   },
 
-  // repeated_id_descendant_selector
+  // CSS selector safety
   ({ styles }) => {
     const findings: HyperframeLintFinding[] = [];
-    const reported = new Set<string>();
+    const reportedRepeatedIds = new Set<string>();
+    const reportedHiddenStyleSelectors = new Set<string>();
     for (const style of styles) {
       let root: postcss.Root;
       try {
@@ -321,18 +399,54 @@ export const coreRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
         continue;
       }
       root.walkRules((rule) => {
+        const forcesOpacityZero = ruleForcesOpacityZero(rule);
         for (const selector of resolvedRuleSelectors(rule)) {
           const repeatedId = repeatedDescendantId(selector);
-          if (!repeatedId || reported.has(repeatedId)) continue;
-          reported.add(repeatedId);
+          if (repeatedId && !reportedRepeatedIds.has(repeatedId)) {
+            reportedRepeatedIds.add(repeatedId);
+            findings.push({
+              code: "repeated_id_descendant_selector",
+              severity: "error",
+              message: `Selector "${selector}" requires #${repeatedId} to be nested inside another #${repeatedId}. IDs must be unique, so this selector cannot match a valid composition.`,
+              selector,
+              fixHint: `Remove the duplicate ancestor: change \`#${repeatedId} #${repeatedId}\` to \`#${repeatedId}\`.`,
+            });
+          }
+
+          if (
+            !forcesOpacityZero ||
+            reportedHiddenStyleSelectors.has(selector) ||
+            !selectorAliasesRuntimeHiddenStyle(selector)
+          ) {
+            continue;
+          }
+          reportedHiddenStyleSelectors.add(selector);
           findings.push({
-            code: "repeated_id_descendant_selector",
+            code: "runtime_hidden_style_opacity",
             severity: "error",
-            message: `Selector "${selector}" requires #${repeatedId} to be nested inside another #${repeatedId}. IDs must be unique, so this selector cannot match a valid composition.`,
+            message: `Selector "${selector}" observes HyperFrames' runtime-owned hidden style and forces opacity to zero. The renderer hides each native video before copying its computed opacity to the visible replacement frame, so this rule makes both transparent.`,
             selector,
-            fixHint: `Remove the duplicate ancestor: change \`#${repeatedId} #${repeatedId}\` to \`#${repeatedId}\`.`,
+            fixHint:
+              'Restrict the guard to sub-composition hosts, for example `[data-composition-src][style*="visibility: hidden"]` and `[data-composition-file][style*="visibility: hidden"]`. Do not derive arbitrary element or media opacity from runtime-owned inline visibility.',
+            snippet: truncateSnippet(rule.toString()),
           });
         }
+      });
+    }
+    return findings;
+  },
+
+  // unclosed_tag_swallowed_element
+  ({ tags }) => {
+    const findings: HyperframeLintFinding[] = [];
+    for (const tag of tags) {
+      if (!hasUnquotedLessThan(tag.attrs)) continue;
+      findings.push({
+        code: "unclosed_tag_swallowed_element",
+        severity: "error",
+        message: `<${tag.name}> is missing its closing \`>\` before the next \`<\` — the following element is swallowed as bogus attribute text and never becomes a real node.`,
+        fixHint: "Close the previous tag's `>` before opening the next element.",
+        snippet: truncateSnippet(tag.raw),
       });
     }
     return findings;

@@ -174,7 +174,7 @@ export interface RenderExtractionObservability {
    * a coarse proxy for the ts=1784144554 field signal shape (147-clip
    * composition, 130 word-level caption divs authored-clip-count-scaled
    * failure). Static scan; dynamic script-inserted timed clips land in
-   * the probe-stage's `hasRuntimeInsertedMedia` path (PR #2474).
+   * the probe-stage's `hasRuntimeMediaChanges` path (PR #2474).
    */
   authoredTimedClipCount?: number;
 }

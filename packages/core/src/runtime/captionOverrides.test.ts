@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyCaptionOverrides } from "./captionOverrides";
 
-function installCaptionOverrideFetch(overrides: unknown[]) {
+function installCaptionOverrideFetch(overrides: unknown) {
   vi.stubGlobal("fetch", async () => ({
     ok: true,
     async json() {
@@ -54,12 +54,57 @@ async function flushCaptionOverrides() {
 }
 
 afterEach(() => {
+  vi.clearAllMocks();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   document.body.innerHTML = "";
   Reflect.deleteProperty(window, "gsap");
 });
 
 describe("applyCaptionOverrides", () => {
+  it("treats a missing optional sidecar as a silent no-op", async () => {
+    installGsapMock();
+    const json = vi.fn();
+    vi.stubGlobal("fetch", async () => ({ ok: false, status: 404, json }));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    document.body.innerHTML = `<div class="caption-group"><span>Hi</span></div>`;
+
+    applyCaptionOverrides();
+    await flushCaptionOverrides();
+
+    expect(json).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["malformed JSON", () => Promise.reject(new SyntaxError("Unexpected token"))],
+    ["a non-array root", () => Promise.resolve({ wordIndex: 0 })],
+    ["a non-object entry", () => Promise.resolve([null])],
+  ])("reports a present sidecar containing %s", async (_shape, json) => {
+    installGsapMock();
+    vi.stubGlobal("fetch", async () => ({ ok: true, status: 200, json }));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    document.body.innerHTML = `<div class="caption-group"><span>Hi</span></div>`;
+
+    applyCaptionOverrides();
+    await flushCaptionOverrides();
+
+    expect(error).toHaveBeenCalledOnce();
+    expect(error.mock.calls[0]?.[0]).toContain("caption-overrides.json");
+  });
+
+  it("accepts an empty array as the explicit no-op payload", async () => {
+    installGsapMock();
+    installCaptionOverrideFetch([]);
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    document.body.innerHTML = `<div class="caption-group"><span>Hi</span></div>`;
+
+    applyCaptionOverrides();
+    await flushCaptionOverrides();
+
+    expect(error).not.toHaveBeenCalled();
+  });
+
   it("reuses existing caption wrappers when overrides are applied more than once", async () => {
     const { setCalls } = installGsapMock();
     installCaptionOverrideFetch([{ wordIndex: 0, x: 12, y: -4, scale: 1.2 }]);

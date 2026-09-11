@@ -1,3 +1,4 @@
+import { probeSourceElement } from "./probeSourceElement";
 import type { PatchOperation } from "../../utils/sourcePatcher";
 import {
   resolveEditingAffordances,
@@ -25,11 +26,12 @@ import {
 } from "./domEditingDom";
 import {
   findElementForSelection,
-  getDomLayerPatchTarget,
-  getDirectLayerChildren,
   getSelectionCandidate,
+  isDomLayerElement,
 } from "./domEditingElement";
 import { isCompositionRootLayer } from "./domEditingRootLayer";
+import { withSelectorIndexPass } from "../../utils/sourceScopedSelectorIndex";
+import { type DomEditLayerWalkCache, readDomEditLayerWalkEntry } from "./domEditLayerWalkCache";
 
 // The text-field model lives in its own module since TAB-819; re-exported here
 // so every existing import of these names keeps working.
@@ -140,31 +142,6 @@ export function resolveDomEditCapabilities(args: {
       existsInSource: args.existsInSource ?? true,
     }),
   ).capabilities;
-}
-
-async function probeSourceElement(
-  projectId: string,
-  sourceFile: string,
-  target: { id?: string; hfId?: string; selector?: string; selectorIndex?: number },
-): Promise<boolean> {
-  try {
-    const response = await fetch(
-      `/api/projects/${projectId}/file-mutations/probe-element/${encodeURIComponent(sourceFile)}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target }),
-      },
-    );
-    if (!response.ok) return true;
-    const data = await response.json();
-    if (data && typeof data === "object" && "exists" in data && data.exists === false) {
-      return false;
-    }
-    return true;
-  } catch {
-    return true;
-  }
 }
 
 // fallow-ignore-next-line complexity
@@ -306,7 +283,7 @@ export function countDomEditChildLayers(
   const visit = (el: HTMLElement) => {
     for (const child of Array.from(el.children)) {
       if (!isHtmlElement(child)) continue;
-      if (getDomLayerPatchTarget(child, options.activeCompositionPath)) {
+      if (isDomLayerElement(child)) {
         count += 1;
         if (count >= maxCount) return;
       }
@@ -327,23 +304,26 @@ export function collectDomEditLayerItems(
   root: HTMLElement | null | undefined,
   options: DomEditContextOptions,
   maxItems = Number.POSITIVE_INFINITY,
+  cache?: DomEditLayerWalkCache,
 ): DomEditLayerItem[] {
   if (!root) return [];
+  cache?.beginWalk(options.activeCompositionPath);
 
   const items: DomEditLayerItem[] = [];
   // fallow-ignore-next-line complexity
   const visit = (el: HTMLElement, depth: number) => {
     if (items.length >= maxItems) return;
 
-    const target = getDomLayerPatchTarget(el, options.activeCompositionPath);
-    if (target) {
+    const entry = readDomEditLayerWalkEntry(el, options.activeCompositionPath, cache);
+    if (entry) {
+      const { target } = entry;
       items.push({
         key: getDomEditLayerKey(target),
         element: el,
-        label: buildElementLabel(el),
+        label: entry.label,
         tagName: el.tagName.toLowerCase(),
         depth,
-        childCount: getDirectLayerChildren(el, options).length,
+        childCount: entry.childCount,
         id: target.id ?? undefined,
         hfId: target.hfId ?? undefined,
         selector: target.selector ?? undefined,
@@ -354,9 +334,9 @@ export function collectDomEditLayerItems(
 
     // An atomic container is one row; its children only enumerate once the
     // user drills into it (it then becomes a layer-tree root, not a visitee).
-    if (target && isAtomicContainer(el) && el !== (options.activeGroupElement ?? null)) return;
+    if (entry && isAtomicContainer(el) && el !== (options.activeGroupElement ?? null)) return;
 
-    const nextDepth = target ? depth + 1 : depth;
+    const nextDepth = entry ? depth + 1 : depth;
     for (const child of Array.from(el.children)) {
       if (!isHtmlElement(child)) continue;
       visit(child, nextDepth);
@@ -364,8 +344,15 @@ export function collectDomEditLayerItems(
     }
   };
 
-  // Drilled into a group → show only its members; otherwise the whole tree.
-  for (const el of groupScopedLayerRoots(root, options.activeGroupElement ?? null)) visit(el, 0);
+  // Every item resolves its selector's occurrence index, and unshared that is a
+  // whole-document query per element — quadratic once a composition repeats a
+  // card or tile class. The walk is one synchronous read of a document it does
+  // not mutate, so one index per selector serves the whole of it. The pass lives
+  // here rather than in each caller because this function owns the loop.
+  withSelectorIndexPass(root.ownerDocument, () => {
+    // Drilled into a group → show only its members; otherwise the whole tree.
+    for (const el of groupScopedLayerRoots(root, options.activeGroupElement ?? null)) visit(el, 0);
+  });
   return items;
 }
 

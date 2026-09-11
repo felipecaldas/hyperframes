@@ -10,6 +10,8 @@
  * 2. `wordIndex` — fallback, DOM traversal order across .caption-group > span
  */
 
+import { isHtmlElement } from "./domRealm";
+
 interface CaptionOverride {
   wordId?: string;
   wordIndex?: number;
@@ -25,6 +27,20 @@ interface CaptionOverride {
   fontSize?: number;
   fontWeight?: number;
   fontFamily?: string;
+}
+
+function isCaptionOverride(value: unknown): value is CaptionOverride {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseCaptionOverridePayload(value: unknown): CaptionOverride[] {
+  if (!Array.isArray(value)) {
+    throw new Error("expected a JSON array");
+  }
+  if (!value.every(isCaptionOverride)) {
+    throw new Error("every array entry must be an object");
+  }
+  return value;
 }
 
 interface GsapTween {
@@ -56,7 +72,7 @@ function declaredCaptionState(tween: GsapTween): "dim" | "active" | undefined {
 }
 
 function resolveCaptionWordElement(el: Element | null): HTMLElement | null {
-  if (!(el instanceof HTMLElement)) return null;
+  if (!isHtmlElement(el)) return null;
   if (el.dataset.captionWrapper !== "true") return el;
 
   const inner = el.querySelector<HTMLElement>(":scope > span");
@@ -69,7 +85,7 @@ function getCaptionWordElements(): HTMLElement[] {
 
   for (const group of groups) {
     for (const child of group.children) {
-      if (!(child instanceof HTMLElement)) continue;
+      if (!isHtmlElement(child)) continue;
 
       const wordEl =
         child.dataset.captionWrapper === "true"
@@ -109,13 +125,15 @@ export function applyCaptionOverrides(): void {
       if (!r.ok) return null;
       return r.json();
     })
-    .then((data: CaptionOverride[] | null) => {
-      if (!data || !Array.isArray(data) || data.length === 0) return;
+    .then((data: unknown) => {
+      if (data === null) return;
+      const overrides = parseCaptionOverridePayload(data);
+      if (overrides.length === 0) return;
 
       // Build word element index for wordIndex fallback
       const wordEls = getCaptionWordElements();
 
-      for (const override of data) {
+      for (const override of overrides) {
         let el: HTMLElement | null = null;
         if (override.wordId) {
           el = resolveCaptionWordElement(document.getElementById(override.wordId));
@@ -191,5 +209,8 @@ export function applyCaptionOverrides(): void {
         }
       }
     })
-    .catch(() => {});
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[HyperFrames] Invalid caption-overrides.json: ${message}`);
+    });
 }

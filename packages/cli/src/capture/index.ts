@@ -1,3 +1,5 @@
+import { LottieDiscovery } from "./lottieDiscovery.js";
+import { createCaptureDownloadBudget } from "./readBoundedResponse.js";
 /**
  * Website capture orchestrator.
  *
@@ -83,6 +85,7 @@ export async function captureWebsite(
     onPhase,
   } = opts;
 
+  const downloadByteBudget = createCaptureDownloadBudget();
   const warnings: string[] = [];
   const progress = (stage: string, detail?: string) => {
     onProgress?.(stage, detail);
@@ -203,51 +206,20 @@ export async function captureWebsite(
 
     // Intercept network responses to detect Lottie JSON files
     const discoveredLotties: DiscoveredLottie[] = [];
+    const lottieDiscovery = new LottieDiscovery();
     // Layer 1 (passive video discovery): every direct-video URL the page fetches
     // over the whole session (load / scroll / carousel rotation), independent of
     // whether a <video> for it exists at snapshot time. captureVideoManifest
     // downloads these (guarded) and merges them into the manifest.
     const discoveredVideoUrls = new Set<string>();
     // fallow-ignore-next-line complexity
-    page1.on("response", async (response) => {
+    page1.on("response", (response) => {
       try {
         const responseUrl = response.url();
         if (/\.(mp4|webm|mov|m4v)(\?|#|$)/i.test(responseUrl)) {
           discoveredVideoUrls.add(responseUrl);
         }
-        const contentType = response.headers()["content-type"] || "";
-        const isJsonUrl = responseUrl.endsWith(".json");
-        const isLottieUrl = responseUrl.endsWith(".lottie");
-        const isJson =
-          contentType.includes("application/json") || contentType.includes("text/plain");
-
-        if (isLottieUrl) {
-          discoveredLotties.push({ url: responseUrl });
-          return;
-        }
-
-        if (isJsonUrl || isJson) {
-          // Check Content-Length before downloading to avoid OOM on huge responses
-          const cl = parseInt(response.headers()["content-length"] || "0", 10);
-          if (cl > 5_000_000) return;
-          const buffer = await response.buffer();
-          if (buffer.length < 100 || buffer.length > 5_000_000) return; // Skip tiny or huge
-          const text = buffer.toString("utf-8");
-          const json = JSON.parse(text);
-          // Validate Lottie structure: must have version, in/out points, layers, dimensions, framerate
-          if (
-            json &&
-            typeof json === "object" &&
-            ["v", "ip", "op", "layers", "w", "h", "fr"].every((k: string) => k in json)
-          ) {
-            discoveredLotties.push({
-              url: responseUrl,
-              data: json,
-              dimensions: { w: json.w, h: json.h },
-              frameRate: json.fr,
-            });
-          }
-        }
+        lottieDiscovery.collect(response);
       } catch {
         /* not JSON or parse error — skip */
       }
@@ -381,10 +353,16 @@ export async function captureWebsite(
       /* DOM scan failed — non-critical */
     }
 
+    for (const found of await lottieDiscovery.run(downloadByteBudget, remainingMs)) {
+      const existing = discoveredLotties.findIndex((item) => item.url === found.url);
+      if (existing < 0) discoveredLotties.push(found);
+      else discoveredLotties[existing] = found;
+    }
+
     if (discoveredLotties.length > 0 && remainingMs() > 0) {
       const lottieDir = join(outputDir, "assets", "lottie");
       mkdirSync(lottieDir, { recursive: true });
-      const lottieBudget = { remainingMs };
+      const lottieBudget = { remainingMs, byteBudget: downloadByteBudget };
       const savedCount = await saveLottieAnimations(discoveredLotties, lottieDir, lottieBudget);
       // Generate manifest + preview thumbnails so the agent can SEE what each animation is
       if (savedCount > 0 && remainingMs() > 0) {
@@ -610,6 +588,7 @@ export async function captureWebsite(
     phase("fonts", "started");
     const fontPass = await downloadAndRewriteFonts(extracted.headHtml, outputDir, {
       remainingMs,
+      byteBudget: downloadByteBudget,
     });
     extracted.headHtml = fontPass.css;
     phase(
@@ -681,6 +660,7 @@ export async function captureWebsite(
       progress("assets", "Downloading assets...");
       const assetPass = await downloadAssets(tokens, outputDir, catalogedAssets, faviconLinks, {
         remainingMs,
+        byteBudget: downloadByteBudget,
       });
       assets = assetPass.assets;
       assetDrops = assetPass.drops;

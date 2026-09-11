@@ -301,6 +301,7 @@ export {
 
 export {
   assertPublicHttpsUrl,
+  isBlockedNetworkHost,
   downloadToTemp,
   fetchPublicHttpsText,
   isHttpUrl,
@@ -416,3 +417,8 @@ export {
   PROVENANCE_VERSION,
   type RenderProvenance,
 } from "./utils/renderProvenance.js";
+
+export {
+  DrawElementCaptureError,
+  isDrawElementCaptureError,
+} from "./services/drawElementCaptureError.js";

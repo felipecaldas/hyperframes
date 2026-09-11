@@ -224,7 +224,7 @@ function collectDeclaredVariableIds(htmlTagRaw: string): Set<string> | null {
  * template/fragment sub-comps hold it on their composition root div. Returns
  * null if any occurrence has unparseable JSON.
  */
-function collectAllDeclaredVariableIds(tags: readonly OpenTag[]): Set<string> | null {
+export function collectAllDeclaredVariableIds(tags: readonly OpenTag[]): Set<string> | null {
   const all = new Set<string>();
   for (const tag of tags) {
     if (!readAttr(tag.raw, "data-composition-variables")) continue;

@@ -294,6 +294,79 @@ describe("core rules", () => {
     expect(finding).toBeUndefined();
   });
 
+  it("reports error when an extra style closer dumps CSS as text", async () => {
+    const html = compositionWithBodyPrefix(
+      "",
+      `
+    <style>
+      .editorial-block { color: #fff; }
+    </style>
+    </style>
+    .leftover { color: red; }
+    <div class="editorial-block">Hello</div>
+`,
+    );
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "unbalanced_style_tags");
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe("error");
+    expect(finding?.message).toContain("extra </style>");
+  });
+
+  it("does not count style text inside a script closed with a spaced end tag", async () => {
+    const html = compositionWithBodyPrefix(
+      "",
+      `
+    <style>
+      .editorial-block { color: #fff; }
+    </style>
+    <script>
+      const marker = "</style>";
+    </script >
+    <div class="editorial-block">Hello</div>
+`,
+    );
+    const result = await lintHyperframeHtml(html);
+    expect(result.findings.find((f) => f.code === "unbalanced_style_tags")).toBeUndefined();
+  });
+
+  it("reports an extra closer written as </style >", async () => {
+    const html = compositionWithBodyPrefix(
+      "",
+      `
+    <style>
+      .editorial-block { color: #fff; }
+    </style >
+    </style >
+    .leftover { color: red; }
+    <div class="editorial-block">Hello</div>
+`,
+    );
+    const result = await lintHyperframeHtml(html);
+    expect(result.findings.find((f) => f.code === "unbalanced_style_tags")?.severity).toBe("error");
+  });
+
+  it("does not count a closer that only appears inside an html comment", async () => {
+    const html = compositionWithBodyPrefix(
+      "",
+      `
+    <style>
+      .editorial-block { color: #fff; }
+    </style>
+    <!-- dropped the second sheet: </style> -->
+    <div class="editorial-block">Hello</div>
+`,
+    );
+    const result = await lintHyperframeHtml(html);
+    expect(result.findings.find((f) => f.code === "unbalanced_style_tags")).toBeUndefined();
+  });
+
+  it("does not report paired style blocks", async () => {
+    const html = compositionWithBodyPrefix("", `<div class="editorial-block">Hello</div>`);
+    const result = await lintHyperframeHtml(html);
+    expect(result.findings.find((f) => f.code === "unbalanced_style_tags")).toBeUndefined();
+  });
+
   it("reports error when CSS block comment syntax leaks into visible markup", async () => {
     const html = compositionWithBodyPrefix(
       "",
@@ -794,6 +867,107 @@ describe("core rules", () => {
         comp(`window.__timelines = { wrongid: gsap.timeline({ paused: true }) };`),
       );
       expect(result.findings.find((f) => f.code === "timeline_id_mismatch")).toBeDefined();
+    });
+  });
+
+  describe("runtime_hidden_style_opacity", () => {
+    const comp = (css: string, extraMarkup = "") => `
+<html><head><style>${css}</style></head><body>
+  <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+    <video id="footage" src="clip.mp4" data-start="0" data-duration="5" muted playsinline></video>
+    ${extraMarkup}
+  </div>
+  <script>window.__timelines = { main: gsap.timeline({ paused: true }) };</script>
+</body></html>`;
+
+    it("errors when a broad hidden-style selector forces replacement-frame opacity to zero", async () => {
+      const result = await lintHyperframeHtml(
+        comp(`[style*="visibility: hidden"] { opacity: 0 !important; }`),
+      );
+      const finding = result.findings.find((item) => item.code === "runtime_hidden_style_opacity");
+
+      expect(finding?.severity).toBe("error");
+      expect(finding?.selector).toBe(`[style*="visibility: hidden"]`);
+      expect(finding?.message).toContain("replacement frame");
+      expect(finding?.fixHint).toContain("data-composition-src");
+    });
+
+    it("errors when composition scoping still leaves the hidden-style selector on video", async () => {
+      const result = await lintHyperframeHtml(
+        comp(`#root > video[style*="visibility: hidden"] { opacity: 0; }`),
+      );
+
+      expect(
+        result.findings.find((item) => item.code === "runtime_hidden_style_opacity")?.selector,
+      ).toBe(`#root > video[style*="visibility: hidden"]`);
+    });
+
+    it("errors when the root stylesheet can affect video mounted from a sub-composition", async () => {
+      const result = await lintHyperframeHtml(`
+<html><head><style>[style*="visibility: hidden"] { opacity: 0; }</style></head><body>
+  <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+    <div data-composition-id="scene" data-composition-src="scene.html"></div>
+  </div>
+  <script>window.__timelines = { main: gsap.timeline({ paused: true }) };</script>
+</body></html>`);
+
+      expect(
+        result.findings.find((item) => item.code === "runtime_hidden_style_opacity")?.severity,
+      ).toBe("error");
+    });
+
+    it("allows hidden-style opacity guards scoped to sub-composition hosts", async () => {
+      const result = await lintHyperframeHtml(
+        comp(
+          `[data-composition-src][style*="visibility: hidden"],
+           [data-composition-file][style*="visibility: hidden"] { opacity: 0 !important; }`,
+          `<div data-composition-id="scene-a" data-composition-src="scene-a.html"></div>
+           <div data-composition-id="scene-b" data-composition-file="scene-b.html"></div>`,
+        ),
+      );
+
+      expect(
+        result.findings.find((item) => item.code === "runtime_hidden_style_opacity"),
+      ).toBeUndefined();
+    });
+
+    it("allows broad hidden-style selectors that do not change opacity", async () => {
+      const result = await lintHyperframeHtml(
+        comp(`[style*="visibility: hidden"] { pointer-events: none; }`),
+      );
+
+      expect(
+        result.findings.find((item) => item.code === "runtime_hidden_style_opacity"),
+      ).toBeUndefined();
+    });
+  });
+
+  describe("unclosed_tag_swallowed_element", () => {
+    it("flags an <img> tag whose unclosed start tag swallows a nested <div> as bogus attribute text", async () => {
+      const html = compositionWithBodyPrefix(
+        `<img class="browser-img" src="a.png" <div class="hl"></div></figure>`,
+      );
+      const result = await lintHyperframeHtml(html);
+      const finding = result.findings.find((f) => f.code === "unclosed_tag_swallowed_element");
+      expect(finding).toBeDefined();
+      expect(finding?.severity).toBe("error");
+      expect(finding?.snippet).toContain("<img");
+    });
+
+    it("does not flag a normal <img> tag", async () => {
+      const html = compositionWithBodyPrefix(`<img class="browser-img" src="a.png" />`);
+      const result = await lintHyperframeHtml(html);
+      expect(
+        result.findings.find((f) => f.code === "unclosed_tag_swallowed_element"),
+      ).toBeUndefined();
+    });
+
+    it("does not flag a legitimate attribute value containing a raw <", async () => {
+      const html = compositionWithBodyPrefix(`<div data-expr="x < y">hi</div>`);
+      const result = await lintHyperframeHtml(html);
+      expect(
+        result.findings.find((f) => f.code === "unclosed_tag_swallowed_element"),
+      ).toBeUndefined();
     });
   });
 

@@ -176,13 +176,21 @@ function mirrorToInstalledAgents(): void {
   try {
     const names = hyperframesSkillNames({ scope: "global" });
     if (names.length === 0) return;
-    const { mirrored } = mirrorGlobalSkills({ skills: names });
+    const { mirrored, skipped } = mirrorGlobalSkills({ skills: names });
     const n = mirrored.length;
     if (n > 0) {
       // stderr (via diag): reachable from `skills update --json` (via installSkills)
       // before the JSON envelope is written to stdout.
       diag.notice(
         c.dim(`Linked skills into ${n} other agent ${n === 1 ? "directory" : "directories"}.`),
+      );
+    }
+    if (skipped.length > 0) {
+      const agents = [...new Set(skipped.map((entry) => entry.agent))].join(", ");
+      diag.warn(
+        c.warn(
+          `Skipped unsafe skill mirror target${skipped.length === 1 ? "" : "s"} for ${agents}; canonical skill stores were left unchanged.`,
+        ),
       );
     }
   } catch {

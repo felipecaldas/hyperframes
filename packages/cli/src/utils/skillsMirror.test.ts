@@ -8,6 +8,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -46,6 +47,62 @@ afterEach(() => {
 });
 
 describe("mirrorGlobalSkills", () => {
+  it.each([
+    [
+      "absolute",
+      (home: string, source: string) => symlinkSync(source, join(home, ".cursor", "skills")),
+    ],
+    [
+      "relative",
+      (home: string) => symlinkSync("../.claude/skills", join(home, ".cursor", "skills")),
+    ],
+    ["intermediate", (home: string) => symlinkSync(".claude", join(home, ".cursor"))],
+  ])(
+    "fails closed when the target reaches the canonical store through a %s alias",
+    (_kind, alias) => {
+      const home = makeHome();
+      seedStore(home, ["hyperframes"]);
+      const source = join(home, ".claude", "skills");
+      if (_kind !== "intermediate") installMarker(home, ".cursor");
+      alias(home, source);
+
+      const result = mirrorGlobalSkills({
+        skills: ["hyperframes"],
+        home,
+        platform: "linux",
+        env: ENV,
+      });
+
+      expect(lstatSync(join(source, "hyperframes")).isDirectory()).toBe(true);
+      expect(readFileSync(join(source, "hyperframes", "SKILL.md"), "utf8")).toBe("# hyperframes\n");
+      expect(result.mirrored.map((entry) => entry.agent)).not.toContain("cursor");
+      expect(result.skipped).toContainEqual(
+        expect.objectContaining({ agent: "cursor", reason: "aliases_install_owned_store" }),
+      );
+    },
+  );
+
+  it("fails closed and reports an unresolvable self-loop before destructive mirroring", () => {
+    const home = makeHome();
+    seedStore(home, ["hyperframes"]);
+    installMarker(home, ".cursor");
+    symlinkSync("skills", join(home, ".cursor", "skills"));
+
+    const result = mirrorGlobalSkills({
+      skills: ["hyperframes"],
+      home,
+      platform: "linux",
+      env: ENV,
+    });
+
+    expect(readFileSync(join(home, ".claude", "skills", "hyperframes", "SKILL.md"), "utf8")).toBe(
+      "# hyperframes\n",
+    );
+    expect(result.skipped).toContainEqual(
+      expect.objectContaining({ agent: "cursor", reason: "unresolvable_target" }),
+    );
+  });
+
   it("no-ops when there is no global Claude store", () => {
     const home = makeHome();
     const result = mirrorGlobalSkills({

@@ -50,6 +50,12 @@
       "types": "./dist/compositionContract.d.ts",
       "environments": ["browser", "bun", "node"]
     },
+    "./media-timing": {
+      "source": "./src/mediaTiming.ts",
+      "runtime": "./dist/mediaTiming.js",
+      "types": "./dist/mediaTiming.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
     "./editing": {
       "source": "./src/editing/affordances.ts",
       "runtime": "./dist/editing/affordances.js",

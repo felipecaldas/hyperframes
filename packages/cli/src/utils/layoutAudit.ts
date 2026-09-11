@@ -23,6 +23,7 @@ export type LayoutIssueCode =
   | "escaped_container"
   | "panel_out_of_canvas"
   | "connector_detached"
+  | "connector_orphan"
   // Cross-sample rotation finding — a spinning element whose bbox center drifts
   // because it pivots about the wrong point (bad transformOrigin/svgOrigin).
   | "rotation_pivot_drift"
@@ -203,6 +204,7 @@ const PERSISTENCE_TIERED_CODES: ReadonlySet<LayoutIssueCode> = new Set([
   "escaped_container",
   "panel_out_of_canvas",
   "connector_detached",
+  "connector_orphan",
 ]);
 
 const CONTIGUOUS_SAMPLE_GAP_MS = CONTENT_OVERLAP_HELD_ERROR_MS * 2;
@@ -385,8 +387,10 @@ function staticIssueKey(issue: LayoutIssue): string {
 }
 
 function framePositionKey(issue: LayoutIssue): string {
-  // connector_detached shares it: id-less paths collapse to one selector, so distinct lines need geometry in the key.
-  return issue.code === "frame_out_of_frame" || issue.code === "connector_detached"
+  // connector_detached and connector_orphan share it: id-less paths collapse to one selector, so distinct lines need geometry in the key.
+  return issue.code === "frame_out_of_frame" ||
+    issue.code === "connector_detached" ||
+    issue.code === "connector_orphan"
     ? `${Math.round(issue.rect.left)},${Math.round(issue.rect.top)}`
     : "";
 }

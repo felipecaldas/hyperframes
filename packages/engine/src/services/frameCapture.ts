@@ -18,6 +18,8 @@ import {
   type RawAuthoredTiming,
 } from "@hyperframes/core";
 
+import { DrawElementCaptureError } from "./drawElementCaptureError.js";
+
 // ── Extracted modules ───────────────────────────────────────────────────────
 import {
   acquireBrowser,
@@ -224,8 +226,15 @@ export interface CaptureSession {
   deFallbackTrigger?: string;
   /** Wall-clock ms spent capturing self-verification ground truth at init (telemetry). */
   deVerifyInitMs?: number;
-  /** Count of per-frame "No cached paint record" screenshot fallbacks (telemetry). */
+  /** Count of paint-record/canvas failures requiring fresh screenshot capture (telemetry). */
   deNcprFallbacks?: number;
+  /**
+   * Count of drawElement frame captures that blew `HF_DE_FRAME_TIMEOUT_MS`
+   * because the renderer stopped scheduling after drawElementImage returned
+   * (PRINFRA-488). Each one aborts the drawElement attempt so the whole render
+   * retries via screenshot.
+   */
+  deFrameTimeouts?: number;
   /**
    * drawElement init passed every gate but stopped before verification +
    * canvas injection: the session has no video-frame injector yet (probe
@@ -2729,6 +2738,13 @@ export async function computeStaticFrameSet(
     let hasTimelineCall = false;
     function walk(tl: AnyTween, offset: number): void {
       if (typeof tl.getChildren !== "function") return;
+      // A timeline with an onUpdate callback can drive motion without any
+      // visible tween (e.g. setting x/y from Math.random inside onUpdate).
+      // Mark its entire span as animated so those frames are never deduped.
+      if (typeof tl.vars?.onUpdate === "function") {
+        const total = typeof tl.totalDuration === "function" ? tl.totalDuration() : 0;
+        if (total > 0) intervals.push({ start: offset, end: offset + total });
+      }
       for (const child of tl.getChildren(false, true, true)) {
         const start = offset + (typeof child.startTime === "function" ? child.startTime() : 0);
         const single = typeof child.duration === "function" ? child.duration() : 0;
@@ -3046,6 +3062,63 @@ interface StaticVerificationDependencies {
 }
 
 /**
+ * Prepare an isolated page for static-frame verification. Verification seeks
+ * intentionally visit frames out of capture order on a SEPARATE page that is
+ * never used for the real capture — out-of-order event-callback side effects
+ * are contained to this disposable page and cannot corrupt sequential capture.
+ */
+export async function createStaticVerificationPage(session: CaptureSession): Promise<Page> {
+  const page = await session.browser.newPage();
+  const pageNavigationTimeout =
+    session.config?.pageNavigationTimeout ?? DEFAULT_CONFIG.pageNavigationTimeout;
+  const pageReadyTimeout = session.config?.playerReadyTimeout ?? DEFAULT_CONFIG.playerReadyTimeout;
+
+  try {
+    await page.evaluateOnNewDocument(() => {
+      const w = window as unknown as { __name?: <T>(fn: T, _name: string) => T };
+      if (typeof w.__name !== "function") {
+        w.__name = <T>(fn: T, _name: string): T => fn;
+      }
+    });
+    if (session.options.variables && Object.keys(session.options.variables).length > 0) {
+      const variablesJson = JSON.stringify(session.options.variables);
+      await page.evaluateOnNewDocument((json: string) => {
+        (window as Window & { __hfVariables?: Record<string, unknown> }).__hfVariables =
+          JSON.parse(json);
+      }, variablesJson);
+    }
+    await page.setViewport({
+      width: session.options.width,
+      height: session.options.height,
+      deviceScaleFactor: session.options.deviceScaleFactor || 1,
+    });
+    await page.goto(`${session.serverUrl}/index.html`, {
+      waitUntil: "domcontentloaded",
+      timeout: pageNavigationTimeout,
+    });
+    await page.evaluate(`window.__hfFlushSync?.()`);
+    await pollHfReady(page, pageReadyTimeout);
+    await pollSubCompositionTimelines(page, pageReadyTimeout);
+    await applyVideoMetadataHints(page, session.options.videoMetadataHints);
+
+    const skipVideoIds = session.options.skipReadinessVideoIds ?? [];
+    await Promise.all([
+      pollVideosReady(page, skipVideoIds, pageReadyTimeout),
+      pollImagesReady(page, pageReadyTimeout).then((ready) =>
+        ready ? decodeAllImages(page) : undefined,
+      ),
+      page.evaluate(`document.fonts?.ready`),
+      waitForOptionalTailwindReady(page, pageReadyTimeout),
+    ]);
+    if (session.options.format === "png") await initTransparentBackground(page);
+    return page;
+  } catch (error) {
+    await page.close().catch(() => {});
+    throw error;
+  }
+}
+
+/**
  * Empirically verify the predicted-static set before trusting it. Group static frames
  * into runs; each run [a..b] reuses anchor a-1. CRITICAL: compare against the ANCHOR,
  * not the predecessor — a slow drift with sub-quantization per-frame deltas is byte-
@@ -3104,7 +3177,7 @@ export async function verifyStaticFramesSafe(
           __hf?: { seek?: (t: number, options?: { suppressEvents?: boolean }) => void };
         }
       ).__hf;
-      if (hf && typeof hf.seek === "function") hf.seek(tt, { suppressEvents: true });
+      if (hf && typeof hf.seek === "function") hf.seek(tt, { suppressEvents: false });
     }, t);
   };
   const hardCap = Math.max(
@@ -3236,7 +3309,24 @@ async function armStaticDedup(
     );
     return;
   }
-  const verdict = await verifyStaticFramesSafe(session, page, stats.staticFrameSet, fps, samples);
+  let verificationPage: Page | undefined;
+  let verdict: StaticVerificationResult;
+  try {
+    verificationPage = await createStaticVerificationPage(session);
+    verdict = await verifyStaticFramesSafe(
+      session,
+      verificationPage,
+      stats.staticFrameSet,
+      fps,
+      samples,
+    );
+  } catch {
+    session.staticDedupSkipReason = "verification_failed";
+    logInitPhase("static-frame dedup: disabled (verification infrastructure failure)");
+    return;
+  } finally {
+    await verificationPage?.close().catch(() => {});
+  }
   session.staticDedupVerification = verdict;
   if (verdict.outcome === "mismatch" || verdict.outcome === "infrastructure") {
     session.staticDedupSkipReason = "verification_failed";
@@ -3415,6 +3505,69 @@ function isRecoverableDrawElementError(err: unknown): boolean {
   return isNoCachedPaintRecordError(err) || isCanvasNotInitializedError(err);
 }
 
+/**
+ * Per-frame deadline for the drawElement capture round-trip.
+ *
+ * drawElementImage can return normally and then leave the renderer not draining
+ * its task queue: the `setTimeout(…, 0)` that drawAndEncode schedules to run
+ * `toDataURL` never fires, so the capture `page.evaluate` never settles.
+ * Reproduced deterministically on Chromium 152.0.7977.30, one comp, always the
+ * same frame (PRINFRA-488). Nothing below the render-level watchdog bounded
+ * this, so a single bad frame failed the ENTIRE render after a 60 s stall.
+ *
+ * This bounds the round-trip so the producer can discard the wedged page and
+ * retry the whole render on a fresh screenshot session. A per-frame screenshot
+ * cannot recover because the same page has stopped scheduling. Tune with
+ * `HF_DE_FRAME_TIMEOUT_MS`; 0 disables.
+ */
+const DE_FRAME_TIMEOUT_MS = Number(process.env.HF_DE_FRAME_TIMEOUT_MS ?? "15000");
+
+class DeFrameTimeoutError extends Error {
+  constructor(label: string, ms: number) {
+    super(`drawElement ${label} exceeded ${ms}ms (renderer stopped scheduling; see PRINFRA-488)`);
+    this.name = "DeFrameTimeoutError";
+  }
+}
+
+/**
+ * Race `work` against a deadline. The losing promise is NOT cancellable —
+ * puppeteer cannot abort an in-flight `page.evaluate` — so its rejection is
+ * swallowed to avoid an unhandled rejection when it eventually settles (or
+ * never does). The orphaned round-trip keeps running in its Chrome worker;
+ * that worker is reclaimed by the outer retry rebuilding the page
+ * (`closeOrphanedProbeForRetry`), not by anything here.
+ *
+ * `onTimeout` fires exactly when the deadline wins, and is the ONLY place the
+ * stall is observable: because the deadline races `work` from outside, nothing
+ * inside `work` — including its own catch blocks — ever sees this error.
+ *
+ * Exported for the deadline unit test; `captureFrameToBuffer` is the only
+ * production caller.
+ */
+export async function withFrameDeadline<T>(
+  work: Promise<T>,
+  label: string,
+  ms: number,
+  onTimeout?: () => void,
+): Promise<T> {
+  if (!(ms > 0)) return work;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      onTimeout?.();
+      reject(new DeFrameTimeoutError(label, ms));
+    }, ms);
+  });
+  try {
+    return await Promise.race([work, guard]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    void work.catch(() => {
+      /* orphaned round-trip — see doc above */
+    });
+  }
+}
+
 async function captureFrameCore(
   session: CaptureSession,
   frameIndex: number,
@@ -3479,19 +3632,10 @@ async function captureFrameCore(
       session.clipBoundaryFrames?.has(frameIndex) &&
       process.env.HF_FAST_CAPTURE_BOUNDARY_SS === "true"
     ) {
-      // Lim 6 (serial path): proactively screenshotting clip-boundary frames is now
-      // OPT-IN (was default-on). It is net-harmful: drawElement renders most boundary
-      // frames correctly, but Page.captureScreenshot in drawElement mode captures the
-      // injected canvas (unpainted at render start → white; mid-render → ~1-frame
-      // stale), so the "fallback" REPLACES good frames with damaged ones (validated:
-      // 35e8fa9f 462→0 damaged frames, 4001da8e 11→0, when this is off). The two real
-      // boundary failure modes are now caught reactively below — the throw case by
-      // isRecoverableDrawElementError, the silent-solid-black case by the small-frame
-      // blank-guard (a solid frame is a tiny JPEG) — without touching frames drawElement
-      // handles. Force the old behavior with HF_FAST_CAPTURE_BOUNDARY_SS=true. The worker
-      // path keeps proactive boundary-SS (it has no blank-guard); see
-      // captureFrameToBufferPipelined and docs/fast-capture-limitations.md.
-      screenshotBuffer = await pageScreenshotCapture(page, options);
+      throw new DrawElementCaptureError(
+        frameIndex,
+        "boundary screenshot requested on an injected canvas page",
+      );
     } else if (session.captureMode === "drawelement") {
       // Advance compositor state via BeginFrame when available (Linux headless-shell);
       // on macOS the compositor advances naturally without BeginFrame.
@@ -3516,49 +3660,32 @@ async function captureFrameCore(
           // a fresh snapshot, and no further paint would arrive during a wait.
           session.beginFrameTimeTicks === 0,
         );
-        // Silent-blank-drop guard: drawElement occasionally returns a blank/dropped
-        // frame WITHOUT throwing (paint-record miss; the throw case is handled below).
-        // Such a frame's JPEG is anomalously tiny vs the comp's running median (a blank
-        // 1080p frame ~5-9 KB; content frames 50 KB-1 MB). Re-capture via screenshot
-        // (ground truth) — harmless for legitimately simple frames (screenshot matches).
-        // Catches scattered intermittent drops (e.g. 4001da8e: 11 blanks in 9300 frames,
-        // 9.7 dB) that no static gate can see. PNG/transparent excluded (alpha sizing
-        // differs and that path is its own).
+        // A tiny JPEG may be a dropped paint record. Never screenshot this page:
+        // its injected canvas can still hold the preceding frame's bitmap.
+        // Restart on a fresh screenshot page even if this was a simple valid frame.
         if ((options.format ?? "jpeg") !== "png" && process.env.HF_FORCE_DRAWELEMENT !== "1") {
           const sizes = (session.deFrameSizes ??= []);
           const sorted = sizes.length >= 12 ? [...sizes].sort((a, b) => a - b) : null;
           const median = sorted ? (sorted[sorted.length >> 1] ?? 0) : 0;
           const floor = Math.max(20000, median * 0.12);
           if (screenshotBuffer.length < floor) {
-            console.log(
-              `[engine] fast capture: frame ${frameIndex} — drawElement frame anomalously ` +
-                `small (${screenshotBuffer.length}B < ${Math.round(floor)}B, likely a silent ` +
-                `paint-record drop); screenshot fallback (see fast-capture-limitations.md)`,
+            throw new DrawElementCaptureError(
+              frameIndex,
+              `suspect small frame (${screenshotBuffer.length}B < ${Math.round(floor)}B)`,
             );
-            screenshotBuffer = await pageScreenshotCapture(page, options);
           } else {
             if (sizes.length >= 60) sizes.shift();
             sizes.push(screenshotBuffer.length);
           }
         }
       } catch (err) {
-        // drawElementImage throws `InvalidStateError: No cached paint record for
-        // element` when an element in the subtree has no paint record this frame
-        // (display toggled / detached / freshly-shown at a clip-cut boundary), and
-        // `canvas not initialized` when the injected capture canvas isn't set up yet
-        // (observed at frame 0 on some macOS/Chrome combinations, see #3423). Both
-        // are per-frame conditions, not whole-comp ones — fall back to screenshot for
-        // THIS frame instead of aborting the render. See fast-capture-limitations.md.
+        // Missing paint records/canvas state require a new screenshot page.
         if (isRecoverableDrawElementError(err)) {
           session.deNcprFallbacks = (session.deNcprFallbacks ?? 0) + 1;
           const reason = isCanvasNotInitializedError(err)
             ? "drawElement canvas not initialized"
             : "No cached paint record";
-          console.log(
-            `[engine] fast capture: frame ${frameIndex} — ${reason}; ` +
-              `screenshot fallback for this frame (see fast-capture-limitations.md)`,
-          );
-          screenshotBuffer = await pageScreenshotCapture(page, options);
+          throw new DrawElementCaptureError(frameIndex, reason, err);
         } else {
           throw err;
         }
@@ -3639,7 +3766,30 @@ export async function captureFrameToBuffer(
   frameIndex: number,
   time: number,
 ): Promise<CaptureBufferResult> {
-  const { buffer, captureTimeMs } = await captureFrameCore(session, frameIndex, time);
+  const { buffer, captureTimeMs } =
+    session.captureMode === "drawelement"
+      ? await withFrameDeadline(
+          captureFrameCore(session, frameIndex, time),
+          `frame ${frameIndex}`,
+          DE_FRAME_TIMEOUT_MS,
+          () => {
+            // Deliberately NO per-frame screenshot fallback. When the renderer
+            // stops scheduling it is wedged for EVERY subsequent round-trip on
+            // that page — measured: the screenshot fallback blew the same
+            // deadline. Fail fast and let the producer re-render the whole comp
+            // on a fresh page via the screenshot path, the only recovery that
+            // works. Counted here rather than in captureFrameCore's catch: the
+            // deadline rejects from outside it, so that catch never runs.
+            session.deFrameTimeouts = (session.deFrameTimeouts ?? 0) + 1;
+            console.log(
+              `[engine] fast capture: frame ${frameIndex} — capture exceeded ` +
+                `${DE_FRAME_TIMEOUT_MS}ms; renderer stalled after drawElementImage ` +
+                `(PRINFRA-488). Failing the drawElement attempt so the whole render ` +
+                `retries via screenshot.`,
+            );
+          },
+        )
+      : await captureFrameCore(session, frameIndex, time);
 
   return { buffer, captureTimeMs };
 }
@@ -3703,35 +3853,14 @@ export async function captureFrameToBufferPipelined(
     );
     void quantizedTime;
 
-    // Lim 6: clip-cut boundary frame — screenshot ONLY when opt-in, matching the serial
-    // path (captureFrameCore). Proactive boundary screenshots in drawElement mode are
-    // net-HARMFUL: with `<canvas layoutsubtree>` the child composition root is laid out
-    // but not painted to screen — only the canvas 2D bitmap is visible — so
-    // Page.captureScreenshot captures the injected canvas holding the LAST drawElement
-    // frame (stale by ≥1 scene at a hard cut), REPLACING a good frame with a stale one.
-    // Measured on 0531c45f: worker boundary frames showed the previous scene's video.
-    // Default OFF → boundary frames fall through to produceDrawElementFrame, which draws
-    // the CURRENT frame into the canvas. (Force old behavior with
-    // HF_FAST_CAPTURE_BOUNDARY_SS=true.) See captureFrameCore for the serial rationale.
     if (
       session.clipBoundaryFrames?.has(frameIndex) &&
       process.env.HF_FAST_CAPTURE_BOUNDARY_SS === "true"
     ) {
-      const buffer = await pageScreenshotCapture(page, options);
-      session.capturePerf.frames += 1;
-      session.capturePerf.seekMs += seekMs;
-      session.capturePerf.beforeCaptureMs += beforeCaptureMs;
-      {
-        const boundaryMs = Date.now() - startTime;
-        session.capturePerf.totalMs += boundaryMs;
-        session.capturePerf.frameMs.push(boundaryMs);
-      }
-      const boundaryResult = Promise.resolve(buffer);
-      if (session.staticFrames) {
-        session.lastEncodeResult = boundaryResult;
-        session.lastEncodeResultFrame = frameIndex;
-      }
-      return { encodeResult: boundaryResult, captureTimeMs: Date.now() - startTime };
+      throw new DrawElementCaptureError(
+        frameIndex,
+        "boundary screenshot requested on an injected canvas page",
+      );
     }
 
     // Worker-encode is gated to the macOS GPU path (beginFrameTimeTicks === 0,
@@ -3764,26 +3893,16 @@ export async function captureFrameToBufferPipelined(
 
     return { encodeResult, captureTimeMs };
   } catch (captureError) {
-    // Per-frame `No cached paint record` or `canvas not initialized` (#3423): fall
-    // back to screenshot for THIS frame instead of aborting the render (clip-cut
-    // boundary / freshly-shown element / capture canvas not yet set up). The worker
-    // isn't involved for this frame; return a resolved encodeResult so the pipeline
-    // loop writes it like any other. See fast-capture-limitations.md.
-    if (isRecoverableDrawElementError(captureError)) {
-      session.deNcprFallbacks = (session.deNcprFallbacks ?? 0) + 1;
-      const reason = isCanvasNotInitializedError(captureError)
-        ? "drawElement canvas not initialized"
-        : "No cached paint record";
-      console.log(
-        `[engine] fast capture: frame ${frameIndex} — ${reason}; ` +
-          `screenshot fallback for this frame (see fast-capture-limitations.md)`,
-      );
-      const buffer = await pageScreenshotCapture(page, options);
-      return { encodeResult: Promise.resolve(buffer), captureTimeMs: Date.now() - startTime };
-    }
     // Mirror captureFrameCore: capture per-frame diagnostics (frame-error
     // PNG/HTML/JSON + console tail) before rethrowing so pipelined-path
-    // failures are debuggable like the serial path.
+    // failures are debuggable like the serial path. Runs BEFORE the
+    // recoverable-error wrapper below because the serial path's diagnostics
+    // sit in an outer catch that its own DrawElementCaptureError throw
+    // propagates through — ordering it after the wrapper would silently skip
+    // the bundle for exactly the NCPR/canvas failures worth debugging.
+    // Bounded: a recoverable error aborts the whole attempt, so this fires at
+    // most once per attempt. captureFrameErrorDiagnostics self-catches, so a
+    // dead page cannot mask the structural error the producer retries on.
     if (session.isInitialized) {
       await captureFrameErrorDiagnostics(
         session,
@@ -3791,6 +3910,14 @@ export async function captureFrameToBufferPipelined(
         time,
         captureError instanceof Error ? captureError : new Error(String(captureError)),
       );
+    }
+    // The viewport can contain the last injected bitmap, not the sought frame.
+    if (isRecoverableDrawElementError(captureError)) {
+      session.deNcprFallbacks = (session.deNcprFallbacks ?? 0) + 1;
+      const reason = isCanvasNotInitializedError(captureError)
+        ? "drawElement canvas not initialized"
+        : "No cached paint record";
+      throw new DrawElementCaptureError(frameIndex, reason, captureError);
     }
     throw captureError;
   }
@@ -3803,9 +3930,8 @@ export async function captureFrameToBufferPipelined(
  * drain time:
  *  - the static-dedup fast path returns session.lastEncodeResult, which by
  *    drain time can hold a frame several indices AHEAD of the suspect frame;
- *  - the per-frame recoverable-error screenshot fallback ("No cached paint
- *    record" or "canvas not initialized") captures the viewport — which may
- *    hold the LAST drawn drawElement frame, not this one.
+ *  - a screenshot of the injected page may hold the LAST drawn drawElement
+ *    frame, not this one. Capture failures therefore require a fresh page.
  * Any failure here throws; the caller treats that as verification failure and
  * falls back the whole render (correct, never wrong-frame).
  */
@@ -3837,11 +3963,9 @@ export async function recaptureDrawElementFrameForVerify(
  * handling depends on whether the failure is one of the recoverable
  * per-frame drawElement conditions (canvas-not-initialized / no-cached-paint-
  * record, #3423):
- *  - Recoverable: capture the remaining frames directly via screenshot,
- *    same as the per-frame paths' own fallback (avoids re-attempting a
- *    drawElement produce that the batch call just told us will fail again —
- *    review finding: audit this path explicitly rather than relying on the
- *    incidental retry-then-catch behavior below).
+ *  - Recoverable: reject the batch with DrawElementCaptureError so the producer
+ *    re-renders on a fresh screenshot page. The injected canvas is not a valid
+ *    screenshot fallback surface.
  *  - Anything else (unrecognized error): fall through to
  *    {@link captureFrameToBufferPipelined}, which re-attempts drawElement (so
  *    a genuinely transient, non-drawElement-specific failure still gets a
@@ -3869,6 +3993,10 @@ export async function captureFramesBatchPipelined(
     options.height,
     options.quality ?? 80,
   );
+
+  // A later batch failure abandons this prefix. Its asynchronous encodes can
+  // still reject while session cleanup shuts the worker down.
+  for (const result of encodeResults) void result.catch(() => {});
 
   const okCount = failedAt === null ? frameIndices.length : failedAt;
   const elapsed = Date.now() - startTime;
@@ -3902,34 +4030,8 @@ export async function captureFramesBatchPipelined(
       const reason = isCanvasNotInitializedError(error)
         ? "drawElement canvas not initialized"
         : "No cached paint record";
-      console.log(
-        `[engine] fast capture: batch produce failed at frame ` +
-          `${frameIndices[failedAt] ?? "?"} (${reason}); ` +
-          `screenshot fallback for ${frameIndices.length - failedAt} frame(s) ` +
-          `(see fast-capture-limitations.md)`,
-      );
-      for (let i = failedAt; i < frameIndices.length; i++) {
-        const frameIndex = frameIndices[i];
-        const time = times[i];
-        if (frameIndex === undefined || time === undefined) break;
-        session.deNcprFallbacks = (session.deNcprFallbacks ?? 0) + 1;
-        // Each remaining frame still needs its own seek/prepare — the batch
-        // produce call left the page composited for whichever frame it last
-        // attempted, not this one. Without this, every fallback screenshot in
-        // the loop captures the SAME (stale) frame instead of advancing.
-        // Deliberately reuse prepareFrameForCapture rather than routing
-        // through captureFrameToBufferPipelined here, since that would
-        // re-attempt produceDrawElementFrame — which the batch call already
-        // told us will fail again for these frames (see function doc above).
-        await prepareFrameForCapture(session, frameIndex, time);
-        const buffer = await pageScreenshotCapture(page, options);
-        const encodeResult = Promise.resolve(buffer);
-        if (session.staticFrames) {
-          session.lastEncodeResult = encodeResult;
-          session.lastEncodeResultFrame = frameIndex;
-        }
-        results.push({ frameIndex, encodeResult });
-      }
+      session.deNcprFallbacks = (session.deNcprFallbacks ?? 0) + 1;
+      throw new DrawElementCaptureError(frameIndices[failedAt] ?? failedAt, reason, error);
     } else {
       console.log(
         `[engine] fast capture: batch produce failed at frame ` +
@@ -4273,47 +4375,20 @@ export function percentileOf(samples: number[], p: number): number {
   return Math.round(sorted[idx] ?? 0);
 }
 
-/**
- * Fraction of captured frames above which a fast-capture render is treated as
- * "drawElement effectively didn't engage" rather than "recovered a handful of
- * edge-case frames" (see the cross-PR-seam warning in
- * {@link getCapturePerfSummary}). Not currently a hard gate — see that
- * function's comment for why — just the threshold for the loud diagnostic.
- */
+/** Threshold for surfacing paint-record/canvas failures in partial-session diagnostics. */
 const DE_FALLBACK_RATIO_WARN_THRESHOLD = 0.5;
 
 export function getCapturePerfSummary(session: CaptureSession): CapturePerfSummary {
   const frames = Math.max(1, session.capturePerf.frames);
   const ncprFallbacks = session.deNcprFallbacks ?? 0;
-  // Cross-PR seam (#3423 per-frame screenshot fallback vs #3429 artifact
-  // validation): #3429's artifact validation only checks that the render
-  // produced the right frame COUNT and duration — it has no visibility into
-  // HOW each frame was captured. If a composition is so incompatible with
-  // drawElement that most/all frames take the per-frame screenshot fallback
-  // added here, the render still reports "complete" with a correct frame
-  // count, even though drawElement effectively never engaged for it. That's
-  // not itself a correctness bug — screenshot capture is the platform's
-  // normal, well-tested baseline, so the SHIPPED PIXELS are fine — but a
-  // near-100% fallback ratio is a strong signal that fast-capture silently
-  // failed to engage for the whole render (e.g. a persistent canvas-injection
-  // problem) rather than recovering a handful of expected edge-case frames,
-  // and today nothing surfaces that distinction to telemetry or to a human.
-  //
-  // Deliberately NOT a circuit breaker: aborting/failing the render here
-  // would make a render that reliably succeeds via the well-tested screenshot
-  // path fail instead, which is a worse outcome than a slow-but-correct
-  // render. Whether artifact validation (or this session) should eventually
-  // gate on the ratio — and where that decision belongs — is tracked as an
-  // explicit follow-up: https://github.com/heygen-com/hyperframes/issues/3482
-  // ("Fast-capture: fallback-ratio guard for #3423 x #3429 seam"), rather
-  // than decided unilaterally in this review-response commit.
+  // These now reject capture and require a fresh screenshot page. Keep the
+  // counter for failed-session telemetry; it no longer represents usable
+  // per-frame screenshots from the injected canvas page.
   if (frames > 0 && ncprFallbacks / frames > DE_FALLBACK_RATIO_WARN_THRESHOLD) {
     const pct = Math.round((ncprFallbacks / frames) * 100);
     console.warn(
-      `[engine] fast capture: ${ncprFallbacks}/${frames} frame(s) (${pct}%) fell back to ` +
-        `screenshot capture (canvas-not-initialized / no-cached-paint-record) — ` +
-        `drawElement likely failed to engage for this render rather than recovering a few ` +
-        `edge-case frames; see fast-capture-limitations.md.`,
+      `[engine] fast capture: ${ncprFallbacks}/${frames} frame(s) (${pct}%) rejected ` +
+        `due to missing canvas/paint records; fresh screenshot capture required.`,
     );
   }
   return {
@@ -4355,5 +4430,6 @@ export function getCapturePerfSummary(session: CaptureSession): CapturePerfSumma
     deVerifyInitMs: session.deVerifyInitMs ?? 0,
     deBoundaryFrames: session.clipBoundaryFrames?.size ?? 0,
     deNcprFallbacks: ncprFallbacks,
+    deFrameTimeouts: session.deFrameTimeouts ?? 0,
   };
 }

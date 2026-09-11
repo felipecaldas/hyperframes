@@ -43,6 +43,9 @@ import {
 } from "../packages/producer/src/index.js";
 import { compileForRender } from "../packages/producer/src/services/htmlCompiler.js";
 import { resolveContainedCopies } from "./registry-target-paths.mjs";
+import { fetchHostedFiles } from "./catalog-hosted-files.js";
+import { withHostedDefaults } from "./registry-hosted-assets.ts";
+import type { RegistryItem } from "../packages/core/src/index.js";
 import { openOpaqueCapture } from "./preview-capture.js";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -131,6 +134,77 @@ function outputDir(kind: ItemKind): string {
 }
 
 /**
+ * Rewrite the composition's variable defaults from local names to CDN URLs.
+ *
+ * These compositions build `img.src` at run time out of the variable value, so
+ * there is no `src="…"` in the markup for the payload's asset scan to find.
+ * That is why an item shipping images was published with a copy of its entire
+ * directory: the only way to satisfy a path nobody can predict is to serve
+ * every file next to it. Absolute URLs need no directory at all — the payload's
+ * scan skips any `https:` reference — so 24 images per block stop being 24
+ * files per block in `docs/public/`.
+ *
+ * Only the entry composition is touched. Nothing else in the copied project
+ * declares variables, and rewriting a file the payload never reads would be a
+ * change with no reader.
+ */
+/** Downloading is the default: a caller that says nothing wants to render. */
+async function materializeHostedAssets(
+  projectDir: string,
+  mode: PrepareOptions["hostedAssets"],
+): Promise<void> {
+  if (mode === "cdn") return pointHostedAssetsAtCdn(projectDir);
+  await fetchHostedFiles(projectDir);
+}
+
+function pointHostedAssetsAtCdn(projectDir: string): void {
+  const manifestPath = join(projectDir, "registry-item.json");
+  if (!existsSync(manifestPath)) return;
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as RegistryItem;
+
+  const entryPath = compositionPathOf(projectDir, manifest);
+  if (entryPath === undefined) return;
+
+  const html = readFileSync(entryPath, "utf-8");
+  const rewritten = rewriteVariableDefaults(html, manifest);
+  if (rewritten !== html) writeFileSync(entryPath, rewritten, "utf-8");
+}
+
+/** The item's own composition file, when it is where the manifest says it is. */
+function compositionPathOf(projectDir: string, manifest: RegistryItem): string | undefined {
+  const entry = manifest.files?.find((file) => file.type === "hyperframes:composition");
+  if (entry === undefined) return undefined;
+  const entryPath = join(projectDir, entry.path);
+  return existsSync(entryPath) ? entryPath : undefined;
+}
+
+function rewriteVariableDefaults(html: string, manifest: RegistryItem): string {
+  return html.replace(
+    /(\sdata-composition-variables=')([^']*)(')/i,
+    (whole, open: string, encoded: string, close: string) => {
+      try {
+        const variables = JSON.parse(decodeHtml(encoded)) as { default?: unknown }[];
+        return `${open}${encodeHtml(JSON.stringify(withHostedDefaults(variables, manifest)))}${close}`;
+      } catch {
+        // A manifest whose attribute is not parseable JSON is a broken item, and
+        // it fails loudly a moment later when the runtime reads the same string.
+        // Rewriting nothing keeps this from being the error anyone sees first.
+        return whole;
+      }
+    },
+  );
+}
+
+/** The attribute is single-quoted, so only `&#39;` has to survive the round trip. */
+function decodeHtml(value: string): string {
+  return value.replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+}
+
+function encodeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/'/g, "&#39;");
+}
+
+/**
  * Preview the item in the same layout users get after installation: some
  * components reference assets by their registry target path rather than by the
  * flat source path stored beside the manifest.
@@ -176,6 +250,18 @@ export interface PrepareOptions {
    * the component centred with room around it.
    */
   uiFragment?: boolean;
+  /**
+   * How a `files[]` entry that declares `url` reaches the project.
+   *
+   * `"download"` writes the bytes in, which a frame render needs: it paints a
+   * real page and a missing file is a blank card.
+   *
+   * `"cdn"` leaves them out and rewrites the composition's variable defaults to
+   * the URLs instead. That is for the Catalog payload, which is fetched by a
+   * browser rather than rendered here — downloading would only put the bytes
+   * back in `docs/public/`, which is the repository again by another name.
+   */
+  hostedAssets?: "download" | "cdn";
 }
 
 export async function prepareProjectDir(
@@ -184,6 +270,7 @@ export async function prepareProjectDir(
 ): Promise<string> {
   const tmpDir = createCatalogPreviewTempDir(item.name);
   cpSync(item.sourceDir, tmpDir, { recursive: true });
+  await materializeHostedAssets(tmpDir, options.hostedAssets);
   mirrorRegistryTargets(tmpDir);
 
   // The HyperFrames producer navigates to index.html at the project root.

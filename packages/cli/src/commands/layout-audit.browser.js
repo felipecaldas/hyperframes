@@ -245,10 +245,8 @@
     return rects;
   }
 
-  function textRectFor(element, directOnly) {
-    const rects = textClientRects(element, directOnly);
+  function unionRects(rects) {
     if (rects.length === 0) return null;
-
     const union = rects.reduce(
       (acc, rect) => ({
         left: Math.min(acc.left, rect.left),
@@ -263,12 +261,43 @@
         bottom: Number.NEGATIVE_INFINITY,
       },
     );
-
     return toRect({
       ...union,
       width: union.right - union.left,
       height: union.bottom - union.top,
     });
+  }
+
+  function visibleTextClientRects(element, directOnly) {
+    // Range rects stay geometrically present outside an overflow clip. Reduce
+    // them in viewport coordinates so overlap measures only paintable text.
+    let rects = textClientRects(element, directOnly).map(toRect);
+    for (
+      let ancestor = element.parentElement;
+      ancestor && rects.length > 0;
+      ancestor = ancestor.parentElement
+    ) {
+      const style = getComputedStyle(ancestor);
+      const clipX = clipsOverflowValue(style.overflowX || style.overflow);
+      const clipY = clipsOverflowValue(style.overflowY || style.overflow);
+      if (!clipX && !clipY) continue;
+      const clip = toRect(ancestor.getBoundingClientRect());
+      rects = rects
+        .map((rect) => {
+          const left = clipX ? Math.max(rect.left, clip.left) : rect.left;
+          const right = clipX ? Math.min(rect.right, clip.right) : rect.right;
+          const top = clipY ? Math.max(rect.top, clip.top) : rect.top;
+          const bottom = clipY ? Math.min(rect.bottom, clip.bottom) : rect.bottom;
+          if (right - left <= 0.5 || bottom - top <= 0.5) return null;
+          return toRect({ left, right, top, bottom, width: right - left, height: bottom - top });
+        })
+        .filter(Boolean);
+    }
+    return rects;
+  }
+
+  function textRectFor(element, directOnly) {
+    return unionRects(textClientRects(element, directOnly));
   }
 
   function parsePx(value) {
@@ -317,9 +346,13 @@
     return hasBackground || hasImage || hasBorder || hasRadius;
   }
 
+  function clipsOverflowValue(value) {
+    return value && value !== "visible" && value !== "clip visible";
+  }
+
   function clipsOverflow(style) {
-    return [style.overflowX, style.overflowY, style.overflow].some(
-      (value) => value && value !== "visible" && value !== "clip visible",
+    return [style.overflowX, style.overflowY, style.overflow].some((value) =>
+      clipsOverflowValue(value),
     );
   }
 
@@ -594,8 +627,8 @@
     const blocks = [];
     for (const element of Array.from(root.querySelectorAll("*"))) {
       if (!isSolidTextBlock(element)) continue;
-      const rects = textClientRects(element, true);
-      const rect = textRectFor(element, true);
+      const rects = visibleTextClientRects(element, true);
+      const rect = unionRects(rects);
       if (rect) blocks.push({ element, rect, rects });
     }
     return blocks;
@@ -1300,7 +1333,7 @@
     const threshold = Math.max(32, Math.min(rootRect.width, rootRect.height) * 0.02);
     const MIN_CONNECTOR_CHORD_PX = 8;
     for (const svg of Array.from(root.querySelectorAll("svg"))) {
-      if (!isVisibleElement(svg) || hasAllowOverflowFlag(svg)) continue;
+      if (!isVisibleElement(svg)) continue;
       for (const path of Array.from(svg.querySelectorAll("path"))) {
         if (path.closest(CONNECTOR_SKIP_CONTAINERS)) continue;
         if (!isConnectorPath(svg, path)) continue;
@@ -1333,7 +1366,16 @@
         // Paste-into-`d` bug: both raw endpoints land on distinct anchors as screen pixels.
         const userStartKey = attachmentKey(user.start);
         const userEndKey = attachmentKey(user.end);
-        if (!userStartKey || !userEndKey || userStartKey === userEndKey) continue;
+        const pasteBug = Boolean(userStartKey && userEndKey && userStartKey !== userEndKey);
+        // Guessed marked shaft: both frames miss. Same-anchor grazes attach in user-space
+        // and must stay skipped. Name-only decorative flow/arrow paths stay skipped.
+        // 80px keeps short marker glyphs (chevrons, tips) out.
+        const markedMiss =
+          renderedChord >= 80 &&
+          !userStartKey &&
+          !userEndKey &&
+          (path.hasAttribute("marker-start") || path.hasAttribute("marker-end"));
+        if (!pasteBug && !markedMiss) continue;
         const gap = Math.round(
           Math.min(
             Math.min(...anchors.compact.map((a) => distanceToRect(rendered.start, a.rect))),
@@ -1346,7 +1388,113 @@
           time,
           selector: selectorFor(path),
           containerSelector: selectorFor(svg),
-          message: `Connector path endpoints render ${gap}px from the nearest anchorable element, but the path's user-space coordinates would attach if read as screen pixels — screen/viewport numbers were likely written into SVG \`d\` without inverting the CTM.`,
+          message: pasteBug
+            ? `Connector path endpoints render ${gap}px from the nearest anchorable element, but the path's user-space coordinates would attach if read as screen pixels — screen/viewport numbers were likely written into SVG \`d\` without inverting the CTM.`
+            : `Connector path endpoints render ${gap}px from the nearest anchorable element — a marked shaft that meets no node.`,
+          rect: toRect({
+            left: Math.min(rendered.start.x, rendered.end.x),
+            top: Math.min(rendered.start.y, rendered.end.y),
+            right: Math.max(rendered.start.x, rendered.end.x),
+            bottom: Math.max(rendered.start.y, rendered.end.y),
+            width: Math.abs(rendered.end.x - rendered.start.x),
+            height: Math.abs(rendered.end.y - rendered.start.y),
+          }),
+          fixHint: pasteBug
+            ? "Convert measured screen coordinates into the SVG's user space (subtract the SVG rect / invert getScreenCTM) before writing path `d`, and keep the SVG a direct child of the stage."
+            : "Measure the settled node boxes and write `d` in the SVG's user space (invert getScreenCTM), or grow a layout-owned shaft from the source node.",
+        });
+      }
+    }
+    return issues;
+  }
+
+  function shaftIsPainted(path) {
+    if (IGNORE_TAGS.has(path.tagName) || hasIgnoreFlag(path)) return false;
+    const style = getComputedStyle(path);
+    if (
+      style.display === "none" ||
+      style.visibility === "hidden" ||
+      style.visibility === "collapse"
+    ) {
+      return false;
+    }
+    return opacityChain(path) >= 0.2;
+  }
+
+  function shaftDashHidden(path) {
+    if (typeof path.getTotalLength !== "function") return false;
+    let total;
+    try {
+      total = path.getTotalLength();
+    } catch {
+      return false;
+    }
+    if (!Number.isFinite(total) || total <= 0) return false;
+    const style = getComputedStyle(path);
+    const offset = Number.parseFloat(style.strokeDashoffset || "0");
+    const dash = Number.parseFloat(String(style.strokeDasharray || "").split(/[\s,]+/)[0] || "0");
+    return offset >= total * 0.9 && dash >= total * 0.9;
+  }
+
+  function connectorEndpointCandidates(root, rootRect) {
+    const candidates = [];
+    const rootArea = rectArea(rootRect);
+    for (const element of Array.from(root.querySelectorAll("*"))) {
+      if (element.closest("svg") || IGNORE_TAGS.has(element.tagName) || hasIgnoreFlag(element))
+        continue;
+      const style = getComputedStyle(element);
+      const opaque = RASTER_TAGS.has(element.tagName) || hasOpaqueBackground(style);
+      if (!opaque && !textContentFor(element)) continue;
+      const rect = toRect(element.getBoundingClientRect());
+      const area = rectArea(rect);
+      if (area < 400 || area > rootArea * 0.15) continue;
+      candidates.push({ rect, element });
+    }
+    return candidates;
+  }
+
+  function connectorOrphanIssues(root, rootRect, time) {
+    const issues = [];
+    let candidates = null;
+    const threshold = Math.max(32, Math.min(rootRect.width, rootRect.height) * 0.02);
+    for (const svg of Array.from(root.querySelectorAll("svg"))) {
+      if (!isVisibleElement(svg)) continue;
+      for (const path of Array.from(svg.querySelectorAll("path"))) {
+        if (path.closest(CONNECTOR_SKIP_CONTAINERS)) continue;
+        if (!isConnectorPath(svg, path)) continue;
+        if (!shaftIsPainted(path) || shaftDashHidden(path)) continue;
+        const user = pathUserEndpoints(path);
+        const rendered = pathScreenEndpoints(svg, path, user);
+        if (!user || !rendered) continue;
+        const renderedChord = Math.hypot(
+          rendered.end.x - rendered.start.x,
+          rendered.end.y - rendered.start.y,
+        );
+        if (renderedChord < 80) continue;
+        if (candidates === null) candidates = connectorEndpointCandidates(root, rootRect);
+        const dark = [];
+        for (const point of [rendered.start, rendered.end]) {
+          let best = null;
+          let attached = false;
+          for (const candidate of candidates) {
+            const gap = distanceToRect(point, candidate.rect);
+            if (gap > threshold) continue;
+            if (isVisibleElement(candidate.element)) {
+              attached = true;
+              break;
+            }
+            if (best === null || gap < best.gap) best = { gap, candidate };
+          }
+          if (!attached && best !== null) dark.push(best.candidate);
+        }
+        if (dark.length === 0) continue;
+        issues.push({
+          code: "connector_orphan",
+          severity: "warning",
+          time,
+          selector: selectorFor(path),
+          containerSelector: selectorFor(svg),
+          message: `Connector shaft is visible while ${dark.length === 2 ? "both endpoints are" : `its endpoint ${selectorFor(dark[0].element)} is`} not on stage.`,
           rect: toRect({
             left: Math.min(rendered.start.x, rendered.end.x),
             top: Math.min(rendered.start.y, rendered.end.y),
@@ -1356,7 +1504,7 @@
             height: Math.abs(rendered.end.y - rendered.start.y),
           }),
           fixHint:
-            "Convert measured screen coordinates into the SVG's user space (subtract the SVG rect / invert getScreenCTM) before writing path `d`, and keep the SVG a direct child of the stage.",
+            "Show the shaft only after both ends are on, and hide it with the earlier exit. Do not give the line its own clock.",
         });
       }
     }
@@ -1467,6 +1615,7 @@
     issues.push(...escaped.issues);
     issues.push(...panelOutOfCanvasIssues(root, rootRect, time, tolerance, escaped.flagged));
     issues.push(...connectorDetachmentIssues(root, rootRect, time));
+    issues.push(...connectorOrphanIssues(root, rootRect, time));
     return issues;
   };
 
@@ -1540,7 +1689,13 @@
         axes && axes !== "normal" ? axes : ""
       }`;
     });
-    for (const media of root.querySelectorAll("canvas, video")) {
+    // img shares the same pixel-only-motion blind spot as canvas/video: an
+    // equal-size, equal-position opaque src/visibility swap moves no
+    // geometry and no opacity. mediaPixelHash already handles it generically
+    // (drawImage accepts any CanvasImageSource; width/height fall back to
+    // rect.width/height same as canvas/video), so only the element selector
+    // needed widening.
+    for (const media of root.querySelectorAll("canvas, video, img")) {
       if (!isVisibleElement(media)) continue;
       parts.push(`p:${mediaPixelHash(media)}`);
     }

@@ -1,6 +1,8 @@
 import type { LintContext, HyperframeLintFinding, OpenTag } from "../context";
 import { readAttr, readDecodedAttr, stripJsComments, truncateSnippet, isMediaTag } from "../utils";
 import { validateColorGradingContract } from "@hyperframes/parsers/color-grading-contract";
+import { extractMediaSrcMutations } from "@hyperframes/parsers";
+import { parseHTML } from "linkedom";
 
 /**
  * Does the GSAP call that names `#id` also set `volume` in the same call?
@@ -130,6 +132,29 @@ function findMediaSrcKindMismatchFindings(ctx: LintContext): HyperframeLintFindi
         tag.name === "video"
           ? "Use <img> for a still, <audio> for sound, or point <video> at a video URL (mp4/webm/mov/…)."
           : "Use <video> for a video URL, <audio> for sound, or point <img> at a still (png/jpg/webp/…).",
+      snippet: truncateSnippet(tag.raw),
+    });
+  }
+  return findings;
+}
+
+function findNestedMediaStartBasisFindings(ctx: LintContext): HyperframeLintFinding[] {
+  if (!ctx.options.isSubComposition) return [];
+  const findings: HyperframeLintFinding[] = [];
+  for (const tag of ctx.tags) {
+    if (tag.name !== "video" && tag.name !== "audio") continue;
+    const rawStart = readAttr(tag.raw, "data-start");
+    const start = rawStart == null || rawStart.trim() === "" ? NaN : Number(rawStart);
+    if (!Number.isFinite(start) || start <= 0) continue;
+    const basis = readAttr(tag.raw, "data-hf-media-start-basis");
+    if (basis === "local" || basis === "global") continue;
+    const elementId = readAttr(tag.raw, "id") || undefined;
+    findings.push({
+      code: "nested_media_start_basis_ambiguous",
+      severity: "warning",
+      message: `<${tag.name}${elementId ? ` id="${elementId}"` : ""}> has data-start="${rawStart}" inside a sub-composition. Nested media timing is local to its composition by default; a nonzero value can be confused with a legacy root-global timestamp.`,
+      elementId,
+      fixHint: `Keep data-start="${rawStart}" if it is composition-local. If this is a legacy root-global timestamp, add data-hf-media-start-basis="global"; otherwise convert it to local time by subtracting the host start.`,
       snippet: truncateSnippet(tag.raw),
     });
   }
@@ -333,7 +358,48 @@ function findImperativeMediaControlFindings(ctx: LintContext): HyperframeLintFin
   return findings;
 }
 
+function findRuntimeMediaSrcMutationFindings(ctx: LintContext): HyperframeLintFinding[] {
+  const { document } = parseHTML(ctx.source);
+  const findings: HyperframeLintFinding[] = [];
+  for (const script of ctx.scripts) {
+    for (const mutation of extractMediaSrcMutations(script.content)) {
+      let targets: Element[];
+      try {
+        const id = /^#[A-Za-z_][\w-]*$/.test(mutation.selector) ? mutation.selector.slice(1) : null;
+        const idTarget = id ? document.getElementById(id) : null;
+        targets = id
+          ? idTarget
+            ? [idTarget]
+            : []
+          : [...document.querySelectorAll(mutation.selector)];
+      } catch {
+        continue;
+      }
+      const mediaTargets = targets
+        .map((element) => {
+          const name = element.tagName.toLowerCase();
+          if (name === "video" || name === "audio") return element;
+          return name === "source" ? element.closest("video, audio") : null;
+        })
+        .filter((element): element is Element => element !== null);
+      if (mediaTargets.length === 0) continue;
+      findings.push({
+        code: "media_runtime_src_mutation",
+        severity: "warning",
+        message: `Inline script mutates the source of existing managed media via ${mutation.operation === "src_assignment" ? ".src assignment" : "setAttribute('src', ...)"}. Browser probing can reconcile synchronous writes, but external or delayed writes can still diverge between preview and extraction.`,
+        elementId: mediaTargets[0]?.getAttribute("id") || undefined,
+        selector: mutation.selector,
+        fixHint:
+          "Author the final static src, or bind data-var-src to a declared image/string variable so the selected source is applied before media discovery and extraction.",
+        snippet: truncateSnippet(mutation.raw),
+      });
+    }
+  }
+  return findings;
+}
+
 export const mediaRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
+  findNestedMediaStartBasisFindings,
   // duplicate_media_id + duplicate_media_discovery_risk
   ({ tags }) => {
     const findings: HyperframeLintFinding[] = [];
@@ -738,6 +804,7 @@ export const mediaRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = 
 
   // imperative_media_control
   findImperativeMediaControlFindings,
+  findRuntimeMediaSrcMutationFindings,
 
   // audio_volume_double_automation
   findVolumeDoubleAutomationFindings,

@@ -119,7 +119,7 @@ vi.mock("../utils/skillsManifest.js", async (importOriginal) => {
 // the real $HOME. Stub it so these arg-shape tests never create symlinks in the
 // dev machine's agent dirs — the mirror has its own isolated-HOME unit tests.
 vi.mock("../utils/skillsMirror.js", () => ({
-  mirrorGlobalSkills: vi.fn(() => ({ source: null, mirrored: [] })),
+  mirrorGlobalSkills: vi.fn(() => ({ source: null, mirrored: [], skipped: [] })),
 }));
 
 // The reconcile commands drop the background nudge's cached verdict on

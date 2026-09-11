@@ -659,7 +659,7 @@ function addTraceSelectors(selectors: Set<string>, cmp: SurfacedComposition): vo
 
 function addTweenSelectors(selectors: Set<string>, cmp: SurfacedComposition): void {
   for (const t of cmp.tweens) {
-    if (t.method !== "set") selectors.add(t.target);
+    if (t.method !== "set" && t.target !== "__unresolved__") selectors.add(t.target);
   }
 }
 
@@ -701,7 +701,7 @@ function onionShotGuardError(
   // The rendered onion (--ghost) screenshots the whole painted stage, so it does
   // not need an animated DOM element to sample — only the marker onion does.
   if (requests.length === 0 && !ghost)
-    return "--shot: no animated element to sample for the selection.";
+    return "--shot: no statically resolved animated element to sample for the selection. Use a direct DOM selector or --ghost for runtime-only targets.";
   return null;
 }
 
@@ -923,7 +923,7 @@ function createKeyframesCommand(options: Partial<KeyframesCommandOptions> = {}) 
       layout: {
         type: "string",
         description:
-          "--shot layout: 'path' (ghosts at real positions + path, default) or 'strip' (filmstrip by time — for in-place/overlapping motion).",
+          "--shot layout: 'path' (ghosts at real positions + path, default) or 'strip' (for in-place/overlapping motion). 'strip' captures a real per-time pixel filmstrip only when --selector targets an SVG element; any other selector (e.g. a DOM/sub-composition host) instead gets one live frame plus vector position markers.",
       },
       from: { type: "string", description: "--shot: sample only from this time (seconds)." },
       to: { type: "string", description: "--shot: sample only up to this time (seconds)." },

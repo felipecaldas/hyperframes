@@ -14,6 +14,7 @@ export * from "./compositionContract.js";
 // browser-safe.
 export { decodeUrlPathVariants } from "./utils/urlPath.js";
 export { scanVariableUsage, type VariableUsageScan } from "./variableUsage.js";
+export { extractMediaSrcMutations, type MediaSrcMutation } from "./mediaSrcMutation.js";
 export {
   FONT_ALIAS_MAP,
   FONT_ALIAS_KEYS,

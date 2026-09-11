@@ -1,3 +1,4 @@
+import { isValidProjectId } from "./src/utils/projectRouting";
 // Vite adapter that wires the shared Studio API to the local filesystem and build tools.
 
 import {
@@ -10,7 +11,7 @@ import {
   copyFileSync,
   unlinkSync,
 } from "node:fs";
-import { join, relative, resolve, isAbsolute, dirname } from "node:path";
+import { join, relative, resolve, isAbsolute, dirname, sep } from "node:path";
 import type { ViteDevServer } from "vite";
 import {
   type ResolvedProject,
@@ -30,7 +31,9 @@ function isPathWithin(parentDir: string, childPath: string): boolean {
   const childRelativePath = relative(resolve(parentDir), resolve(childPath));
   return (
     childRelativePath === "" ||
-    (!childRelativePath.startsWith("..") && !isAbsolute(childRelativePath))
+    (childRelativePath !== ".." &&
+      !childRelativePath.startsWith(`..${sep}`) &&
+      !isAbsolute(childRelativePath))
   );
 }
 
@@ -155,7 +158,13 @@ export function createViteAdapter(
   };
 
   return {
+    // Callers that only resolve projects pass a bare server object, so the
+    // config may not be there at all. An absent config is not a loopback host:
+    // say off rather than reading a default off thin air. A real dev server
+    // with no explicit host still says on, because Vite's own default is
+    // localhost and `undefined` stays in the allow list below.
     agentBridgeEnabled:
+      server.config?.server !== undefined &&
       server.config.server.host !== true &&
       [undefined, "localhost", "127.0.0.1", "::1"].includes(server.config.server.host),
 
@@ -187,6 +196,7 @@ export function createViteAdapter(
       return readdirSync(dataDir, { withFileTypes: true })
         .filter(
           (d) =>
+            isValidProjectId(d.name) &&
             (d.isDirectory() || d.isSymbolicLink()) &&
             (existsSync(join(dataDir, d.name, "index.html")) ||
               existsSync(join(dataDir, d.name, `${d.name}.html`))),
@@ -205,15 +215,19 @@ export function createViteAdapter(
 
     // fallow-ignore-next-line complexity
     resolveProject(id: string) {
-      let projectDir = join(dataDir, id);
+      if (!isValidProjectId(id)) return null;
+      let projectDir = resolve(dataDir, id);
+      if (!isPathWithin(dataDir, projectDir)) return null;
       if (!existsSync(projectDir)) {
         const sessionsDir = resolve(dataDir, "../sessions");
-        const sessionFile = join(sessionsDir, `${id}.json`);
+        const sessionFile = resolve(sessionsDir, `${id}.json`);
+        if (!isPathWithin(sessionsDir, sessionFile)) return null;
         if (existsSync(sessionFile)) {
           try {
             const session = JSON.parse(readFileSync(sessionFile, "utf-8"));
-            if (session.projectId) {
-              projectDir = join(dataDir, session.projectId);
+            if (typeof session.projectId === "string" && isValidProjectId(session.projectId)) {
+              projectDir = resolve(dataDir, session.projectId);
+              if (!isPathWithin(dataDir, projectDir)) return null;
               if (existsSync(projectDir)) {
                 return {
                   id: session.projectId,

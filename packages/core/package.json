@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/core",
-  "version": "0.8.31",
+  "version": "0.8.35",
   "description": "",
   "repository": {
     "type": "git",
@@ -63,6 +63,12 @@
       "node": "./dist/compositionContract.js",
       "import": "./src/compositionContract.ts",
       "types": "./src/compositionContract.ts"
+    },
+    "./media-timing": {
+      "bun": "./src/mediaTiming.ts",
+      "node": "./dist/mediaTiming.js",
+      "import": "./src/mediaTiming.ts",
+      "types": "./src/mediaTiming.ts"
     },
     "./editing": {
       "bun": "./src/editing/affordances.ts",
@@ -424,6 +430,10 @@
         "import": "./dist/compositionContract.js",
         "types": "./dist/compositionContract.d.ts"
       },
+      "./media-timing": {
+        "import": "./dist/mediaTiming.js",
+        "types": "./dist/mediaTiming.d.ts"
+      },
       "./editing": {
         "import": "./dist/editing/affordances.js",
         "types": "./dist/editing/affordances.d.ts"
@@ -686,11 +696,11 @@
   "devDependencies": {
     "@types/jsdom": "^28.0.0",
     "@types/node": "^25.0.10",
-    "@vitest/coverage-v8": "^3.2.4",
+    "@vitest/coverage-v8": "^4.1.11",
     "jsdom": "^29.0.0",
     "tsx": "^4.21.0",
     "typescript": "^5.0.0",
-    "vitest": "^3.2.4"
+    "vitest": "^4.1.11"
   },
   "optionalDependencies": {
     "esbuild": "^0.25.12"

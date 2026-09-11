@@ -1,7 +1,7 @@
 /**
  * Per-clip render-time frame-coverage accounting + threshold fail-loud gate.
  *
- * Sibling to #2474's `hasRuntimeInsertedMedia` probe: that PR guarantees the
+ * Sibling to #2474's `hasRuntimeMediaChanges` probe: that PR guarantees the
  * DISCOVERY of runtime-inserted media (so the browser probe launches and
  * reconciles element identity). This module owns the DELIVERY side —
  * for each authored/discovered video clip on the timeline, did the
@@ -258,7 +258,7 @@ export function assertVideoFrameCoverage(
  * composition is queryable in telemetry (the ts=1784144554 field signal
  * shape). Runtime `syncTimedElementVisibility` iterates the same set at
  * render time; counting statically here is a coarse proxy — dynamic
- * script-inserted `[data-start]` divs land in `hasRuntimeInsertedMedia`'s
+ * script-inserted `[data-start]` divs land in `hasRuntimeMediaChanges`'s
  * probe path (PR #2474), not this static scan.
  */
 export function countAuthoredTimedClips(html: string): number {

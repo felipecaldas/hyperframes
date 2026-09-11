@@ -10,6 +10,7 @@
  * recursively extracting nested media from sub-sub-compositions.
  */
 
+import { createHash } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync, readFileSync } from "fs";
 import { join, dirname, resolve, basename, relative } from "path";
 import { parseHTML } from "linkedom";
@@ -38,6 +39,7 @@ import {
   type BundledHostCompositionIdentity,
   buildVariablesByCompScript,
   inlineSubCompositions as inlineSubCompositionsShared,
+  ensureExternalScriptTag,
   prepareFlattenedInnerRoot,
   emitRootCompositionVariableStyles,
   readDeclaredDefaults,
@@ -1061,19 +1063,9 @@ function inlineSubCompositions(
   // Inject external CDN scripts before inline scripts so plugins (e.g.
   // TextPlugin, ScrollTrigger) are registered before composition code runs.
   // Deduplicate against scripts already present in the document.
-  if (result.externalScriptSrcs.length && body) {
-    const existingScriptSrcs = new Set(
-      Array.from(document.querySelectorAll("script[src]")).map((el: Element) =>
-        (el.getAttribute("src") || "").trim(),
-      ),
-    );
-    for (const src of result.externalScriptSrcs) {
-      if (!existingScriptSrcs.has(src)) {
-        const scriptEl = document.createElement("script");
-        scriptEl.setAttribute("src", src);
-        body.appendChild(scriptEl);
-        existingScriptSrcs.add(src);
-      }
+  if (body) {
+    for (const item of result.scriptItems) {
+      if (item.kind === "external") ensureExternalScriptTag(document, item.src, item);
     }
   }
 
@@ -1161,6 +1153,27 @@ function injectTextRenderingRule(html: string): string {
   return document.toString();
 }
 
+class ScriptIntegrityError extends Error {}
+
+/** Match SRI's strongest supported digest before decoding or rewriting script bytes. */
+function matchesScriptIntegrity(bytes: Uint8Array, metadata: string): boolean {
+  const hashes = [
+    ...metadata.matchAll(
+      /(?:^|[\t\n\f\r ])(sha256|sha384|sha512)-([A-Za-z0-9+/_-]+={0,2})(?:\?[\x21-\x7e]*)?(?=$|[\t\n\f\r ])/gi,
+    ),
+  ];
+  const strongest = ["sha512", "sha384", "sha256"].find((alg) =>
+    hashes.some((hash) => hash[1]?.toLowerCase() === alg),
+  );
+  // Browsers ignore metadata containing no supported, syntactically valid hash.
+  if (!strongest) return true;
+  const actual = createHash(strongest).update(bytes).digest();
+  return hashes.some(
+    (hash) =>
+      hash[1]?.toLowerCase() === strongest && actual.equals(Buffer.from(hash[2]!, "base64")),
+  );
+}
+
 /**
  * Download external CDN scripts and inline them into the HTML so rendering
  * works without network access (Docker, CI, restricted environments).
@@ -1182,12 +1195,16 @@ export async function inlineExternalScripts(html: string): Promise<string> {
   if (externalScripts.length === 0) return html;
 
   const downloads = await Promise.allSettled(
-    externalScripts.map(async ({ src }) => {
+    externalScripts.map(async ({ el, src }) => {
       const response = await fetch(src, {
         signal: AbortSignal.timeout(15_000),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status} for ${src}`);
-      return { src, text: await response.text() };
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (!matchesScriptIntegrity(bytes, el.getAttribute("integrity") || "")) {
+        throw new ScriptIntegrityError(`Subresource integrity mismatch for ${src}`);
+      }
+      return { src, text: new TextDecoder().decode(bytes) };
     }),
   );
 
@@ -1208,6 +1225,9 @@ export async function inlineExternalScripts(html: string): Promise<string> {
       el.replaceWith(inlineScript);
       defaultLogger.info(`[Compiler] Inlined CDN script: ${src}`);
     } else {
+      // A verified mismatch must never fall back to an executable external tag:
+      // browser support for integrity metadata (including casing) can differ.
+      if (download.reason instanceof ScriptIntegrityError) throw download.reason;
       defaultLogger.warn(
         `[Compiler] WARNING: Failed to download CDN script: ${src} — ${download.reason}. ` +
           `The render may fail if this script is required (e.g. GSAP). ` +

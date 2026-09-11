@@ -13,6 +13,7 @@
  *      exposes an async `writeFrame(buffer)` + `close()` API.
  */
 
+import { jpegInputError } from "../utils/jpegInput.js";
 import { spawn, type ChildProcess } from "child_process";
 import { once } from "events";
 import { trackChildProcess } from "../utils/processTracker.js";
@@ -27,6 +28,7 @@ import {
   type GpuEncoder,
   getCachedGpuEncoder,
   getGpuEncoderName,
+  buildVideoToolboxRateControlArgs,
   mapPresetForGpuEncoder,
 } from "../utils/gpuEncoder.js";
 import { formatFfmpegError, isExternalFfmpegInterruption } from "../utils/runFfmpeg.js";
@@ -34,7 +36,7 @@ import { getFfmpegBinary } from "../utils/ffmpegBinaries.js";
 import { getHdrEncoderColorParams } from "../utils/hdr.js";
 import { withEvenDimensionPad } from "../utils/evenDimensions.js";
 import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
-import { fpsToFfmpegArg, type Fps } from "@hyperframes/core";
+import { fpsToFfmpegArg, fpsToNumber, type Fps } from "@hyperframes/core";
 import { appendVp9CpuUsedArg } from "./vp9Options.js";
 import { appendRenderProvenanceArgs } from "../utils/renderProvenance.js";
 
@@ -270,12 +272,15 @@ export function buildStreamingArgs(
           else args.push("-cq", String(quality));
           break;
         case "videotoolbox":
-          if (bitrate) args.push("-b:v", bitrate);
-          else {
-            const vtQuality = Math.max(0, Math.min(100, 100 - quality * 2));
-            args.push("-q:v", String(vtQuality));
-          }
-          args.push("-allow_sw", "1");
+          args.push(
+            ...buildVideoToolboxRateControlArgs({
+              bitrate,
+              width: options.width,
+              height: options.height,
+              fps: fpsToNumber(fps),
+              quality,
+            }),
+          );
           break;
         case "vaapi":
           args.unshift("-vaapi_device", "/dev/dri/renderD128");
@@ -533,6 +538,7 @@ export async function spawnStreamingEncoder(
     }
   };
 
+  let inputFrameIndex = 0;
   const encoder: StreamingEncoder = {
     writeFrame: async (buffer: Buffer): Promise<boolean> => {
       const stdin = ffmpeg.stdin;
@@ -553,7 +559,12 @@ export async function spawnStreamingEncoder(
       // so without this copy the pipe would read partially-overwritten data
       // and flicker.
       const copy = Buffer.from(buffer);
+      if (!options.rawInputFormat && (options.imageFormat ?? "jpeg") === "jpeg") {
+        const error = jpegInputError(copy);
+        if (error) throw new Error(`Invalid JPEG input at frame ${inputFrameIndex}: ${error}`);
+      }
       const accepted = stdin.write(copy);
+      inputFrameIndex++;
       // Reset inactivity timer immediately ONLY on `accepted === true`. `true`
       // means the write went through to the kernel pipe without buffering in
       // Node — proof FFmpeg is actually consuming. `false` means Node's writable

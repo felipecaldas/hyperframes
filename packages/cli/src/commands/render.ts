@@ -77,7 +77,11 @@ import { isDevMode } from "../utils/env.js";
 import { buildDockerRunArgs, resolveDockerPlatform } from "../utils/dockerRunArgs.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { runEnvironmentChecks } from "../browser/preflight.js";
-import { detectH264EncoderMode } from "../browser/ffmpeg.js";
+import {
+  detectH264EncoderMode,
+  getFFmpegInstallHint,
+  H264EncoderUnavailableError,
+} from "../browser/ffmpeg.js";
 import { chromeLaunchRemediation } from "../browser/linuxDeps.js";
 import { macosOldChromeCrashRemediation } from "../browser/macosOldChromeCrash.js";
 import { windowsChromeCrashRemediation } from "../browser/windowsCrash.js";
@@ -138,7 +142,8 @@ export default defineCommand({
     quality: {
       type: "string",
       alias: "q",
-      description: "Quality: draft, standard, high",
+      description:
+        "Quality: draft, standard, high. MOV always uses the fixed alpha-preserving ProRes 4444 profile.",
       default: "standard",
     },
     skill: {
@@ -191,11 +196,13 @@ export default defineCommand({
     },
     crf: {
       type: "string",
-      description: "Override encoder CRF. Mutually exclusive with --video-bitrate.",
+      description:
+        "Override MP4/WebM encoder CRF. Mutually exclusive with --video-bitrate; unsupported for MOV.",
     },
     "video-bitrate": {
       type: "string",
-      description: "Target video bitrate such as 10M. Mutually exclusive with --crf.",
+      description:
+        "Target MP4/WebM video bitrate such as 10M. Mutually exclusive with --crf; unsupported for MOV.",
     },
     "vp9-cpu-used": {
       type: "string",
@@ -838,6 +845,16 @@ export async function renderLocal(
     try {
       encoderMode = detectH264EncoderMode(preflight.ffmpegPath, false);
     } catch (error) {
+      // HDR MP4 uses HEVC; auto mode cannot resolve the codec until sources
+      // have been inspected. Only forced SDR is definitely H.264 here.
+      if (error instanceof H264EncoderUnavailableError && options.hdrMode === "force-sdr") {
+        errorBox(
+          "MP4 H.264 encoder unavailable",
+          error.message,
+          `Install an FFmpeg build with libx264 support (${getFFmpegInstallHint()}), or render WebM instead: hyperframes render --format webm --output output.webm`,
+        );
+        failCommand();
+      }
       // Capability probing is advisory. Let the real encode surface the
       // authoritative FFmpeg error instead of failing here with a bare stack.
       if (!options.quiet) {
@@ -1550,6 +1567,7 @@ function trackRenderMetrics(
     deBlankRecaptures: perf?.drawElement?.blankRecaptures,
     deBoundaryFrames: perf?.drawElement?.boundaryFrames,
     deNcprFallbacks: perf?.drawElement?.ncprFallbacks,
+    deFrameTimeouts: perf?.drawElement?.frameTimeouts,
     compositionDurationMs,
     compositionWidth: perf?.resolution.width,
     compositionHeight: perf?.resolution.height,

@@ -86,6 +86,25 @@ export interface ParallelProgress {
   capturedFrames: number;
   activeWorkers: number;
   workerProgress: Map<number, number>;
+  /** Latest lifecycle transition; absent on ordinary completed-frame updates. */
+  latestWorkerPhase?: ParallelWorkerPhaseDiagnostic;
+}
+
+export type ParallelWorkerPhase =
+  | "browser_launch"
+  | "browser_probe"
+  | "session_init"
+  | "frame_capture"
+  | "frame_encode";
+
+export interface ParallelWorkerPhaseDiagnostic {
+  workerId: number;
+  phase: ParallelWorkerPhase;
+  frameIndex?: number;
+  browserExecutable: string;
+  browserVersion: string;
+  canvasDrawElement: boolean | "unknown";
+  gpuBackend: string;
 }
 
 export interface WorkerSizingConfig extends Partial<
@@ -479,23 +498,58 @@ export function shouldVerifyWorkerGpu(workerId: number, config?: Partial<EngineC
  * circuit breaker (which only runs after `executeRenderJob` settles) never
  * gets a chance to trip.
  */
-function raceAgainstAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-  if (!signal) return promise;
-  if (signal.aborted) return Promise.reject(new Error("Parallel worker cancelled"));
+export function withParallelWorkerDeadline<T>(
+  promise: Promise<T>,
+  diagnostic: ParallelWorkerPhaseDiagnostic,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (signal?.aborted) return Promise.reject(new Error("Parallel worker cancelled"));
   return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(new Error("Parallel worker cancelled"));
-    signal.addEventListener("abort", onAbort, { once: true });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(new Error("Parallel worker cancelled"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        cleanup();
+        const error = new Error(
+          `Parallel worker operation timeout exceeded after ${timeoutMs}ms: ` +
+            `worker=${diagnostic.workerId} phase=${diagnostic.phase} ` +
+            `frame=${diagnostic.frameIndex ?? "n/a"} ` +
+            `browser=${diagnostic.browserExecutable} version=${diagnostic.browserVersion} ` +
+            `CanvasDrawElement=${diagnostic.canvasDrawElement} gpu=${diagnostic.gpuBackend}`,
+        );
+        error.name = "ParallelWorkerPhaseTimeoutError";
+        reject(error);
+      }, timeoutMs);
+      timer.unref?.();
+    }
     promise.then(
       (value) => {
-        signal.removeEventListener("abort", onAbort);
+        cleanup();
         resolve(value);
       },
       (error) => {
-        signal.removeEventListener("abort", onAbort);
+        cleanup();
         reject(error);
       },
     );
   });
+}
+
+function resolveParallelWorkerTimeoutMs(enabled: boolean): number {
+  if (!enabled) return 0;
+  const raw = process.env.HF_DE_PARALLEL_PHASE_TIMEOUT_MS;
+  if (raw === "0") return 0;
+  const parsed = raw ? Number(raw) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 30_000;
 }
 
 // fallow-ignore-next-line complexity
@@ -508,10 +562,27 @@ async function captureFrameRange(
   onFrameBuffer:
     | ((frameIndex: number, buffer: Buffer, session: CaptureSession) => Promise<void>)
     | undefined,
+  phaseTimeoutMs: number,
+  diagnosticFor: (phase: ParallelWorkerPhase, frameIndex?: number) => ParallelWorkerPhaseDiagnostic,
+  onWorkerPhase: ((diagnostic: ParallelWorkerPhaseDiagnostic) => void) | undefined,
 ): Promise<number> {
   let framesCaptured = 0;
   const outputOffset = task.outputFrameOffset ?? 0;
   const stride = task.frameStride ?? 1;
+  const runCaptureOperation = <T>(
+    phase: ParallelWorkerPhase,
+    frameIndex: number,
+    operation: () => Promise<T>,
+  ): Promise<T> => {
+    const diagnostic = diagnosticFor(phase, frameIndex);
+    if (framesCaptured === 0) onWorkerPhase?.(diagnostic);
+    return withParallelWorkerDeadline(operation(), diagnostic, phaseTimeoutMs, signal);
+  };
+  const awaitEncode = (frameIndex: number, encodeResult: Promise<Buffer>): Promise<Buffer> => {
+    const diagnostic = diagnosticFor("frame_encode", frameIndex);
+    if (framesCaptured === 0) onWorkerPhase?.(diagnostic);
+    return withParallelWorkerDeadline(encodeResult, diagnostic, phaseTimeoutMs, signal);
+  };
   // Depth-2 pipelined drawElement produce (HF_DE_PARALLEL_STREAM spike): frame
   // k's in-page worker encode overlaps frame k+stride's produce phase — the
   // same shape as the sequential worker-encode loop. Only engaged when the
@@ -535,9 +606,8 @@ async function captureFrameRange(
       if (dbg && i < task.startFrame + dbgWin) {
         console.log(`[par:w${task.workerId}] +${Date.now() - dbgT0}ms produce ${i} start`);
       }
-      const { encodeResult } = await raceAgainstAbort(
+      const { encodeResult } = await runCaptureOperation("frame_capture", i, () =>
         captureFrameToBufferPipelined(session, i - outputOffset, time),
-        signal,
       );
       // Marks the promise "handled" for Node's unhandled-rejection detector
       // without affecting the real `await prev.encodeResult` below — if a
@@ -554,7 +624,7 @@ async function captureFrameRange(
             `[par:w${task.workerId}] +${Date.now() - dbgT0}ms drain ${prev.idx} await-encode`,
           );
         }
-        const buf = await prev.encodeResult;
+        const buf = await awaitEncode(prev.idx, prev.encodeResult);
         if (dbg && prev.idx < task.startFrame + dbgWin) {
           console.log(
             `[par:w${task.workerId}] +${Date.now() - dbgT0}ms drain ${prev.idx} encoded ${buf.length}B`,
@@ -570,7 +640,7 @@ async function captureFrameRange(
       prev = { idx: i, encodeResult };
     }
     if (prev) {
-      await onFrameBuffer(prev.idx, await prev.encodeResult, session);
+      await onFrameBuffer(prev.idx, await awaitEncode(prev.idx, prev.encodeResult), session);
       framesCaptured++;
       if (onFrameCaptured) onFrameCaptured(task.workerId, prev.idx);
     }
@@ -582,13 +652,14 @@ async function captureFrameRange(
     const fileFrameIdx = i - outputOffset;
 
     if (onFrameBuffer) {
-      const { buffer } = await raceAgainstAbort(
+      const { buffer } = await runCaptureOperation("frame_capture", i, () =>
         captureFrameToBuffer(session, fileFrameIdx, time),
-        signal,
       );
       await onFrameBuffer(i, buffer, session);
     } else {
-      await raceAgainstAbort(captureFrame(session, fileFrameIdx, time), signal);
+      await runCaptureOperation("frame_capture", i, () =>
+        captureFrame(session, fileFrameIdx, time),
+      );
     }
     framesCaptured++;
     if (onFrameCaptured) onFrameCaptured(task.workerId, i);
@@ -764,6 +835,7 @@ async function executeWorkerTask(
   config?: Partial<EngineConfig>,
   parallel?: boolean,
   onFailure?: (failure: CaptureFailure) => void,
+  onWorkerPhase?: (diagnostic: ParallelWorkerPhaseDiagnostic) => void,
 ): Promise<WorkerResult> {
   const startTime = Date.now();
   let framesCaptured = 0;
@@ -783,37 +855,76 @@ async function executeWorkerTask(
   const workerConfig: Partial<EngineConfig> | undefined = needsSeparateBrowsers
     ? { ...config, enableBrowserPool: false }
     : config;
+  const phaseTimeoutMs = resolveParallelWorkerTimeoutMs(
+    Boolean(parallel && onFrameBuffer && workerConfig?.useDrawElement),
+  );
+  let browserVersion = "unknown";
+  let canvasDrawElement: boolean | "unknown" = "unknown";
+  let gpuBackend = "unknown";
+  let browserExecutable = resolveHeadlessShellPath(workerConfig) ?? "system/default";
+  const diagnosticFor = (
+    phase: ParallelWorkerPhase,
+    frameIndex?: number,
+  ): ParallelWorkerPhaseDiagnostic => ({
+    workerId: task.workerId,
+    phase,
+    frameIndex,
+    browserExecutable,
+    browserVersion,
+    canvasDrawElement,
+    gpuBackend,
+  });
+  const runPhase = <T>(phase: ParallelWorkerPhase, operation: () => Promise<T>): Promise<T> => {
+    const diagnostic = diagnosticFor(phase);
+    onWorkerPhase?.(diagnostic);
+    return withParallelWorkerDeadline(operation(), diagnostic, phaseTimeoutMs, signal);
+  };
 
   try {
-    session = await createCaptureSession(
-      serverUrl,
-      task.outputDir,
-      captureOptions,
-      createBeforeCaptureHook(),
-      workerConfig,
+    session = await runPhase("browser_launch", () =>
+      createCaptureSession(
+        serverUrl,
+        task.outputDir,
+        captureOptions,
+        createBeforeCaptureHook(),
+        workerConfig,
+      ),
     );
+    const activeSession = session;
+    browserExecutable = activeSession.browser?.process?.()?.spawnfile || browserExecutable;
     logParDebug(() => `[par:w${task.workerId}] session created`);
-    // Worker-0-only SwiftShader assertion — see `shouldVerifyWorkerGpu` and #955.
-    if (shouldVerifyWorkerGpu(task.workerId, workerConfig)) {
-      await assertSwiftShader(session.page, readWebGlVendorInfoFromCanvas);
-    }
-    await initializeSession(session);
+    browserVersion = await runPhase(
+      "browser_probe",
+      async () => (await activeSession.browser?.version?.().catch(() => "unknown")) ?? "unknown",
+    );
+    await runPhase("session_init", async () => {
+      // Worker-0-only SwiftShader assertion — see `shouldVerifyWorkerGpu` and #955.
+      if (shouldVerifyWorkerGpu(task.workerId, workerConfig)) {
+        await assertSwiftShader(activeSession.page, readWebGlVendorInfoFromCanvas);
+      }
+      await initializeSession(activeSession);
+    });
+    canvasDrawElement = activeSession.captureMode === "drawelement";
+    gpuBackend = activeSession.gpuRenderer ?? "unknown";
     logParDebug(
       () =>
         `[par:w${task.workerId}] init done (mode=${session?.captureMode} workerEncode=${session?.workerEncodeEnabled === true})`,
     );
     framesCaptured = await captureFrameRange(
-      session,
+      activeSession,
       task,
       captureOptions,
       signal,
       onFrameCaptured,
       onFrameBuffer,
+      phaseTimeoutMs,
+      diagnosticFor,
+      onWorkerPhase,
     );
 
-    await verifyDiskDrawElementSamples(session, task, Boolean(onFrameBuffer));
+    await verifyDiskDrawElementSamples(activeSession, task, Boolean(onFrameBuffer));
 
-    perf = getCapturePerfSummary(session);
+    perf = getCapturePerfSummary(activeSession);
     return {
       workerId: task.workerId,
       framesCaptured,
@@ -893,6 +1004,7 @@ export async function executeParallelCapture(
     0,
   );
   const workerProgress = new Map<number, number>();
+  const workerPhases = new Map<number, ParallelWorkerPhaseDiagnostic>();
 
   for (const task of tasks) workerProgress.set(task.workerId, 0);
 
@@ -909,6 +1021,18 @@ export async function executeParallelCapture(
         workerProgress: new Map(workerProgress),
       });
     }
+  };
+  const onWorkerPhase = (diagnostic: ParallelWorkerPhaseDiagnostic) => {
+    workerPhases.set(diagnostic.workerId, diagnostic);
+    if (!onProgress) return;
+    const capturedFrames = Array.from(workerProgress.values()).reduce((a, b) => a + b, 0);
+    onProgress({
+      totalFrames,
+      capturedFrames,
+      activeWorkers: tasks.length,
+      workerProgress: new Map(workerProgress),
+      latestWorkerPhase: diagnostic,
+    });
   };
 
   const parallel = tasks.length > 1;
@@ -943,6 +1067,7 @@ export async function executeParallelCapture(
         config,
         parallel,
         onFailure,
+        onWorkerPhase,
       ),
     ),
   );

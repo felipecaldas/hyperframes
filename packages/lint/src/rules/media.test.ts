@@ -379,6 +379,62 @@ describe("media rules", () => {
     expect(finding).toBeUndefined();
   });
 
+  it("warns on raw src mutations targeting existing video and audio", async () => {
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080">
+    <video id="clip" src="video-a.mp4"></video>
+    <audio id="voice" src="audio-a.wav"></audio>
+  </div>
+  <script>
+    const clip = document.getElementById("clip");
+    clip.src = "video-b.mp4";
+    document.querySelector("#voice").setAttribute("src", "audio-b.wav");
+  </script>
+</body></html>`;
+
+    const result = await lintHyperframeHtml(html);
+    const findings = result.findings.filter(
+      (finding) => finding.code === "media_runtime_src_mutation",
+    );
+    expect(findings).toHaveLength(2);
+    expect(findings.map((finding) => finding.elementId).sort()).toEqual(["clip", "voice"]);
+    expect(findings.every((finding) => finding.fixHint?.includes("data-var-src"))).toBe(true);
+  });
+
+  it("does not flag img or script src mutations", async () => {
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080">
+    <img id="poster" src="a.png"><script id="loader"></script>
+  </div>
+  <script>
+    document.getElementById("poster").src = "b.png";
+    document.getElementById("loader").setAttribute("src", "loader-b.js");
+  </script>
+</body></html>`;
+
+    const result = await lintHyperframeHtml(html);
+    expect(
+      result.findings.find((finding) => finding.code === "media_runtime_src_mutation"),
+    ).toBeUndefined();
+  });
+
+  it("warns when a source child of existing media is mutated", async () => {
+    const html = `
+<html><body>
+  <div data-composition-id="c1" data-width="1920" data-height="1080">
+    <video id="clip"><source id="clip-source" src="video-a.mp4"></video>
+  </div>
+  <script>document.getElementById("clip-source").src = "video-b.mp4";</script>
+</body></html>`;
+
+    const result = await lintHyperframeHtml(html);
+    expect(
+      result.findings.find((finding) => finding.code === "media_runtime_src_mutation"),
+    ).toMatchObject({ severity: "warning", elementId: "clip" });
+  });
+
   it("does not flag <video> inside a sub-composition (runtime drives nested media)", async () => {
     // The runtime's global media sweep (querySelectorAll("video, audio")) drives
     // media at any nesting depth, and startResolver re-bases each nested clip's
@@ -408,6 +464,39 @@ describe("media rules", () => {
     const result = await lintHyperframeHtml(html);
     const finding = result.findings.find((f) => f.code === "media_in_subcomposition");
     expect(finding).toBeUndefined();
+  });
+
+  it("warns that an unmarked nonzero nested media start is local", async () => {
+    const html = `<template>
+  <div data-composition-id="scene" data-width="1920" data-height="1080">
+    <video id="clip" src="clip.mp4" data-start="2" data-duration="2" muted></video>
+  </div>
+</template>`;
+    const result = await lintHyperframeHtml(html, { isSubComposition: true });
+    const finding = result.findings.find(
+      (item) => item.code === "nested_media_start_basis_ambiguous",
+    );
+
+    expect(finding?.severity).toBe("warning");
+    expect(finding?.message).toContain("local to its composition");
+    expect(finding?.fixHint).toContain('data-hf-media-start-basis="global"');
+  });
+
+  it.each([
+    ['data-start="0"', "zero local start"],
+    ['data-start="2" data-hf-media-start-basis="local"', "explicit local start"],
+    ['data-start="2" data-hf-media-start-basis="global"', "explicit legacy-global start"],
+  ])("does not warn for %s (%s)", async (attrs) => {
+    const html = `<template>
+  <div data-composition-id="scene" data-width="1920" data-height="1080">
+    <audio id="clip" src="clip.wav" ${attrs} data-duration="2"></audio>
+  </div>
+</template>`;
+    const result = await lintHyperframeHtml(html, { isSubComposition: true });
+
+    expect(result.findings.some((item) => item.code === "nested_media_start_basis_ambiguous")).toBe(
+      false,
+    );
   });
 
   it("reports error for media with crossorigin (breaks preview when host omits CORS)", async () => {

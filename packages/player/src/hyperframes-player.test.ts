@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from "vitest";
 import { formatTime, formatSpeed, SPEED_PRESETS } from "./controls.js";
 
 // Install a stubbed contentDocument getter on the given iframe element. The
@@ -152,9 +152,9 @@ describe("HyperframesPlayer parent-frame media", () => {
       load: vi.fn(),
     };
 
-    vi.spyOn(globalThis, "Audio").mockImplementation(
-      () => mockAudio as unknown as HTMLAudioElement,
-    );
+    vi.spyOn(globalThis, "Audio").mockImplementation(function () {
+      return mockAudio as unknown as HTMLAudioElement;
+    });
 
     player = document.createElement("hyperframes-player") as PlayerElement;
   });
@@ -828,9 +828,9 @@ describe("HyperframesPlayer parent-proxy time-mirror coalescing", () => {
       pause: vi.fn(),
       load: vi.fn(),
     };
-    vi.spyOn(globalThis, "Audio").mockImplementation(
-      () => mockAudio as unknown as HTMLAudioElement,
-    );
+    vi.spyOn(globalThis, "Audio").mockImplementation(function () {
+      return mockAudio as unknown as HTMLAudioElement;
+    });
 
     const fresh = document.createElement("hyperframes-player") as PlayerInternal;
     fresh.setAttribute("audio-src", "https://cdn.example.com/narration.mp3");
@@ -1719,9 +1719,9 @@ describe("HyperframesPlayer volume and mute", () => {
       play: vi.fn().mockResolvedValue(undefined),
       pause: vi.fn(),
     };
-    vi.spyOn(globalThis, "Audio").mockImplementation(
-      () => mockAudio as unknown as HTMLAudioElement,
-    );
+    vi.spyOn(globalThis, "Audio").mockImplementation(function () {
+      return mockAudio as unknown as HTMLAudioElement;
+    });
 
     player = document.createElement("hyperframes-player") as typeof player;
   });
@@ -2029,7 +2029,7 @@ describe("HyperframesPlayer runtime ready handshake", () => {
 
   let player: PlayerInternal;
   let frameWindow: Window;
-  let postSpy: ReturnType<typeof vi.spyOn>;
+  let postSpy: MockInstance<typeof window.postMessage>;
 
   function readyMessage() {
     return new MessageEvent("message", {
@@ -2389,9 +2389,9 @@ describe("HyperframesPlayer playback rate", () => {
       play: vi.fn().mockResolvedValue(undefined),
       pause: vi.fn(),
     };
-    vi.spyOn(globalThis, "Audio").mockImplementation(
-      () => mockAudio as unknown as HTMLAudioElement,
-    );
+    vi.spyOn(globalThis, "Audio").mockImplementation(function () {
+      return mockAudio as unknown as HTMLAudioElement;
+    });
 
     player = document.createElement("hyperframes-player") as typeof player;
   });
@@ -2543,7 +2543,7 @@ describe("HyperframesPlayer retained runtime data", () => {
   }
 
   let player: RuntimeDataPlayer;
-  let postSpy: ReturnType<typeof vi.spyOn>;
+  let postSpy: MockInstance<typeof window.postMessage>;
 
   const readyMessage = () =>
     new MessageEvent("message", {

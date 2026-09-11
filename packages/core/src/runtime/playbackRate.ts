@@ -1,3 +1,5 @@
+import { isMediaElement } from "./domRealm";
+
 export function normalizePlaybackRate(raw: number): number {
   return Number.isFinite(raw) && raw > 0 ? Math.max(0.1, Math.min(5, raw)) : 1;
 }
@@ -12,7 +14,7 @@ export function readElementPlaybackRate(el: Pick<Element, "getAttribute">): numb
   const raw =
     Number.isFinite(authored) && authored > 0
       ? authored
-      : typeof HTMLMediaElement !== "undefined" && el instanceof HTMLMediaElement
+      : isMediaElement(el)
         ? el.defaultPlaybackRate
         : 1;
   return normalizePlaybackRate(raw);
@@ -37,6 +39,23 @@ export function resolveNaturalMediaTimelineDuration(
     readMediaStart(el),
     readElementPlaybackRate(el),
   );
+}
+
+/**
+ * How long a media element occupies the timeline: an explicit `data-duration`
+ * trim if authored, otherwise the natural source length adjusted for playback
+ * start and rate. `null` when the source has not reported a duration yet.
+ *
+ * Single owner for the media-window scan run by BOTH the runtime's duration
+ * floor and the clip manifest.
+ */
+export function resolveMediaElementDurationSeconds(
+  el: Pick<Element, "getAttribute"> & { duration: number },
+): number | null {
+  const declaredDuration = parseStrictFiniteTimingNumber(el.getAttribute("data-duration"));
+  if (declaredDuration != null && declaredDuration > 0) return declaredDuration;
+  if (Number.isFinite(el.duration)) return resolveNaturalMediaTimelineDuration(el, el.duration);
+  return null;
 }
 
 export function resolveNaturalMediaTimelineDurationFromValues(

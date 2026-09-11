@@ -437,9 +437,29 @@ describe("persistence-tiered severity (#U10)", () => {
       "escaped_container",
       "panel_out_of_canvas",
       "connector_detached",
+      "connector_orphan",
     ] as const) {
       const collapsed = collapseStaticLayoutIssues([{ ...issue(code, "warning"), time: 3 }], 9);
       expect(collapsed[0]).toMatchObject({ severity: "info", occurrences: 1 });
+    }
+  });
+
+  it("keeps id-less connector findings apart by geometry, so each stays a single sample", () => {
+    for (const code of ["connector_detached", "connector_orphan"] as const) {
+      const shaft = { ...issue(code, "warning"), selector: "svg path" };
+      const collapsed = collapseStaticLayoutIssues(
+        [
+          { ...shaft, time: 1, rect: { ...shaft.rect, left: 100, top: 100 } },
+          { ...shaft, time: 3, rect: { ...shaft.rect, left: 600, top: 300 } },
+          { ...shaft, time: 5, rect: { ...shaft.rect, left: 1200, top: 700 } },
+        ],
+        9,
+      );
+
+      expect(collapsed).toHaveLength(3);
+      for (const finding of collapsed) {
+        expect(finding).toMatchObject({ severity: "info", occurrences: 1 });
+      }
     }
   });
 

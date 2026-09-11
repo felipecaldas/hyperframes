@@ -1,6 +1,7 @@
 // fallow-ignore-file code-duplication
 import { describe, expect, it, mock, beforeAll } from "bun:test";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInThisContext } from "node:vm";
@@ -316,6 +317,49 @@ describe("inlineExternalScripts", () => {
       expect(result).toContain("/* inlined: https://cdn.example.com/gsap.min.js */");
       expect(result).toContain("var gsap = {};");
       expect(result).not.toContain('src="https://cdn.example.com/gsap.min.js"');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("verifies raw script bytes using the strongest supported SRI metadata", async () => {
+    // Include a BOM: decoding before hashing would incorrectly reject these bytes.
+    const bytes = Buffer.from("\ufeffwindow.integrityWitness = true;");
+    const digest = (algorithm: string, data = bytes) =>
+      `${algorithm}-${createHash(algorithm).update(data).digest("base64")}`;
+    const good384 = digest("sha384");
+    const bad384 = digest("sha384", Buffer.from("changed CDN bytes"));
+    const cases = [
+      { metadata: good384, accepted: true },
+      { metadata: good384.replace("sha384", "SHA384"), accepted: true },
+      { metadata: bad384.replace("sha384", "SHA384"), accepted: false },
+      { metadata: bad384.replace("sha384", "sHa384"), accepted: false },
+      { metadata: `${digest("sha256")} ${bad384.replace("sha384", "SHA384")}`, accepted: false },
+      { metadata: bad384, accepted: false },
+      { metadata: `${digest("sha256")} ${bad384}`, accepted: false },
+      { metadata: `${bad384} ${good384}`, accepted: true },
+      { metadata: `${good384} ${digest("sha512", Buffer.from("changed"))}`, accepted: false },
+      { metadata: `${bad384} ${digest("sha512")}`, accepted: true },
+      { metadata: `\t${good384}?reserved\n`, accepted: true },
+      { metadata: good384.replaceAll("+", "-").replaceAll("/", "_"), accepted: true },
+      { metadata: "sha384-YQ==", accepted: false },
+      { metadata: "sha1-unknown malformed", accepted: true },
+    ];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async () => new Response(bytes)) as any;
+    try {
+      for (const { metadata, accepted } of cases) {
+        const html = `<script src="https://cdn.example.com/script.js" integrity="${metadata}" crossorigin="anonymous"></script>`;
+        if (!accepted) {
+          await expect(inlineExternalScripts(html)).rejects.toThrow(
+            "Subresource integrity mismatch",
+          );
+          continue;
+        }
+        const result = await inlineExternalScripts(html);
+        expect(result).toContain("window.integrityWitness = true;");
+        expect(result).not.toContain('src="https://cdn.example.com/script.js"');
+      }
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -2958,5 +3002,34 @@ describe("STUDIO-5433 — ffprobe failure includes src URL for attribution", () 
     expect(redactTelemetryString("https://cdn.example.com/renders/clip.mp4?sig=abc123&exp=1")).toBe(
       "https://cdn.example.com/renders/clip.mp4?\u2026",
     );
+  });
+});
+
+describe("nested CDN integrity", () => {
+  it("verifies a nested pin before returning compiled HTML, including a duplicate root script", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-nested-sri-"));
+    const src = "https://cdn.example.com/pinned.js";
+    const bytes = "window.nestedIntegrityWitness = true;";
+    const integrity = `sha384-${createHash("sha384").update(bytes).digest("base64")}`;
+    writeFileSync(
+      join(dir, "index.html"),
+      `<html><head><script src="${src}"></script></head><body><div data-composition-id="root" data-width="320" data-height="180" data-duration="1"><div data-composition-id="child" data-composition-src="child.html"></div></div></body></html>`,
+    );
+    writeFileSync(
+      join(dir, "child.html"),
+      `<html><head><script src="${src}" integrity="${integrity}" crossorigin="anonymous"></script></head><body><div data-composition-id="child" data-width="320" data-height="180" data-duration="1">Child</div></body></html>`,
+    );
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = mock(async () => new Response(bytes)) as any;
+      await expect(compileForRender(dir, join(dir, "index.html"), dir)).resolves.toBeDefined();
+      globalThis.fetch = mock(async () => new Response("window.compromised = true;")) as any;
+      await expect(compileForRender(dir, join(dir, "index.html"), dir)).rejects.toThrow(
+        "Subresource integrity mismatch",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

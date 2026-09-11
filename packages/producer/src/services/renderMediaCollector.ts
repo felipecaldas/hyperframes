@@ -17,6 +17,12 @@
 import { parseHTML } from "linkedom";
 import { MEDIA_RENDER_ID_ATTR } from "@hyperframes/core";
 import {
+  MEDIA_START_BASIS_ATTR,
+  readMediaStartBasis,
+  resolveAbsoluteMediaStartSeconds,
+  type MediaStartBasis,
+} from "@hyperframes/core/media-timing";
+import {
   parseVideoElements,
   parseImageElements,
   parseAudioElements,
@@ -40,9 +46,11 @@ interface HostWindow {
   offset: number;
   /** Absolute time past which a descendant is outside its host, or Infinity. */
   limit: number;
+  /** Whether authored media time is composition-local or legacy root-global. */
+  basis: MediaStartBasis;
 }
 
-const ROOT_WINDOW: HostWindow = { offset: 0, limit: Infinity };
+const ROOT_WINDOW: HostWindow = { offset: 0, limit: Infinity, basis: "local" };
 
 function parseNumeric(value: string | null): number | null {
   if (value == null || value === "") return null;
@@ -80,7 +88,16 @@ function resolveHostWindow(
     if (hostEnd != null) limit = Math.min(limit, offset + hostEnd);
     offset += hostStart;
   }
-  return { offset, limit };
+  const tag = element.tagName.toLowerCase();
+  const basis =
+    tag === "video" || tag === "audio"
+      ? readMediaStartBasis(element.getAttribute(MEDIA_START_BASIS_ATTR))
+      : "local";
+  return {
+    offset,
+    limit,
+    basis,
+  };
 }
 
 /**
@@ -114,9 +131,17 @@ function toAbsoluteWindow(
   end: number,
   window: HostWindow,
 ): { start: number; end: number } | null {
-  const absoluteStart = start + window.offset;
+  const absoluteStart = resolveAbsoluteMediaStartSeconds({
+    authoredStart: start,
+    hostStart: window.offset,
+    basis: window.basis,
+  });
   if (absoluteStart >= window.limit) return null;
-  const absoluteEnd = end + window.offset;
+  const absoluteEnd = resolveAbsoluteMediaStartSeconds({
+    authoredStart: end,
+    hostStart: window.offset,
+    basis: window.basis,
+  });
   return { start: absoluteStart, end: Math.min(absoluteEnd, window.limit) };
 }
 

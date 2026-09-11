@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   calculateOptimalWorkers,
   computeWorkerSizing,
@@ -12,10 +12,39 @@ import {
   shouldDisableBrowserPoolForParallelWorker,
   shouldVerifyWorkerGpu,
   synthesizeSilentWorkerExitError,
+  withParallelWorkerDeadline,
   resolveParallelDeVerifySamples,
   type WorkerResult,
 } from "./parallelCoordinator.js";
 import type { EngineConfig } from "../config.js";
+
+describe("parallel worker phase deadline", () => {
+  it("fails a wedged operation with phase and browser diagnostics before the aggregate watchdog", async () => {
+    vi.useFakeTimers();
+    try {
+      const raced = withParallelWorkerDeadline(
+        new Promise<void>(() => {}),
+        {
+          workerId: 2,
+          phase: "frame_capture",
+          frameIndex: 0,
+          browserExecutable: "C:/Chrome/chrome.exe",
+          browserVersion: "Chrome/152.0.7977.30",
+          canvasDrawElement: true,
+          gpuBackend: "d3d11/nvidia",
+        },
+        30_000,
+      );
+      const assertion = expect(raced).rejects.toThrow(
+        /worker=2.*phase=frame_capture.*frame=0.*Chrome\/152.*CanvasDrawElement=true.*gpu=d3d11\/nvidia/,
+      );
+      await vi.advanceTimersByTimeAsync(30_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe("distributeFrames", () => {
   it("distributes frames evenly across workers", () => {

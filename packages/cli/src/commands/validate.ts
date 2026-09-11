@@ -79,10 +79,23 @@ export function shouldIgnoreRequestFailure(
   errorText: string | undefined,
   resourceType?: string,
 ): boolean {
+  if (errorText === "net::ERR_ABORTED" && isOptionalCaptionOverridesRequest(url)) return true;
   if (errorText !== "net::ERR_ABORTED") return false;
   if (resourceType === "media") return true;
   try {
     return MEDIA_EXTENSIONS.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
+
+export function shouldIgnoreHttpError(url: string, status: number): boolean {
+  return status === 404 && isOptionalCaptionOverridesRequest(url);
+}
+
+function isOptionalCaptionOverridesRequest(url: string): boolean {
+  try {
+    return new URL(url).pathname === "/caption-overrides.json";
   } catch {
     return false;
   }
@@ -477,6 +490,7 @@ async function validateInBrowser(
       if (res.status() >= 400) {
         const url = res.url();
         if (url.includes("favicon")) return;
+        if (shouldIgnoreHttpError(url, res.status())) return;
         const path = decodeURIComponent(new URL(url).pathname).replace(/^\//, "");
         errors.push({ level: "error", text: `${res.status()} loading ${path}`, url });
       }

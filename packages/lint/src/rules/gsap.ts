@@ -43,6 +43,7 @@ import {
   WINDOW_TIMELINE_ASSIGN_PATTERN,
   TIMELINE_REGISTRY_OBJECT_LITERAL_PATTERN,
 } from "../utils";
+import { collectAllDeclaredVariableIds } from "./composition";
 
 // ── GSAP-specific types ────────────────────────────────────────────────────
 
@@ -55,7 +56,8 @@ type GsapWindow = {
   propertyValues: Record<string, string | number>;
   fromPropertyValues?: Record<string, string | number>;
   overwriteAuto: boolean;
-  immediateRender: boolean;
+  /** Explicit immediateRender option; undefined keeps the GSAP method default. */
+  immediateRender?: boolean;
   method: string;
   /** True for an off-timeline `gsap.set(...)` (applied once at load). */
   global?: boolean;
@@ -150,6 +152,7 @@ async function extractGsapWindows(script: string): Promise<GsapWindow[]> {
     const cycleCount = infiniteRepeat ? 1 : repeat > 0 ? repeat + 1 : 1;
     const effectiveDuration =
       animation.method === "set" ? 0 : (animation.duration ?? 0) * cycleCount;
+    const immediateRender = unwrapRaw(animation.extras?.immediateRender);
     windows.push({
       targetSelector: animation.targetSelector,
       targetIdentity: animation.targetIdentity,
@@ -162,7 +165,8 @@ async function extractGsapWindows(script: string): Promise<GsapWindow[]> {
       propertyValues: animation.properties,
       fromPropertyValues: animation.fromProperties,
       overwriteAuto: unwrapRaw(animation.extras?.overwrite) === "auto",
-      immediateRender: unwrapRaw(animation.extras?.immediateRender) === "true",
+      immediateRender:
+        immediateRender === "true" ? true : immediateRender === "false" ? false : undefined,
       method: animation.method,
       global: animation.global,
       raw: synthesizeWindowRaw(parsed.timelineVar, animation),
@@ -190,6 +194,44 @@ function zeroValue(value: string | number | undefined): boolean {
   if (typeof value === "number") return value === 0;
   if (typeof value !== "string") return false;
   return Number(value.trim()) === 0;
+}
+
+function isGsapColorProperty(property: string): boolean {
+  const normalized = property.toLowerCase();
+  return (
+    !normalized.startsWith("--") &&
+    (normalized.endsWith("color") || normalized === "fill" || normalized === "stroke")
+  );
+}
+
+function collectStaticCssVariableDefinitions(
+  tags: readonly OpenTag[],
+  styles: LintContext["styles"],
+): Set<string> {
+  const definitions = new Set<string>();
+  const sources = [
+    ...styles.map((style) => style.content),
+    ...tags.map((tag) => readDecodedAttr(tag.raw, "style") ?? ""),
+  ];
+  const definitionPattern = /(?:^|[;{])\s*(--[A-Za-z0-9_-]+)\s*:/gm;
+  for (const source of sources) {
+    const withoutComments = source.replace(/\/\*[\s\S]*?\*\//g, " ");
+    for (const match of withoutComments.matchAll(definitionPattern)) {
+      if (match[1]) definitions.add(match[1]);
+    }
+  }
+  for (const id of collectAllDeclaredVariableIds(tags) ?? []) definitions.add(`--${id}`);
+  return definitions;
+}
+
+function cssVariableReferencesWithoutFallback(value: unknown): string[] {
+  const text = unwrapRaw(value);
+  if (typeof text !== "string") return [];
+  const variables: string[] = [];
+  for (const match of text.matchAll(/var\(\s*(--[A-Za-z0-9_-]+)\s*(,)?/g)) {
+    if (match[1] && !match[2]) variables.push(match[1]);
+  }
+  return variables;
 }
 
 function isHiddenGsapState(values: Record<string, string | number>): boolean {
@@ -1053,6 +1095,37 @@ function collectCssOpacityZeroSelectors(
 
 // fallow-ignore-next-line complexity
 export const gsapRules: LintRule<LintContext>[] = [
+  // gsap_undefined_css_variable
+  async ({ tags, styles, scripts }) => {
+    const definedVariables = collectStaticCssVariableDefinitions(tags, styles);
+    const findings: HyperframeLintFinding[] = [];
+    const reported = new Set<string>();
+    for (const script of scripts) {
+      for (const win of await cachedExtractGsapWindows(script.content)) {
+        for (const values of [win.fromPropertyValues, win.propertyValues]) {
+          for (const [property, value] of Object.entries(values ?? {})) {
+            if (!isGsapColorProperty(property)) continue;
+            for (const variable of cssVariableReferencesWithoutFallback(value)) {
+              if (definedVariables.has(variable)) continue;
+              const key = `${win.targetSelector}|${property}|${variable}`;
+              if (reported.has(key)) continue;
+              reported.add(key);
+              findings.push({
+                code: "gsap_undefined_css_variable",
+                severity: "warning",
+                message: `GSAP ${property} on "${win.targetSelector}" uses ${variable}, but no static CSS or composition-variable declaration defines it. The computed color may become invalid or transparent.`,
+                selector: win.targetSelector,
+                fixHint: `Define ${variable} in applicable CSS, declare "${variable.slice(2)}" in data-composition-variables, or add a var() fallback such as var(${variable}, #fff).`,
+                snippet: truncateSnippet(win.raw),
+              });
+            }
+          }
+        }
+      }
+    }
+    return findings;
+  },
+
   // overlapping_gsap_tweens + gsap_animates_clip_element
   // fallow-ignore-next-line complexity
   async ({ source, tags, scripts, styles, rootCompositionId }) => {
@@ -1122,6 +1195,53 @@ export const gsapRules: LintRule<LintContext>[] = [
             snippet: truncateSnippet(`${left.raw}\n${right.raw}`),
           });
         }
+      }
+
+      // gsap_repeated_fromto_without_baseline
+      const fromToWindowsBySelector = new Map<string, GsapWindow[]>();
+      for (const win of gsapWindows) {
+        if (win.method !== "fromTo" || win.immediateRender === false) continue;
+        if (win.targetSelector === UNRESOLVED_TARGET) continue;
+        const windows = fromToWindowsBySelector.get(win.targetSelector) ?? [];
+        windows.push(win);
+        fromToWindowsBySelector.set(win.targetSelector, windows);
+      }
+
+      const repeatedFromToGroups = [...fromToWindowsBySelector.values()].filter(
+        (windows) => windows.length >= 2,
+      );
+      for (const fromToWindows of repeatedFromToGroups) {
+        const firstFromTo = fromToWindows[0];
+        if (!firstFromTo) continue;
+        const selector = firstFromTo.targetSelector;
+        const firstFromToIndex = gsapWindows.indexOf(firstFromTo);
+        const firstFromToPosition = Math.min(...fromToWindows.map((win) => win.position));
+        const hasTimelineBaseline = gsapWindows
+          .slice(0, firstFromToIndex)
+          .some(
+            (candidate) =>
+              candidate.method === "set" &&
+              !candidate.global &&
+              candidate.targetSelector === selector &&
+              candidate.position <= firstFromToPosition,
+          );
+        if (hasTimelineBaseline) continue;
+
+        findings.push({
+          code: "gsap_repeated_fromto_without_baseline",
+          severity: "warning",
+          message:
+            `${fromToWindows.length} tl.fromTo() calls target "${selector}" with no stable baseline. ` +
+            `The last-authored fromTo "from" values become the element's resting state for any seek before ` +
+            `the first tween actually runs, because GSAP applies fromTo from-values at authoring time ` +
+            `(immediateRender), not at tween position.`,
+          selector,
+          fixHint:
+            `Add \`immediateRender: false\` to the destination vars of each future fromTo, or set a safe ` +
+            `resting state with an earlier \`tl.set("${selector}", { ... }, 0)\`. Pre-first-tween seeks must not ` +
+            `inherit whichever fromTo call happened to author last.`,
+          snippet: truncateSnippet(fromToWindows.map((win) => win.raw).join("\n")),
+        });
       }
 
       // gsap_exit_missing_hard_kill
@@ -1245,24 +1365,25 @@ export const gsapRules: LintRule<LintContext>[] = [
         });
       }
 
-      // gsap_animates_clip_element — only error when GSAP animates visibility/display
+      // gsap_animates_clip_element — GSAP must not compete with the framework's
+      // clip visibility window. autoAlpha owns visibility as well as opacity.
       for (const win of gsapWindows) {
         const sel = win.targetSelector;
         const clipInfo = clipIds.get(sel) || clipClasses.get(sel);
         if (!clipInfo) continue;
         const conflictingProps = win.properties.filter(
-          (p) => p === "visibility" || p === "display",
+          (p) => p === "visibility" || p === "display" || p === "autoAlpha",
         );
         if (conflictingProps.length === 0) continue;
         const elDesc = `<${clipInfo.tag}${clipInfo.id ? ` id="${clipInfo.id}"` : ""} class="${clipInfo.classes}">`;
         findings.push({
           code: "gsap_animates_clip_element",
           severity: "error",
-          message: `GSAP animation sets ${conflictingProps.join(", ")} on a clip element. Selector "${sel}" resolves to element ${elDesc}. The framework manages clip visibility via ${conflictingProps.join("/")} — do not animate these properties on clip elements.`,
+          message: `GSAP animation sets ${conflictingProps.join(", ")} on a clip element. Selector "${sel}" resolves to element ${elDesc}. The framework manages clip visibility, and autoAlpha writes visibility as well as opacity — do not animate these properties on clip elements.`,
           selector: sel,
           elementId: clipInfo.id || undefined,
           fixHint:
-            "Remove the visibility/display tween, or move the content into a child <div> and target that instead.",
+            "Remove the visibility/display/autoAlpha tween, or move the content into a child <div> and target that instead.",
           snippet: truncateSnippet(win.raw),
         });
       }
@@ -2389,7 +2510,7 @@ export const gsapRules: LintRule<LintContext>[] = [
       const initialHolds = firstTweenIndex < 0 ? windows : windows.slice(0, firstTweenIndex);
       for (const win of initialHolds) {
         if (!isInstantHold(win) || win.position !== 0) continue;
-        if (win.global || win.immediateRender) continue;
+        if (win.global || win.immediateRender === true) continue;
         if (targetHasNoStableIdentity(win.targetSelector, win.targetIdentity)) continue;
         const targetTokens = [...targetedSelectorTokens(win.targetSelector)];
         const hiddenByToken =

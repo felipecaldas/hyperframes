@@ -66,6 +66,7 @@ export interface CreateCapturePlanInput {
 export type CapturePlanFailure =
   | Readonly<{ kind: "streaming_unavailable" }>
   | Readonly<{ kind: "draw_element_verification" }>
+  | Readonly<{ kind: "draw_element_capture" }>
   | Readonly<{ kind: "capture_failure"; memoryExhaustion: boolean }>;
 
 function assertWorkerCount(workerCount: number): void {
@@ -127,7 +128,10 @@ export function replanAfterFailure(plan: CapturePlan, failure: CapturePlanFailur
   // Disk-path drawElement self-verification (parallel disk workers under the
   // explicit fast-capture opt-in) can also trip — the retry stays on the disk
   // path but forces the screenshot baseline.
-  if (plan.kind === "sdr_disk" && failure.kind === "draw_element_verification") {
+  if (
+    plan.kind === "sdr_disk" &&
+    (failure.kind === "draw_element_verification" || failure.kind === "draw_element_capture")
+  ) {
     return createCapturePlan({
       ...plan,
       forceScreenshot: true,

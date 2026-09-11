@@ -108,6 +108,12 @@ Use a separate file when you want to reuse it.
     It defaults to `0`. Trimming or splitting from the left pushes this offset
     forward by the time elapsed multiplied by `data-playback-rate`, so the
     nested animation keeps going instead of jumping back to its beginning.
+
+    Timing inside the child file is local to that composition. If this host
+    starts at `10` and a child video starts at `2`, the video starts at `12` on
+    the root timeline. Legacy projects that authored a media start in root time
+    can preserve it explicitly with `data-hf-media-start-basis="global"`; new
+    compositions should use local timing.
   </Tab>
   <Tab title="Inline">
     Write the nested composition straight into the parent. Simpler for

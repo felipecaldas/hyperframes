@@ -63,6 +63,44 @@ describe("layout-audit.browser", () => {
     expect(after).not.toBe(before);
   });
 
+  // PRINFRA-666: an equal-size, equal-position opaque <img> src/visibility
+  // swap (the authoring pattern for a paused-GSAP-cursor-driven "reveal
+  // frame N of a still sequence" composition) moves no geometry and no
+  // opacity, so it was invisible to the fingerprint and false-positived
+  // sweep_static — mediaPixelHash already existed for exactly this pixel-only
+  // motion class, it just wasn't applied to img.
+  it("changes the sweep fingerprint when a same-size opaque img is swapped", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="640" data-height="360">
+        <img id="frame" />
+      </div>
+    `;
+    installGeometry({
+      root: rect({ left: 0, top: 0, width: 640, height: 360 }),
+      frame: rect({ left: 0, top: 0, width: 640, height: 360 }),
+    });
+
+    let pixelValue = 20;
+    const getContextSpy = vi.spyOn(HTMLCanvasElement.prototype, "getContext") as unknown as {
+      mockReturnValue(value: CanvasRenderingContext2D): void;
+    };
+    getContextSpy.mockReturnValue({
+      drawImage() {},
+      getImageData() {
+        return { data: new Uint8ClampedArray(8 * 8 * 4).fill(pixelValue) };
+      },
+    } as unknown as CanvasRenderingContext2D);
+
+    installAuditScript();
+    const collect = (window as unknown as { __hyperframesLayoutGeometry: () => string })
+      .__hyperframesLayoutGeometry;
+    const before = collect();
+    pixelValue = 220;
+    const after = collect();
+
+    expect(after).not.toBe(before);
+  });
+
   // Opacity-reveal fixture (CLI feedback digest 2026-07-14): code-typing style
   // scenes reveal pre-laid-out characters via opacity only — no geometry ever
   // moves. The sweep fingerprint must treat that as motion, both while a glyph
@@ -1107,6 +1145,38 @@ describe("layout-audit.browser coordinate-frame findings", () => {
     expect(runAudit().filter((issue) => issue.code === "connector_detached")).toEqual([]);
   });
 
+  it("flags a long marked shaft whose rendered ends miss every node", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+        <div id="n1"></div>
+        <div id="n2"></div>
+        <svg id="schematic-svg">
+          <defs><marker id="arrowhead"><path id="tip" d="M 0 0 L 8 4 L 0 8" /></marker></defs>
+          <path id="path-input" d="M 40 540 L 720 540" marker-end="url(#arrowhead)" />
+        </svg>
+      </div>
+    `;
+    installGeometry(
+      {
+        root: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+        n1: rect({ left: 900, top: 400, width: 160, height: 160 }),
+        n2: rect({ left: 1400, top: 400, width: 160, height: 160 }),
+        "schematic-svg": rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+      },
+      {
+        n1: { backgroundColor: "rgb(30, 40, 50)" },
+        n2: { backgroundColor: "rgb(30, 40, 50)" },
+      },
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    const issues = runAudit().filter((issue) => issue.code === "connector_detached");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ selector: "#path-input" });
+    expect(issues[0]?.message).toContain("marked shaft that meets no node");
+  });
+
   // Same DOM node via painted-inside + compact-near-miss must share one identity (not p0 vs c0).
   it("skips same-anchor cross-tier arrows that only graze one node", () => {
     document.body.innerHTML = `
@@ -1301,6 +1371,427 @@ describe("layout-audit.browser coordinate-frame findings", () => {
 
     expect(runAudit().filter((issue) => issue.code === "connector_detached")).toEqual([]);
   });
+
+  const orphanDom = `
+      <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+        <div id="n1"></div>
+        <div id="n2"></div>
+        <div id="caption">Pipeline overview</div>
+        <div id="footer">Confidential</div>
+        <svg id="connectors">
+          <defs><marker id="arrowhead"><path id="tip" d="M 0 0 L 8 4 L 0 8" /></marker></defs>
+          <path id="path-input" d="M 360 480 L 1400 480" marker-end="url(#arrowhead)" />
+        </svg>
+      </div>
+    `;
+  const orphanRects = {
+    root: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+    n1: rect({ left: 200, top: 400, width: 160, height: 160 }),
+    n2: rect({ left: 1400, top: 400, width: 160, height: 160 }),
+    caption: rect({ left: 200, top: 100, width: 600, height: 80 }),
+    footer: rect({ left: 200, top: 900, width: 600, height: 60 }),
+    connectors: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+  };
+  const orphanStyles = (overrides: Record<string, Record<string, string>>) => ({
+    n1: { backgroundColor: "rgb(30, 40, 50)" },
+    n2: { backgroundColor: "rgb(30, 40, 50)" },
+    caption: { backgroundColor: "rgb(30, 40, 50)" },
+    footer: { backgroundColor: "rgb(30, 40, 50)" },
+    ...overrides,
+  });
+
+  it("flags a shaft whose own endpoint node is not on stage", () => {
+    document.body.innerHTML = orphanDom;
+    installGeometry(
+      orphanRects,
+      orphanStyles({ n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" } }),
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    const issues = runAudit().filter((issue) => issue.code === "connector_orphan");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ selector: "#path-input" });
+    expect(issues[0]?.message).toContain("#n2");
+  });
+
+  it("names both endpoints when neither is on stage", () => {
+    document.body.innerHTML = orphanDom;
+    installGeometry(
+      orphanRects,
+      orphanStyles({
+        n1: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" },
+        n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" },
+      }),
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    const issues = runAudit().filter((issue) => issue.code === "connector_orphan");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.message).toContain("both endpoints");
+  });
+
+  it("still flags a dark endpoint while other elements are on stage", () => {
+    document.body.innerHTML = orphanDom;
+    installGeometry(
+      orphanRects,
+      orphanStyles({ n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" } }),
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    const issues = runAudit().filter((issue) => issue.code === "connector_orphan");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.message).toContain("#n2");
+  });
+
+  it("flags a horizontal shaft, whose bounding box has no height", () => {
+    document.body.innerHTML = orphanDom;
+    installGeometry(
+      orphanRects,
+      orphanStyles({ n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" } }),
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+    const flat = document.getElementById("path-input");
+    if (flat) {
+      const box = { left: 360, top: 480, right: 1400, bottom: 480, width: 1040, height: 0 };
+      flat.getBoundingClientRect = () => ({ ...box, x: box.left, y: box.top, toJSON: () => box });
+    }
+
+    const issues = runAudit().filter((issue) => issue.code === "connector_orphan");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.message).toContain("#n2");
+  });
+
+  it("does not orphan a shaft whose endpoints are both on stage", () => {
+    document.body.innerHTML = orphanDom;
+    installGeometry(orphanRects, orphanStyles({}));
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    expect(runAudit().filter((issue) => issue.code === "connector_orphan")).toEqual([]);
+  });
+
+  it("does not orphan a shaft whose ends meet no node at all", () => {
+    document.body.innerHTML = orphanDom;
+    installGeometry(
+      { ...orphanRects, n1: rect({ left: 900, top: 900, width: 160, height: 160 }) },
+      orphanStyles({}),
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    expect(runAudit().filter((issue) => issue.code === "connector_orphan")).toEqual([]);
+  });
+
+  it("orphans an unmarked flow-layer shaft whose endpoint node is hidden", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+        <div id="n1"></div>
+        <div id="n2"></div>
+        <div id="caption">Pipeline overview</div>
+        <div id="footer">Confidential</div>
+        <svg id="flow-svg" class="flow-svg">
+          <path id="path-to-commitment" d="M 360 480 L 1400 480" />
+        </svg>
+      </div>
+    `;
+    installGeometry(
+      {
+        ...orphanRects,
+        "flow-svg": orphanRects.connectors,
+      },
+      orphanStyles({ n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" } }),
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    const issues = runAudit().filter((issue) => issue.code === "connector_orphan");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ selector: "#path-to-commitment" });
+  });
+
+  it("does not orphan an unnamed decorative path that runs between real nodes", () => {
+    document.body.innerHTML = orphanDom
+      .replace(
+        '<path id="path-input" d="M 360 480 L 1400 480" marker-end="url(#arrowhead)" />',
+        '<path id="drafting-line" d="M 360 480 L 1400 480" />',
+      )
+      .replace('<svg id="connectors">', '<svg id="decor">');
+    installGeometry(
+      { ...orphanRects, decor: orphanRects.connectors },
+      orphanStyles({ n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" } }),
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    expect(runAudit().filter((issue) => issue.code === "connector_orphan")).toEqual([]);
+  });
+
+  it("orphans that same path once it carries an arrowhead", () => {
+    document.body.innerHTML = orphanDom.replace('<svg id="connectors">', '<svg id="decor">');
+    installGeometry(
+      { ...orphanRects, decor: orphanRects.connectors },
+      orphanStyles({ n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" } }),
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    expect(runAudit().filter((issue) => issue.code === "connector_orphan")).toHaveLength(1);
+  });
+
+  it("does not orphan a shaft still hidden behind its dash offset", () => {
+    document.body.innerHTML = orphanDom;
+    installGeometry(
+      orphanRects,
+      orphanStyles({
+        n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" },
+        "path-input": { strokeDasharray: "100", strokeDashoffset: "100" },
+      }),
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    expect(runAudit().filter((issue) => issue.code === "connector_orphan")).toEqual([]);
+  });
+
+  const guardDom = (edge: string) => `
+      <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+        <div id="n1"></div>
+        ${edge === "in-svg" ? "" : '<div id="edge"></div>'}
+        <svg id="connectors">
+          <defs><marker id="arrowhead"><path id="tip" d="M 0 0 L 8 4 L 0 8" /></marker></defs>
+          ${edge === "in-svg" ? '<rect id="edge" />' : ""}
+          <path id="path-input" d="M 360 480 L 1400 480" marker-end="url(#arrowhead)" />
+        </svg>
+      </div>
+    `;
+  const guardBase = {
+    root: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+    n1: rect({ left: 200, top: 400, width: 160, height: 160 }),
+    connectors: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+  };
+  const opaqueHidden = { backgroundColor: "rgb(30, 40, 50)", opacity: "0" };
+  const endpointGuardCases = [
+    {
+      name: "an element inside the connector svg is never an endpoint",
+      dom: "in-svg",
+      edgeRect: rect({ left: 1400, top: 400, width: 160, height: 160 }),
+      edgeStyle: opaqueHidden,
+    },
+    {
+      name: "a box with neither paint nor text is never an endpoint",
+      dom: "outside",
+      edgeRect: rect({ left: 1400, top: 400, width: 160, height: 160 }),
+      edgeStyle: { opacity: "0" },
+    },
+    {
+      name: "a box below the area floor is never an endpoint",
+      dom: "outside",
+      edgeRect: rect({ left: 1400, top: 470, width: 16, height: 16 }),
+      edgeStyle: opaqueHidden,
+    },
+    {
+      name: "a box larger than a stage fraction is never an endpoint",
+      dom: "outside",
+      edgeRect: rect({ left: 1000, top: 200, width: 1200, height: 600 }),
+      edgeStyle: opaqueHidden,
+    },
+  ];
+  for (const guard of endpointGuardCases) {
+    it(guard.name, () => {
+      document.body.innerHTML = guardDom(guard.dom);
+      installGeometry(
+        { ...guardBase, edge: guard.edgeRect },
+        { n1: { backgroundColor: "rgb(30, 40, 50)" }, edge: guard.edgeStyle },
+      );
+      installConnectorGeometry({ e: 0, f: 0 });
+      installAuditScript();
+
+      expect(runAudit().filter((issue) => issue.code === "connector_orphan")).toEqual([]);
+    });
+  }
+
+  it("skips a connector layer the composition has taken off screen", () => {
+    document.body.innerHTML = orphanDom;
+    installGeometry(
+      orphanRects,
+      orphanStyles({
+        n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" },
+        connectors: { display: "none" },
+      }),
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    expect(runAudit().filter((issue) => issue.code === "connector_orphan")).toEqual([]);
+  });
+
+  it("skips the arrowhead glyph living in defs", () => {
+    document.body.innerHTML = orphanDom.replace(
+      '<path id="tip" d="M 0 0 L 8 4 L 0 8" />',
+      '<path id="tip" class="connector" d="M 360 480 L 1400 480" marker-end="url(#arrowhead)" />',
+    );
+    installGeometry(
+      orphanRects,
+      orphanStyles({ n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" } }),
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    const issues = runAudit().filter((issue) => issue.code === "connector_orphan");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ selector: "#path-input" });
+  });
+
+  it("skips a marked stub too short to read as a link", () => {
+    document.body.innerHTML = orphanDom.replace(
+      'd="M 360 480 L 1400 480"',
+      'd="M 360 480 L 400 480"',
+    );
+    installGeometry(
+      { ...orphanRects, n2: rect({ left: 400, top: 400, width: 160, height: 160 }) },
+      orphanStyles({ n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" } }),
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    expect(runAudit().filter((issue) => issue.code === "connector_orphan")).toEqual([]);
+  });
+
+  it("does not blame a staged halo that sits on a live node", () => {
+    document.body.innerHTML = orphanDom.replace(
+      '<div id="n2"></div>',
+      '<div id="n2-halo"></div>\n        <div id="n2"></div>',
+    );
+    installGeometry(
+      { ...orphanRects, "n2-halo": rect({ left: 1390, top: 390, width: 180, height: 180 }) },
+      orphanStyles({ "n2-halo": { backgroundColor: "rgb(80, 90, 100)", opacity: "0" } }),
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    expect(runAudit().filter((issue) => issue.code === "connector_orphan")).toEqual([]);
+  });
+
+  it("orphans a dark endpoint when the connector svg allows overflow", () => {
+    document.body.innerHTML = orphanDom.replace(
+      '<svg id="connectors">',
+      '<svg id="connectors" data-layout-allow-overflow>',
+    );
+    installGeometry(
+      orphanRects,
+      orphanStyles({ n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" } }),
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    const issues = runAudit().filter((issue) => issue.code === "connector_orphan");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ selector: "#path-input" });
+  });
+
+  const hiddenShaftStyles: Array<Record<string, string>> = [
+    { opacity: "0" },
+    { display: "none" },
+    { visibility: "hidden" },
+    { visibility: "collapse" },
+  ];
+  for (const hidden of hiddenShaftStyles) {
+    const label = Object.entries(hidden)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join(", ");
+    it(`stays quiet while the shaft itself is still staged hidden (${label})`, () => {
+      document.body.innerHTML = orphanDom;
+      installGeometry(
+        orphanRects,
+        orphanStyles({
+          n2: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" },
+          "path-input": hidden,
+        }),
+      );
+      installConnectorGeometry({ e: 0, f: 0 });
+      installAuditScript();
+
+      expect(runAudit().filter((issue) => issue.code === "connector_orphan")).toEqual([]);
+    });
+  }
+
+  it("cannot reach an endpoint node hidden with display:none", () => {
+    document.body.innerHTML = orphanDom;
+    installGeometry(
+      { ...orphanRects, n2: rect({ left: 0, top: 0, width: 0, height: 0 }) },
+      orphanStyles({ n2: { backgroundColor: "rgb(30, 40, 50)", display: "none" } }),
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    const issues = runAudit();
+    expect(issues.filter((issue) => issue.code === "connector_orphan")).toEqual([]);
+    expect(issues.filter((issue) => issue.code === "connector_detached")).toEqual([]);
+  });
+
+  it("does not blame a hidden element that sits well past the endpoint", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+        <div id="n1"></div>
+        <div id="ghost"></div>
+        <svg id="connectors">
+          <defs><marker id="arrowhead"><path id="tip" d="M 0 0 L 8 4 L 0 8" /></marker></defs>
+          <path id="path-input" d="M 360 480 L 1400 480" marker-end="url(#arrowhead)" />
+        </svg>
+      </div>
+    `;
+    installGeometry(
+      {
+        root: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+        n1: rect({ left: 200, top: 400, width: 160, height: 160 }),
+        ghost: rect({ left: 1500, top: 400, width: 160, height: 160 }),
+        connectors: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+      },
+      {
+        n1: { backgroundColor: "rgb(30, 40, 50)" },
+        ghost: { backgroundColor: "rgb(30, 40, 50)", opacity: "0" },
+      },
+    );
+    installConnectorGeometry({ e: 0, f: 0 });
+    installAuditScript();
+
+    expect(runAudit().filter((issue) => issue.code === "connector_orphan")).toEqual([]);
+  });
+
+  it("detaches a paste-bug shaft when the connector svg allows overflow", () => {
+    document.body.innerHTML = `
+      <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+        <div id="n1"></div>
+        <div id="n2"></div>
+        <svg id="connector-svg" data-layout-allow-overflow>
+          <defs><marker id="arrow"><path id="tip" d="M 0 0 L 8 4 L 0 8" /></marker></defs>
+          <path id="detached" class="connector-line" d="M 980 580 L 380 280" />
+        </svg>
+      </div>
+    `;
+    installGeometry(
+      {
+        root: rect({ left: 0, top: 0, width: 1920, height: 1080 }),
+        n1: rect({ left: 900, top: 500, width: 160, height: 160 }),
+        n2: rect({ left: 300, top: 200, width: 160, height: 160 }),
+        "connector-svg": rect({ left: 80, top: 227, width: 1740, height: 830 }),
+      },
+      {
+        n1: { backgroundColor: "rgb(30, 40, 50)" },
+        n2: { backgroundColor: "rgb(30, 40, 50)" },
+      },
+    );
+    installConnectorGeometry({ e: 80, f: 227 });
+    installAuditScript();
+
+    const issues = runAudit().filter((issue) => issue.code === "connector_detached");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ selector: "#detached" });
+  });
 });
 
 describe("layout-audit.browser content overlap", () => {
@@ -1383,6 +1874,31 @@ describe("layout-audit.browser content overlap", () => {
         clipPath: "inset(0px 25% 0px 0px)",
       },
     });
+    expect(issues.some((issue) => issue.code === "content_overlap")).toBe(true);
+  });
+
+  it.each(["hidden", "clip", "auto", "scroll"])(
+    "excludes fully clipped text under overflow:%s",
+    (overflow) => {
+      const issues = auditOverflowClippedOverlap({
+        overflow,
+        clipRect: rect({ left: 0, top: 0, width: 640, height: 100 }),
+        aTextRect: rect({ left: 100, top: 180, width: 300, height: 80 }),
+        bTextRect: rect({ left: 120, top: 190, width: 300, height: 80 }),
+      });
+
+      expect(issues.some((issue) => issue.code === "content_overlap")).toBe(false);
+    },
+  );
+
+  it("uses the painted fragment area after partial overflow clipping", () => {
+    const issues = auditOverflowClippedOverlap({
+      overflow: "hidden",
+      clipRect: rect({ left: 390, top: 0, width: 250, height: 200 }),
+      aTextRect: rect({ left: 100, top: 50, width: 300, height: 100 }),
+      bTextRect: rect({ left: 397, top: 50, width: 50, height: 100 }),
+    });
+
     expect(issues.some((issue) => issue.code === "content_overlap")).toBe(true);
   });
 });
@@ -1803,9 +2319,33 @@ function auditOverlapScene(options: {
   return runAudit();
 }
 
+function auditOverflowClippedOverlap(options: {
+  overflow: string;
+  clipRect: DOMRect;
+  aTextRect: DOMRect;
+  bTextRect: DOMRect;
+}): ReturnType<typeof runAudit> {
+  document.body.innerHTML = `
+    <div id="root" data-composition-id="main" data-width="1920" data-height="1080">
+      <div id="clip"><div id="a">Block A copy</div></div>
+      <div id="b">Block B copy</div>
+    </div>
+  `;
+  const textRects = { a: [options.aTextRect], b: [options.bTextRect] };
+  installOverlapStyles(
+    { a: "rgb(0, 0, 0)", b: "rgb(0, 0, 0)" },
+    { a: "none", b: "none" },
+    { clip: options.overflow },
+  );
+  installOverlapGeometry(textRects, { clip: options.clipRect });
+  installAuditScript();
+  return runAudit();
+}
+
 function installOverlapStyles(
   colors: Record<string, string>,
   clipPaths: Record<string, string>,
+  overflows: Record<string, string> = {},
 ): void {
   vi.spyOn(window, "getComputedStyle").mockImplementation((element) => {
     const id = (element as Element).id;
@@ -1815,6 +2355,9 @@ function installOverlapStyles(
       opacity: "1",
       color: colors[id] ?? "rgb(0, 0, 0)",
       clipPath: clipPaths[id] ?? "none",
+      overflow: overflows[id] ?? "visible",
+      overflowX: overflows[id] ?? "visible",
+      overflowY: overflows[id] ?? "visible",
     } as unknown as CSSStyleDeclaration;
   });
 
@@ -1827,10 +2370,14 @@ function installOverlapStyles(
   };
 }
 
-function installOverlapGeometry(textRects: Record<string, DOMRect[]>): void {
+function installOverlapGeometry(
+  textRects: Record<string, DOMRect[]>,
+  elementRects: Record<string, DOMRect> = {},
+): void {
   for (const element of Array.from(document.querySelectorAll("*"))) {
     vi.spyOn(element, "getBoundingClientRect").mockReturnValue(
-      boundingTextRect(textRects[element.id]) ??
+      elementRects[element.id] ??
+        boundingTextRect(textRects[element.id]) ??
         rect({ left: 0, top: 0, width: 1920, height: 1080 }),
     );
   }
