@@ -10,6 +10,60 @@ import type { StudioApiAdapter } from "../types.js";
 
 const HTML = '<html data-composition-id="demo"><body>before</body></html>\n';
 
+/**
+ * A compiled project's `FRAME.md`, in the shape TAB-1086's `renderFrameMd`
+ * writes it: brand tokens, the motion register, the bans, the TAB-1070 cut rules
+ * in prose, and a word table generated from the register.
+ *
+ * The values are the seeded `punchy_creator` register. Nothing in this file
+ * asserts the document's content, and that is deliberate: the prompt reacts to
+ * the file existing and tells the agent to read it. Inlining the table would put
+ * the register in two places and make a template change a prompt change, which
+ * is the one thing D34 rules out.
+ */
+const FRAME_MD = `# Frame
+
+## Brand tokens
+
+| Token | Value |
+|---|---|
+| accent | #FF3366 |
+| ink | #101014 |
+| display | Archivo Black |
+
+## Motion register
+
+| Field | Value |
+|---|---|
+| primary transition | circle_iris |
+| accent transitions | none |
+| accent limit | 2 |
+| durations | fast 0.2s, medium 0.4s, slow 0.6s |
+| allowed eases | none, power1.in, power1.out, power1.inOut, power2.out, power2.inOut, power3.out |
+
+## Bans
+
+- no idle motion
+- no overshoot past 1.04
+- a relocation is a cut
+
+## Cuts
+
+A relocation is a cut. When an element moves from one place in the frame to
+another, it leaves on one frame and arrives on the next. Nothing tweens across
+the boundary.
+
+## Words
+
+| Word | Duration | Ease |
+|---|---|---|
+| fast | 0.2 | power3.out |
+| medium | 0.4 | power2.out |
+| slow | 0.6 | power2.inOut |
+| snappy | 0.2 | power3.out |
+| smooth | 0.4 | power2.out |
+`;
+
 function completion(content: string, toolCalls: unknown[] = []): Response {
   return new Response(
     JSON.stringify({ choices: [{ message: { content, tool_calls: toolCalls } }] }),
@@ -1092,6 +1146,84 @@ describe("Tabario AI provider", () => {
     expect(body.tools.map((t: { function: { name: string } }) => t.function.name)).toContain(
       "measure_layout",
     );
+  });
+
+  /**
+   * The system message of a run over `root`, read off the request the provider
+   * actually sent. `systemPrompt` is not exported and stays that way: a test that
+   * reads a constant proves the constant, not what the model was told.
+   */
+  async function systemMessageFor(root: string): Promise<string> {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readIndexFirst())
+      .mockResolvedValueOnce(completion("An answer."));
+
+    await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [
+        { role: "user", text: "what ease does this film use?", at: new Date().toISOString() },
+      ],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    const body = JSON.parse(String((fetchImpl.mock.calls[0]?.[1] as RequestInit)?.body));
+    return body.messages.find((message: { role: string }) => message.role === "system").content;
+  }
+
+  /**
+   * TAB-1087. The prompt taught project layout, timing attributes, caption rules
+   * and "lint is not sight", and never named an ease, a duration or a transition
+   * type. So the model had nothing to be right about: asked for something
+   * snappier it picked whatever ease it liked, and the lint codes TAB-1086 added
+   * then reported the result.
+   *
+   * After TAB-1086 the answer is in the project. The prompt points at
+   * `FRAME.md` and carries none of its data (D34), so a template that changes
+   * its register changes no code here. `power2.out` appears in the fixture above
+   * and must not appear in the prompt: an implementation that read the file and
+   * pasted its table in would fail this.
+   */
+  it("tells the model to read FRAME.md first and to keep every tween in the register", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    writeFileSync(join(root, "FRAME.md"), FRAME_MD);
+
+    const system = await systemMessageFor(root);
+
+    expect(system).toContain("read FRAME.md at the project root");
+    expect(system).toContain("quoting the line");
+    expect(system).toContain("uses an ease from allowed_eases");
+    expect(system).toContain("if a word is not in the table, ask, do not guess");
+    expect(system).toContain("Never add a transition type the register does not list");
+    // The register lives in the file, so no ease name is written here.
+    expect(system).not.toContain("power2.out");
+    expect(system).not.toContain("power3.out");
+  });
+
+  /**
+   * A project compiled before TAB-1086, or one a person assembled by hand, has
+   * no register to obey. Telling the model to read a file that is not there
+   * invites it to invent the table instead, which is worse than saying nothing:
+   * an invented register reads exactly like a real one.
+   *
+   * So the rules are gated on the file and their absence is stated out loud.
+   */
+  it("says the register is missing rather than naming a file the project does not have", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+
+    const system = await systemMessageFor(root);
+
+    expect(system).toContain("this project has no FRAME.md; keep today's eases");
+    expect(system).not.toContain("read FRAME.md at the project root");
+    expect(system).not.toContain("uses an ease from allowed_eases");
   });
 
   /**

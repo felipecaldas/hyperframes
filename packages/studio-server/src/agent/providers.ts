@@ -92,6 +92,54 @@ function modelName(): string {
 }
 
 /**
+ * TAB-1087: what the film's motion is allowed to be, and where that is written.
+ *
+ * The prompt below teaches project layout, timing attributes, caption rules and
+ * "lint is not sight". It never named an ease, a duration or a transition type,
+ * so asked for something snappier the model had nothing to be right about. It
+ * picked an ease it liked and the TAB-1086 lint codes reported the result after
+ * the fact.
+ *
+ * TAB-1086 put the decision in the project. `FRAME.md` carries the brand tokens,
+ * the motion register and a word table generated from that register, so these
+ * two rules point at the file and copy none of it (D34). A template that changes
+ * its register changes nothing here.
+ *
+ * Two things about where these sit.
+ *
+ * They are system-prompt rules, not finish-time demands like
+ * `MEASURE_BEFORE_ANSWERING`. That one is pushed as a user message when the model
+ * tries to end a turn without measuring, which works because measuring is
+ * something it owes at the end. The register is something it has to know before
+ * its first edit, and a nudge after the edit landed is too late.
+ *
+ * They are gated on the file, and the gate is not decoration. A project compiled
+ * before TAB-1086 has no register, and telling the model to read a file that is
+ * not there invites it to invent the table. An invented register reads exactly
+ * like a real one, so the absence is stated instead.
+ */
+const FRAME_MD_FIRST =
+  "Before any edit, read FRAME.md at the project root. It holds the brand tokens, the motion " +
+  "register and a word table. Answer questions about eases, durations and transitions from it, " +
+  "quoting the line.";
+
+const STAY_IN_REGISTER =
+  "Every tween you write uses an ease from allowed_eases and a duration from the durations " +
+  "table. Direction words such as fast, snappy or smooth map through the word table in FRAME.md; " +
+  "if a word is not in the table, ask, do not guess. Never add a transition type the register " +
+  "does not list.";
+
+const NO_REGISTER =
+  "There is no register to follow: this project has no FRAME.md; keep today's eases, durations " +
+  "and transitions as they are, and never invent a register.";
+
+/** The register rules, or the notice that there is no register. */
+function registerRules(hasFrameMd: boolean): string {
+  if (!hasFrameMd) return NO_REGISTER;
+  return `${FRAME_MD_FIRST}\n${STAY_IN_REGISTER}`;
+}
+
+/**
  * TAB-781: say what the files *are*, not just that they can be read.
  *
  * Asked why there was no video between 4s and 7s, the model answered that its
@@ -119,7 +167,7 @@ function modelName(): string {
  * who is editing a video, not a stylesheet. The prompt constrained the reply's
  * content and never its register.
  */
-function systemPrompt(kind: AgentRequestKind): string {
+function systemPrompt(kind: AgentRequestKind, hasFrameMd: boolean): string {
   return `You are Tabario AI inside Tabario Studio. You are editing one isolated HyperFrames project.
 The user's request kind is ${kind}. Inspect the project before changing it. Use only the provided tools.
 
@@ -132,6 +180,8 @@ A HyperFrames project's timeline IS its HTML — reading the files is how you in
 - Captions are compiler-owned karaoke units. A container with \`data-hf-atomic\` and class \`hf-captions\` is ONE caption: its word spans carry \`data-w-start\`/\`data-w-end\` timings, and one shared script loop drives every caption's highlight. To change a caption, edit a word span's text or the caption's \`data-w-*\`, \`data-active-color\`, \`data-rest-color\` or \`data-active-scale\` attributes — nothing else. Never rewrite, duplicate or inline the highlight loop; never merge or split word spans; never copy a \`data-hf-id\` from one element to another; never rename an element's \`id\`.
 - A caption carrying \`data-caption-base-px\` is shrunk to fit on ONE line by the project's own script once fonts load, whatever width its box has. Widening or narrowing it cannot make it two lines; the script shrinks the text until it fits. To let one caption wrap onto more lines at its full size, remove \`data-caption-base-px\` from that caption element only, and leave every other caption's attribute alone. A caption without it wraps at the font size its CSS gives it.
 - Layout overrides are \`gsap.set("#id", {…})\` and \`tl.set("#id", {…}, 0)\` calls carrying \`x\`, \`y\`, \`width\` or \`height\`. These are **not motion**. They are the box a manual drag or resize in Studio left behind, they apply at time 0, and they override the element's CSS rule for that element only. When something wraps onto too many lines, overflows, sits too high or is too narrow, this is the first place to look — before its markup. Widening a pinned box, or removing the pin, is usually the change; re-typing the words inside it never is.
+
+${registerRules(hasFrameMd)}
 
 So questions about what is on screen, when, for how long, or why something is missing are answerable from the source. To answer one, read \`index.html\` and any mounted compositions and reason over those attributes — give concrete layer names and time ranges. Never say you cannot see the timeline or the media; if something genuinely is not in the files, say what you looked at and what was absent.
 
@@ -984,8 +1034,12 @@ function chatMessage(entry: TabarioModelOptions["transcript"][number]): ChatMess
 }
 
 function initialMessages(options: TabarioModelOptions): ChatMessage[] {
+  // The staging dir is a full copy of the project: `createAgentStagingProject`
+  // walks every file and `.md` is a supported source, so a compiled project's
+  // FRAME.md is there and the agent can read it with the tools it already has.
+  const hasFrameMd = existsSync(join(options.stagingDir, "FRAME.md"));
   return [
-    { role: "system", content: systemPrompt(options.kind) },
+    { role: "system", content: systemPrompt(options.kind, hasFrameMd) },
     ...options.transcript.slice(-24).map(chatMessage),
   ];
 }
