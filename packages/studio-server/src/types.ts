@@ -95,6 +95,49 @@ export interface StudioSelectionResponse {
   updatedAt: string | null;
 }
 
+/** One gating code out of a check report, flattened out of the report's sections. */
+export interface RunCheckFinding {
+  code: string;
+  severity: "error" | "warning" | "info";
+  /** Project-relative source file the finding is anchored to. */
+  file: string;
+  line?: number;
+  message: string;
+}
+
+/**
+ * What `run_check` answers with.
+ *
+ * `ran: false` is a first-class outcome, not an error to swallow: a check that
+ * hit its deadline or could not start has to say so, because "no findings" and
+ * "never looked" are the two results a report must never confuse.
+ */
+export type RunCheckResult =
+  | { ran: true; findings: RunCheckFinding[] }
+  | { ran: false; error: string; stderr_tail: string };
+
+/**
+ * What a picture-making tool answers with: a link, never bytes (D21).
+ *
+ * `width` and `height` are the composition's frame size — the size of a
+ * screenshot, and the size of each cell's source frame in a contact sheet.
+ * `pages` and `cellSeconds` are present for a contact sheet, where the interval
+ * is derived from the composition's duration and belongs in the answer.
+ */
+export type ReceiptResult =
+  | {
+      ran: true;
+      url: string;
+      revision: string;
+      width: number;
+      height: number;
+      pages?: number;
+      /** Every page's URL when there is more than one, in order. */
+      pageUrls?: string[];
+      cellSeconds?: number;
+    }
+  | { ran: false; error: string };
+
 /**
  * Adapter interface — injected by each consumer to handle host-specific behavior.
  * The shared API module calls these methods; each host (vite dev, CLI embedded)
@@ -243,6 +286,36 @@ export interface StudioApiAdapter {
     seekTime?: number;
     signal?: AbortSignal;
   }) => Promise<LayoutMeasurement>;
+
+  /**
+   * Optional: run the real render gate over a staged project (TAB-1093).
+   *
+   * Lint proves the HTML parses and `measureLayout` reads one moment's boxes;
+   * neither is the gate a render has to pass. This runs the same check pipeline
+   * the CLI's `hyperframes check` runs, in process, and hands back the codes it
+   * would have gated on.
+   *
+   * An adapter that cannot run it resolves `{ ran: false }` with the reason —
+   * never an empty finding list, which reads as "nothing wrong".
+   */
+  runCheck?: (opts: { projectDir: string; signal?: AbortSignal }) => Promise<RunCheckResult>;
+
+  /**
+   * Optional: one PNG of the staged composition at `t` seconds (TAB-1093).
+   *
+   * The image is written to the receipts store and comes back as a URL. The
+   * caller never gets bytes: the agent cannot see an image, and the person it
+   * is talking to opens the link.
+   */
+  frameScreenshot?: (opts: {
+    projectDir: string;
+    /** Timeline position in seconds. */
+    t: number;
+    signal?: AbortSignal;
+  }) => Promise<ReceiptResult>;
+
+  /** Optional: four contact-sheet pages spanning the whole staged composition. */
+  contactSheet?: (opts: { projectDir: string; signal?: AbortSignal }) => Promise<ReceiptResult>;
 
   /** Optional: resolve session ID to project (multi-project mode). */
   resolveSession?: (sessionId: string) => Promise<{ projectId: string; title: string } | null>;

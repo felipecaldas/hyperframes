@@ -36,7 +36,15 @@ import type {
 } from "./types.js";
 
 const MAX_RUN_LEDGERS = 20;
-const DEFAULT_IDLE_TIMEOUT_MS = 3 * 60_000;
+/**
+ * How long a run may go without activity before it is abandoned.
+ *
+ * Exported because a tool that blocks the run has to give up before this does,
+ * and the CLI's `run_check` deadline is the first one that comes close. Leaving
+ * the relationship in prose meant nothing noticed when either number moved, so
+ * the CLI asserts against this constant instead of restating 180000.
+ */
+export const AGENT_IDLE_TIMEOUT_MS = 3 * 60_000;
 const DEFAULT_MAX_RUNTIME_MS = 15 * 60_000;
 const PROVIDER: AgentProvider = "tabario";
 
@@ -56,7 +64,17 @@ interface AgentRunJob {
   cancelled: boolean;
 }
 
-function agentStateRoot(): string {
+/**
+ * Everything one agent run writes lives under here: threads, ledgers, and the
+ * staging copies of projects.
+ *
+ * Exported because the CLI adapter has to answer "is this directory a staging
+ * copy the agent asked me about, or somewhere else on the disk" before it runs
+ * a browser over it, and the honest way to answer is to ask this function
+ * rather than to restate the path. Read at call time, so a test can point
+ * `HYPERFRAMES_STATE_DIR` at a temp dir and have both sides agree.
+ */
+export function agentStateRoot(): string {
   const override = process.env.HYPERFRAMES_STATE_DIR?.trim();
   return override
     ? resolve(override, "studio-agent")
@@ -323,7 +341,7 @@ export class AgentRuntime {
   }
 
   private createTimeouts(job: AgentRunJob) {
-    const idleMs = timeoutFromEnv("HYPERFRAMES_AGENT_IDLE_TIMEOUT_MS", DEFAULT_IDLE_TIMEOUT_MS);
+    const idleMs = timeoutFromEnv("HYPERFRAMES_AGENT_IDLE_TIMEOUT_MS", AGENT_IDLE_TIMEOUT_MS);
     const maxMs = timeoutFromEnv("HYPERFRAMES_AGENT_MAX_RUNTIME_MS", DEFAULT_MAX_RUNTIME_MS);
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     let reason: string | null = null;

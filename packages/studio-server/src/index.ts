@@ -12,12 +12,16 @@ export type {
   AgentThreadSummary,
 } from "./agent/types.js";
 export { createProjectSignature, affectsProjectSignature } from "./helpers/projectSignature.js";
+export { AGENT_IDLE_TIMEOUT_MS, agentStateRoot } from "./agent/runtime.js";
 export type {
   StudioApiAdapter,
   ResolvedProject,
   RenderJobState,
   MediaProcessingJobState,
   LintResult,
+  ReceiptResult,
+  RunCheckFinding,
+  RunCheckResult,
   StudioSelectionResponse,
   StudioSelectionSnapshot,
   StudioSelectionTextField,

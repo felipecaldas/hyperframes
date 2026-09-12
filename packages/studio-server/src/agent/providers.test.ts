@@ -1621,4 +1621,141 @@ describe("Tabario AI provider", () => {
     );
     expect(said).toEqual([result.assistantText]);
   });
+
+  // ── The gate, and the pictures (TAB-1093) ────────────────────────────────
+
+  /** The tool result for `id` out of the request the provider sent next. */
+  function toolResultFrom(fetchImpl: ReturnType<typeof vi.fn>, round: number, id: string): unknown {
+    const body = JSON.parse(String((fetchImpl.mock.calls[round]?.[1] as RequestInit)?.body));
+    const message = body.messages.find(
+      (entry: { tool_call_id?: string }) => entry.tool_call_id === id,
+    );
+    return JSON.parse(message.content);
+  }
+
+  async function runWithCall(
+    toolCall: ReturnType<typeof call>,
+    extraAdapter: Partial<StudioApiAdapter> = {},
+  ) {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(completion("", [toolCall]))
+      .mockResolvedValueOnce(completion("Done."));
+
+    await runTabarioModel({
+      adapter: { ...adapter(), ...extraAdapter },
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "check it please", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    return { fetchImpl, root };
+  }
+
+  it("offers run_check, frame_screenshot and contact_sheet on every run", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readIndexFirst())
+      .mockResolvedValueOnce(completion("An answer."));
+
+    await runTabarioModel({
+      // Deliberately the bare adapter, with none of the three methods: the tool
+      // list is the same either way, and a tool that vanished when the server
+      // could not run it would teach the model nothing.
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "check it", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    const body = JSON.parse(String((fetchImpl.mock.calls[0]?.[1] as RequestInit)?.body));
+    const names = body.tools.map((t: { function: { name: string } }) => t.function.name);
+    expect(names).toContain("run_check");
+    expect(names).toContain("frame_screenshot");
+    expect(names).toContain("contact_sheet");
+    const system = body.messages.find((message: { role: string }) => message.role === "system");
+    expect(system.content).toContain("check is not lint");
+    expect(system.content).toContain("run_check");
+    expect(system.content).toContain("you get a link and you give them the link");
+  });
+
+  it("passes a ran:false check result through verbatim rather than smoothing it", async () => {
+    const runCheck = vi
+      .fn()
+      .mockResolvedValue({ ran: false, error: "deadline", stderr_tail: "chrome went away\n" });
+
+    const { fetchImpl } = await runWithCall(call("k", "run_check", {}), { runCheck });
+
+    expect(toolResultFrom(fetchImpl, 1, "k")).toEqual({
+      ran: false,
+      error: "deadline",
+      stderr_tail: "chrome went away\n",
+    });
+  });
+
+  it("hands the check the staged copy, never the live project", async () => {
+    const runCheck = vi.fn().mockResolvedValue({ ran: true, findings: [] });
+
+    const { fetchImpl, root } = await runWithCall(call("k", "run_check", {}), { runCheck });
+
+    expect(runCheck).toHaveBeenCalledWith(
+      expect.objectContaining({ projectDir: root, signal: expect.anything() }),
+    );
+    expect(toolResultFrom(fetchImpl, 1, "k")).toEqual({ ran: true, findings: [] });
+  });
+
+  it("says this Studio server cannot run check rather than dropping the tool", async () => {
+    const { fetchImpl } = await runWithCall(call("k", "run_check", {}));
+
+    const result = toolResultFrom(fetchImpl, 1, "k") as { ran: boolean; error: string };
+    expect(result.ran).toBe(false);
+    expect(result.error).toContain("This Studio server cannot run check");
+  });
+
+  it("says this Studio server cannot make a picture rather than dropping the tool", async () => {
+    const shot = await runWithCall(call("s", "frame_screenshot", { t: 2 }));
+    const sheet = await runWithCall(call("c", "contact_sheet", {}));
+
+    for (const [run, id] of [
+      [shot, "s"],
+      [sheet, "c"],
+    ] as const) {
+      const result = toolResultFrom(run.fetchImpl, 1, id) as { ran: boolean; error: string };
+      expect(result.ran).toBe(false);
+      expect(result.error).toContain("This Studio server cannot");
+    }
+  });
+
+  it("gives the model a receipt URL and no bytes", async () => {
+    const frameScreenshot = vi.fn().mockResolvedValue({
+      ran: true,
+      url: "/studio/receipts/abc/def/0123456789abcdef0123456789abcdef.png",
+      revision: "def",
+      width: 1080,
+      height: 1920,
+    });
+
+    const { fetchImpl } = await runWithCall(call("s", "frame_screenshot", { t: 2.5 }), {
+      frameScreenshot,
+    });
+
+    expect(frameScreenshot).toHaveBeenCalledWith(expect.objectContaining({ t: 2.5 }));
+    const result = toolResultFrom(fetchImpl, 1, "s");
+    expect(JSON.stringify(result)).not.toContain("base64");
+    expect(result).toMatchObject({ ran: true, revision: "def", width: 1080 });
+  });
 });

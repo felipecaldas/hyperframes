@@ -192,6 +192,8 @@ A CSS class rule reaches every element that carries the class. When the request 
 Preserve the existing template, media references, duration, captions, and voiceover unless the user asks to change them.
 All edits are staged and linted before Studio applies them. Call validate_project after edits and repair lint errors.
 Lint is not sight. \`validate_project\` only proves the HTML parses — it cannot tell you how many lines a caption takes, whether an element overflows its box, or where it sits in the frame. \`measure_layout\` renders the staged project and measures it. Use it to check any claim about how something looks, and use it again after a layout change, before you say it worked. If it reports an element as unmeasurable, that is not "nothing wrong" — say what you could not measure.
+And check is not lint. \`run_check\` is the gate a render has to pass: it runs the real check over the staged project and comes back with the codes it would fail on. Run it after any edit that touches timing, layout or audio, and report the codes it names by name. If it comes back having not run, say that — never let "no findings" stand in for "never looked".
+\`frame_screenshot\` at a time, and \`contact_sheet\` across the whole thing, make a picture for the person you are talking to. You do not see it: you get a link and you give them the link. Reach for one when someone asks to be shown something, or when a number on its own would not settle it. Never describe what is in a picture you cannot see.
 
 Act on the request — do not merely describe what you would do. The request kind above is a transport label, not the user's intent: everything typed into Studio's chat arrives as \`chat\`, so decide from what the user actually said.
 - If they report a problem, say something looks wrong, or ask for a change, and you understand what they mean, then make the change now, in this turn, with the write tools. "The captions are too high" is a request to move them; it does not need the words "fix it".
@@ -305,6 +307,33 @@ const tools = [
       required: ["selectors"],
       additionalProperties: false,
     },
+  ),
+  tool(
+    "run_check",
+    "Run the render gate over the staged project: lint, runtime, layout, motion and contrast in " +
+      "one pass, returning the codes a render would fail on. This is not validate_project, which " +
+      "only lints. Run it after any edit that changes timing, layout or audio, and report the " +
+      "codes it names.",
+    { type: "object", properties: {}, additionalProperties: false },
+  ),
+  tool(
+    "frame_screenshot",
+    "Make a PNG of the staged composition at one moment and return a link to it. The person you " +
+      "are talking to opens the link; you do not see the image. Use it when they ask to be shown " +
+      "something.",
+    {
+      type: "object",
+      properties: { t: { type: "number", description: "Timeline position in seconds." } },
+      required: ["t"],
+      additionalProperties: false,
+    },
+  ),
+  tool(
+    "contact_sheet",
+    "Make a grid of frames spanning the whole staged composition and return a link to it. Four " +
+      "pages at most, and the interval widens with the composition so the last page reaches the " +
+      "end. The person you are talking to opens the link; you do not see the images.",
+    { type: "object", properties: {}, additionalProperties: false },
   ),
 ];
 
@@ -738,6 +767,58 @@ async function measureLayoutTool(args: JsonRecord, options: TabarioModelOptions)
   });
 }
 
+/**
+ * Run the render gate, or say plainly that this server cannot.
+ *
+ * Registered unconditionally, like `measure_layout`: the tool list is a
+ * module-level constant, and a tool that vanishes from it teaches the model
+ * nothing, while a handler that answers "this Studio server cannot" tells it
+ * exactly what it may not claim.
+ */
+async function runCheckTool(_args: JsonRecord, options: TabarioModelOptions): Promise<unknown> {
+  if (!options.adapter.runCheck)
+    return {
+      ran: false,
+      error:
+        "This Studio server cannot run check — no browser is available to it. Do not report a " +
+        "gate you were unable to run; say that you could not check it.",
+      stderr_tail: "",
+    };
+  return options.adapter.runCheck({ projectDir: options.stagingDir, signal: options.signal });
+}
+
+async function frameScreenshotTool(
+  args: JsonRecord,
+  options: TabarioModelOptions,
+): Promise<unknown> {
+  if (!options.adapter.frameScreenshot)
+    return {
+      ran: false,
+      error:
+        "This Studio server cannot take a screenshot — no browser is available to it. Say that " +
+        "you could not make a picture; never describe one you did not get.",
+    };
+  const requested = args.t;
+  const t =
+    typeof requested === "number" && Number.isFinite(requested) ? Math.max(0, requested) : 0;
+  return options.adapter.frameScreenshot({
+    projectDir: options.stagingDir,
+    t,
+    signal: options.signal,
+  });
+}
+
+async function contactSheetTool(_args: JsonRecord, options: TabarioModelOptions): Promise<unknown> {
+  if (!options.adapter.contactSheet)
+    return {
+      ran: false,
+      error:
+        "This Studio server cannot make a contact sheet — no browser is available to it. Say that " +
+        "you could not make a picture; never describe one you did not get.",
+    };
+  return options.adapter.contactSheet({ projectDir: options.stagingDir, signal: options.signal });
+}
+
 const WRITE_TOOLS = new Set(["edit_file", "write_file"]);
 
 const TOOL_HANDLERS: Record<string, ToolHandler> = {
@@ -750,6 +831,9 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
   delete_file: deleteFile,
   validate_project: validateProject,
   measure_layout: measureLayoutTool,
+  run_check: runCheckTool,
+  frame_screenshot: frameScreenshotTool,
+  contact_sheet: contactSheetTool,
 };
 
 async function executeTool(call: ToolCall, options: TabarioModelOptions): Promise<unknown> {

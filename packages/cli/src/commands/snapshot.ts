@@ -255,8 +255,16 @@ export function computeSnapshotTimes(
 /**
  * Render key frames from a composition as PNG screenshots.
  * The agent can Read these to verify its output visually.
+ *
+ * Exported for the Studio server, which calls it in process for
+ * `frame_screenshot` and `contact_sheet` (TAB-1093). Spawning the built CLI
+ * instead would reopen an argv surface and would depend on a `dist` the
+ * compositor image does not carry.
+ *
+ * Note for callers: every PNG and JPEG already in `outputDir` is deleted before
+ * this writes, so give each call a directory of its own.
  */
-async function captureSnapshots(
+export async function captureSnapshots(
   projectDir: string,
   opts: {
     frames?: number;

@@ -7,8 +7,8 @@
 
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
-import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
-import { resolve, join, basename } from "node:path";
+import { existsSync, readFileSync, rmSync, writeFileSync, unlinkSync } from "node:fs";
+import { resolve, join, basename, isAbsolute, relative } from "node:path";
 import { readBundleFile } from "./readBundleFile.js";
 import {
   createProjectWatcher,
@@ -30,6 +30,7 @@ import {
 import { emitStudioRenderComplete, emitStudioRenderError } from "./studioRenderTelemetry.js";
 import { isDevMode } from "../utils/env.js";
 import {
+  agentStateRoot,
   createStudioManualEditsRenderBodyScript,
   createStudioApi,
   createProjectSignature,
@@ -44,11 +45,23 @@ import {
   type RenderJobState,
   type BackgroundRemovalRender,
   type LayoutMeasurement,
+  type ReceiptResult,
+  type RunCheckFinding,
+  type RunCheckResult,
   measureInPage,
   classifyLayoutProbe,
   unavailableMeasurement,
 } from "@hyperframes/studio-server";
 import { resolveAutoProxy } from "../utils/projectConfig.js";
+import { resolveProject, type ProjectDir } from "../utils/project.js";
+import type { CheckOptions, CheckReport } from "../utils/checkTypes.js";
+import {
+  ReceiptStore,
+  RECEIPTS_URL_PREFIX,
+  parseReceiptPath,
+  receiptSessionId,
+  type ReceiptWriter,
+} from "./studioReceipts.js";
 import { getElementScreenshotClip } from "@hyperframes/studio-server/screenshot-clip";
 import type { ScreenshotClip } from "@hyperframes/studio-server/screenshot-clip";
 import type { RenderJob } from "@hyperframes/producer";
@@ -222,34 +235,342 @@ interface ThumbnailBrowserSession {
 const MEASURE_TIMEOUT_MS = Number(process.env.HYPERFRAMES_MEASURE_TIMEOUT_MS) || 45_000;
 
 /**
- * Resolve to whichever comes first: the measurement, or an honest timeout.
+ * Resolve to whichever comes first: the work, or an honest timeout.
  *
  * The losing promise is left to settle on its own — the caller's `finally`
  * still closes the page and the server, so nothing is leaked by not awaiting it.
+ *
+ * The deadline **resolves** with `onExpiry()`, it does not reject, so every
+ * caller gets a value describing what happened rather than an exception a
+ * `catch` has to re-describe. TAB-1093 generalised it from the one measurement
+ * shape it started as; `onExpiry` is a closure rather than a value so nothing
+ * builds an expiry result the fast path then throws away.
  */
-async function withDeadline(
-  work: Promise<LayoutMeasurement>,
-  ms: number,
-  seekTime: number,
-): Promise<LayoutMeasurement> {
+async function withDeadline<T>(work: Promise<T>, ms: number, onExpiry: () => T): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const expired = new Promise<LayoutMeasurement>((resolveExpired) => {
-    timer = setTimeout(
-      () =>
-        resolveExpired(
-          unavailableMeasurement(
-            `the measurement did not finish within ${Math.round(ms / 1000)}s, so nothing was measured.`,
-            seekTime,
-          ),
-        ),
-      ms,
-    );
+  const expired = new Promise<T>((resolveExpired) => {
+    timer = setTimeout(() => resolveExpired(onExpiry()), ms);
   });
   try {
     return await Promise.race([work, expired]);
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** How long one `run_check` may take before it gives up and says so. */
+export const CHECK_TIMEOUT_MS = 120_000;
+
+/** How long one screenshot or contact sheet may take before it gives up. */
+const SNAPSHOT_TIMEOUT_MS = 60_000;
+
+/**
+ * What `run_check` bounds the pipeline with.
+ *
+ * Spelled out rather than spread over `DEFAULT_CHECK_OPTIONS`, because the
+ * agent's budget is not the CLI's: `atTransitions` samples the seams where
+ * transient overlaps live, the cap keeps a long film from sampling itself to
+ * death, and `snapshots: false` keeps the pipeline from writing PNGs into the
+ * staging dir that the run is about to delete.
+ *
+ * `timeout` is the pipeline's own render-ready and navigation ceiling
+ * (`check.ts` describes it, 10s floor), and it sits a clear 10s below
+ * `CHECK_TIMEOUT_MS` on purpose: `runCheckPipeline` owns the browser it
+ * launches, so the deadline must never be the first thing to fire while a
+ * Chrome is still waiting on a page.
+ */
+export const CHECK_OPTIONS: CheckOptions = {
+  samples: 9,
+  atTransitions: true,
+  maxTransitionSamples: 24,
+  maxIssues: 80,
+  collapseStatic: true,
+  tolerance: 2,
+  timeout: CHECK_TIMEOUT_MS - 10_000,
+  contrast: true,
+  strict: false,
+  snapshots: false,
+};
+
+/** The pipeline seam. The default runs the real thing; tests inject a report. */
+type CheckRunner = (
+  project: ProjectDir,
+  options: CheckOptions,
+  signal?: AbortSignal,
+) => Promise<CheckReport>;
+
+const runRealCheckPipeline: CheckRunner = async (project, options, signal) => {
+  const { runCheckPipeline } = await import("../utils/checkPipeline.js");
+  if (signal?.aborted) throw new Error("cancelled before the check started");
+  return runCheckPipeline(project, options);
+};
+
+/** Every section's findings, in the order a reader would read the report. */
+function flattenCheckFindings(report: CheckReport): RunCheckFinding[] {
+  const sections = [report.lint, report.runtime, report.layout, report.motion, report.contrast];
+  return sections.flatMap((section) =>
+    section.findings.map((finding) => {
+      // A layout or motion finding is an `AnchoredLayoutIssue`, which carries no
+      // line number at all — the browser found it, not the parser. Ask before
+      // reading rather than declaring a line the section cannot have.
+      const line = "line" in finding ? finding.line : undefined;
+      return {
+        code: finding.code,
+        severity: finding.severity,
+        file: finding.sourceFile,
+        ...(line === undefined ? {} : { line }),
+        message: finding.message,
+      };
+    }),
+  );
+}
+
+const STDERR_TAIL_BYTES = 2_048;
+
+/**
+ * Keep the last 2 KB the pipeline wrote to stderr, so a failure can say what it
+ * printed on the way down instead of only naming its exception.
+ *
+ * The patch is scoped to one call and passes every write through to the real
+ * stream, so nothing is swallowed and nothing survives the `finally`.
+ */
+async function withStderrTail<T>(work: (tail: () => string) => Promise<T>): Promise<T> {
+  const original = process.stderr.write.bind(process.stderr);
+  let captured = "";
+  const tail = () => captured.slice(-STDERR_TAIL_BYTES);
+  process.stderr.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+    captured = (captured + String(chunk)).slice(-STDERR_TAIL_BYTES);
+    return (original as (...args: unknown[]) => boolean)(chunk, ...rest);
+  }) as typeof process.stderr.write;
+  try {
+    return await work(tail);
+  } finally {
+    process.stderr.write = original;
+  }
+}
+
+/**
+ * Run the check pipeline over one project and answer in the agent's shape.
+ *
+ * Exported for the tests, which inject `runPipeline` — the browser pass is the
+ * one part a unit lane cannot run, and the adapter's own job is the options it
+ * bounds the pipeline with and the report it flattens.
+ */
+export async function runProjectCheck(
+  project: ProjectDir,
+  opts: { signal?: AbortSignal },
+  runPipeline: CheckRunner = runRealCheckPipeline,
+): Promise<RunCheckResult> {
+  return withStderrTail(async (tail) => {
+    try {
+      const report = await runPipeline(project, CHECK_OPTIONS, opts.signal);
+      return { ran: true, findings: flattenCheckFindings(report) };
+    } catch (error) {
+      return {
+        ran: false,
+        error: error instanceof Error ? error.message : String(error),
+        stderr_tail: tail(),
+      };
+    }
+  });
+}
+
+/** The check's deadline, and the value it resolves with when it fires. */
+export async function runCheckUnderDeadline(
+  work: Promise<RunCheckResult>,
+  ms: number = CHECK_TIMEOUT_MS,
+): Promise<RunCheckResult> {
+  return withDeadline(work, ms, () => ({
+    ran: false as const,
+    error: "deadline",
+    stderr_tail: "",
+  }));
+}
+
+// ── Receipts: a picture for the person the agent is talking to ──────────────
+
+/** Cells per contact-sheet page — `createSnapshotContactSheet`'s own `pageSize`. */
+export const CONTACT_SHEET_PAGE_CELLS = 9;
+
+/**
+ * How many frames one contact sheet captures: four pages of nine.
+ *
+ * The cap is on pages, not on the interval, and that distinction is the whole
+ * point. A fixed half-second cell over four pages covers eighteen seconds and
+ * drops the rest of a ninety-second film without saying so, so the interval is
+ * derived from the duration instead and four pages always span the whole thing.
+ */
+export const CONTACT_SHEET_CELLS = CONTACT_SHEET_PAGE_CELLS * 4;
+
+/** The shortest cell worth looking at; below this, neighbouring frames repeat. */
+const MIN_CELL_SECONDS = 0.5;
+
+/**
+ * How many cells to capture, and the interval between them.
+ *
+ * `cells - 1`, not `cells`, because `computeSnapshotTimes` spaces n frames from
+ * 0 to the end, so n frames leave n-1 gaps. Reporting `duration / cells` would
+ * understate the interval it tells the founder by one cell's worth.
+ *
+ * The half-second floor shortens the sheet rather than the truth: a three-second
+ * film gets seven cells half a second apart, not thirty-six cells eighty
+ * milliseconds apart with "0.5s" printed beside them.
+ */
+function planContactSheetCells(duration: number): { cells: number; cellSeconds: number } {
+  if (!(duration > 0)) return { cells: 1, cellSeconds: MIN_CELL_SECONDS };
+  const cellsAtFloor = Math.floor(duration / MIN_CELL_SECONDS) + 1;
+  const cells = Math.max(2, Math.min(CONTACT_SHEET_CELLS, cellsAtFloor));
+  return { cells, cellSeconds: duration / (cells - 1) };
+}
+
+/** The capture seam. The default runs the real CLI functions, in process. */
+interface SnapshotCapture {
+  capture: (
+    projectDir: string,
+    opts: { at?: number[]; frames?: number; outputDir: string; includeEnd?: boolean },
+  ) => Promise<string[]>;
+  sheet: (snapshotsDir: string, outputPath: string) => Promise<string[]>;
+}
+
+const REAL_SNAPSHOT_CAPTURE: SnapshotCapture = {
+  async capture(projectDir, opts) {
+    const { captureSnapshots } = await import("../commands/snapshot.js");
+    return captureSnapshots(projectDir, opts);
+  },
+  async sheet(snapshotsDir, outputPath) {
+    const { createSnapshotContactSheet } = await import("../capture/contactSheet.js");
+    return createSnapshotContactSheet(snapshotsDir, outputPath);
+  },
+};
+
+const PATH_REFUSED: ReceiptResult = { ran: false, error: "path outside project" };
+
+/**
+ * The composition's frame, read off the file rather than out of a browser.
+ *
+ * `data-width`, `data-height` and the timed children's extents are what the
+ * runtime itself lays the stage out from, so a screenshot of this project comes
+ * back at exactly this size — no launch needed to say so.
+ */
+async function readCompositionFrame(
+  projectDir: string,
+): Promise<{ width: number; height: number; duration: number } | null> {
+  const indexPath = join(projectDir, "index.html");
+  if (!existsSync(indexPath)) return null;
+  const { ensureDOMParser } = await import("../utils/dom.js");
+  const { parseCompositions } = await import("../commands/compositions.js");
+  ensureDOMParser();
+  const [host] = parseCompositions(readFileSync(indexPath, "utf-8"), projectDir);
+  if (!host) return null;
+  return { width: host.width, height: host.height, duration: host.duration };
+}
+
+/**
+ * Rule one of two: a project input has to be a staging copy the agent asked
+ * about. The staging root is where those live, and a path anywhere else is a
+ * request to point a browser at some other part of this disk.
+ *
+ * Checked before the project is read, so an escape is refused as an escape
+ * rather than as "no composition there" — the second message would tell a caller
+ * which paths exist.
+ */
+function isStagedProject(projectDir: string): boolean {
+  const rel = relative(resolve(agentStateRoot()), resolve(projectDir));
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+/** One PNG of the staged composition at `t` seconds, stored and linked. */
+export async function captureFrameReceipt(
+  opts: { projectDir: string; t: number; signal?: AbortSignal },
+  store: ReceiptWriter,
+  capture: SnapshotCapture = REAL_SNAPSHOT_CAPTURE,
+): Promise<ReceiptResult> {
+  if (!isStagedProject(opts.projectDir)) return PATH_REFUSED;
+  const frame = await readCompositionFrame(opts.projectDir);
+  if (!frame) return { ran: false, error: "no composition to screenshot" };
+  const session = receiptSessionId(opts.projectDir);
+  const revision = createProjectSignature(opts.projectDir);
+  // Rule two of two: the output has to be inside the receipts store, which D44
+  // deliberately puts *outside* staging — so one "must start with the staging
+  // dir" rule would refuse the very write this is for.
+  const outputDir = store.captureDir(session, revision);
+  if (!store.contains(outputDir)) return PATH_REFUSED;
+
+  return withDeadline(
+    (async (): Promise<ReceiptResult> => {
+      try {
+        const time = Math.max(0, opts.t);
+        const files = await capture.capture(opts.projectDir, {
+          at: [time],
+          includeEnd: false,
+          outputDir,
+        });
+        const first = files[0];
+        if (!first) return { ran: false, error: "no frame was captured" };
+        const stored = store.put(session, revision, basename(first), readFileSync(first));
+        return {
+          ran: true,
+          url: stored.url,
+          revision,
+          width: frame.width,
+          height: frame.height,
+        };
+      } catch (error) {
+        return { ran: false, error: error instanceof Error ? error.message : String(error) };
+      } finally {
+        rmSync(outputDir, { recursive: true, force: true });
+      }
+    })(),
+    SNAPSHOT_TIMEOUT_MS,
+    () => ({ ran: false, error: "deadline" }),
+  );
+}
+
+/** Four contact-sheet pages spanning the whole staged composition. */
+export async function captureContactSheetReceipt(
+  opts: { projectDir: string; signal?: AbortSignal },
+  store: ReceiptWriter,
+  capture: SnapshotCapture = REAL_SNAPSHOT_CAPTURE,
+): Promise<ReceiptResult> {
+  if (!isStagedProject(opts.projectDir)) return PATH_REFUSED;
+  const frame = await readCompositionFrame(opts.projectDir);
+  if (!frame) return { ran: false, error: "no composition to sheet" };
+  const session = receiptSessionId(opts.projectDir);
+  const revision = createProjectSignature(opts.projectDir);
+  const outputDir = store.captureDir(session, revision);
+  if (!store.contains(outputDir)) return PATH_REFUSED;
+
+  return withDeadline(
+    (async (): Promise<ReceiptResult> => {
+      try {
+        const { cells, cellSeconds } = planContactSheetCells(frame.duration);
+        const { computeSnapshotTimes } = await import("../commands/snapshot.js");
+        const { times } = computeSnapshotTimes(frame.duration, { frames: cells });
+        await capture.capture(opts.projectDir, { at: times, includeEnd: false, outputDir });
+        const pages = await capture.sheet(outputDir, join(outputDir, "contact-sheet.jpg"));
+        if (pages.length === 0) return { ran: false, error: "no contact sheet was produced" };
+        const urls = pages.map(
+          (page) => store.put(session, revision, basename(page), readFileSync(page)).url,
+        );
+        return {
+          ran: true,
+          url: urls[0] as string,
+          revision,
+          width: frame.width,
+          height: frame.height,
+          pages: urls.length,
+          pageUrls: urls,
+          cellSeconds,
+        };
+      } catch (error) {
+        return { ran: false, error: error instanceof Error ? error.message : String(error) };
+      } finally {
+        rmSync(outputDir, { recursive: true, force: true });
+      }
+    })(),
+    SNAPSHOT_TIMEOUT_MS,
+    () => ({ ran: false, error: "deadline" }),
+  );
 }
 
 /**
@@ -522,6 +843,18 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
   // ── CLI adapter for the shared studio API ──────────────────────────────
 
   const project: ResolvedProject = { id: projectId, dir: projectDir, title: projectId };
+  // Receipts outlive the run that made them, so something has to end them:
+  // sweeping once per server start keeps a week of pictures rather than a disk
+  // full of them (T-08-04), and costs one directory walk.
+  const receiptStore = new ReceiptStore();
+  try {
+    receiptStore.sweep();
+  } catch (error) {
+    console.warn(
+      "[Studio] could not sweep old receipts:",
+      error instanceof Error ? error.message : error,
+    );
+  }
   let cachedProjectSignature: string | null = null;
   watcher.addListener((changedPath) => {
     if (affectsProjectSignature(projectDir, join(projectDir, changedPath))) {
@@ -851,8 +1184,49 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
       return withDeadline(
         runLayoutMeasurement(session.browser, entry, composition, seekTime, opts),
         MEASURE_TIMEOUT_MS,
-        seekTime,
+        () =>
+          unavailableMeasurement(
+            `the measurement did not finish within ${Math.round(MEASURE_TIMEOUT_MS / 1000)}s, so nothing was measured.`,
+            seekTime,
+          ),
       );
+    },
+
+    /**
+     * Run the render gate over the staged project (TAB-1093).
+     *
+     * In process, not as a subprocess: `runCheckPipeline` is a function, the
+     * agent's staged copy is already on this disk, and a spawn would depend on a
+     * built `dist` that the compositor image does not carry.
+     */
+    async runCheck(opts) {
+      let project: ProjectDir;
+      try {
+        project = resolveProject(opts.projectDir);
+      } catch (error) {
+        return {
+          ran: false,
+          error: error instanceof Error ? error.message : String(error),
+          stderr_tail: "",
+        };
+      }
+      return runCheckUnderDeadline(runProjectCheck(project, opts));
+    },
+
+    /**
+     * One PNG of the staged composition, for the person the agent is talking to.
+     *
+     * The agent gets a link and nothing else (D21). It cannot see an image, and a
+     * reply that claimed to have looked at one would be the exact failure the
+     * `measure_layout` rules exist to stop.
+     */
+    async frameScreenshot(opts) {
+      return captureFrameReceipt(opts, receiptStore);
+    },
+
+    /** Four contact-sheet pages spanning the whole staged composition. */
+    async contactSheet(opts) {
+      return captureContactSheetReceipt(opts, receiptStore);
     },
 
     async listRegistryCatalog() {
@@ -1041,6 +1415,27 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
       return c.json({ error: "FFmpeg not found", hint: getFFmpegInstallHint() }, 503);
     }
     return next();
+  });
+
+  // Receipts — the pictures Tabario AI makes for the person it is talking to.
+  //
+  // No session check here, and none is possible: the compositor strips the
+  // Tabario session cookie before forwarding (`proxy.ts:116`), so this server
+  // cannot tell one caller from another. The 128-bit id in the path is the
+  // control on this side; ownership is enforced in the compositor, where the
+  // session is known. An unknown id answers exactly as an ill-formed one does,
+  // so the response never confirms that an id exists.
+  app.get(`${RECEIPTS_URL_PREFIX}/*`, (c) => {
+    const parsed = parseReceiptPath(c.req.path.slice(RECEIPTS_URL_PREFIX.length));
+    const bytes = parsed ? receiptStore.get(parsed.session, parsed.revision, parsed.file) : null;
+    if (!parsed || !bytes) return c.text("not found", 404);
+    // Hono's body() takes a Uint8Array over a plain ArrayBuffer; a Node Buffer's
+    // backing store is typed loosely enough to include SharedArrayBuffer, so
+    // hand it a view it will accept.
+    return c.body(new Uint8Array(bytes), 200, {
+      "Content-Type": getMimeType(parsed.file),
+      "Cache-Control": "no-store",
+    });
   });
 
   // Mount the shared studio API at /api.
