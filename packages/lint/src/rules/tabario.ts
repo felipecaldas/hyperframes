@@ -95,13 +95,20 @@ function readTransitionPolicy(
 }
 
 /**
- * The accent ceiling. The two halves of this feature have written it in two
- * places, so both are read and the shorter path wins. Returning null is not an
- * opinion about whether the field was required; `readMotionPolicy` decides that.
+ * The accent ceiling, read at `policies.strong_transition_limit` and nowhere
+ * else.
+ *
+ * The compositor's template schema nests it as
+ * `policies.transitions.strong_transition_limit`, and the emitted tag flattens
+ * it. Those are two different objects, not two spellings of one, so this reads
+ * only the tag's shape. Accepting the nested path here as a fallback would make
+ * an emitter that shipped the wrong shape lint clean, and the accent count would
+ * then be silently absent on every project rather than reported once. Returning
+ * null is not an opinion about whether the field was required; `readMotionPolicy`
+ * decides that.
  */
 function readAccentLimit(policies: Record<string, unknown>): number | null {
-  const candidate =
-    policies.strong_transition_limit ?? readRecord(policies.transitions)?.strong_transition_limit;
+  const candidate = policies.strong_transition_limit;
   if (typeof candidate !== "number" || !Number.isFinite(candidate)) return null;
   return candidate;
 }

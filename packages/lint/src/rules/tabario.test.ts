@@ -95,4 +95,17 @@ describe("tabario register rules", () => {
     expect(findings.some((f) => f.message.includes("keyframes"))).toBe(true);
     expect(findings.some((f) => f.message.includes("easeEach"))).toBe(true);
   });
+
+  it("calls the accent ceiling malformed when it sits at the template schema's path", async () => {
+    // `video-compositor/src/templates/schema.ts:119-121` nests the limit under
+    // `transitions`; the emitted tag flattens it to `policies.strong_transition_limit`.
+    // An emitter that ships the nested shape has to be told, because tolerating it
+    // here would leave the accent count permanently absent and silent. The fixture
+    // mounts three accents against a ceiling of two, so a reader that found the
+    // limit would report `tabario_motion_accent_limit` instead.
+    const findings = await lintFixture("nested-limit.html");
+    expect(findings.map((f) => f.code)).toEqual(["tabario_project_meta_malformed"]);
+    expect(findings[0]!.severity).toBe("warning");
+    expect(findings[0]!.message).toContain("policies.strong_transition_limit");
+  });
 });
