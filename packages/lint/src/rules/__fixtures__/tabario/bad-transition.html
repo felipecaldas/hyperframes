@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+  <head>
+    <title>a transition outside the register</title>
+    <meta
+      name="tabario-project"
+      content='{"schema":1,"template_id":"punchy_creator","brand_profile_id":null,"compiler_version":"1.0.0","policies":{"motion":{"transitions":{"primary":"circle_iris","accents":[]},"durations":{"fast":0.2,"medium":0.4,"slow":0.6},"allowed_eases":["power2.out","power3.out","power1.inOut","none"],"bans":["no idle motion"],"brand_kit_override":null},"strong_transition_limit":2}}'
+    />
+  </head>
+  <body>
+    <div id="main" data-composition-id="main" data-width="1920" data-height="1080" data-duration="3">
+      <div
+        class="clip"
+        data-composition-id="scene-1"
+        data-composition-src="compositions/scene-1.html"
+        data-start="0"
+        data-duration="1.5"
+        data-transition-id="t1"
+        data-transition-type="zoom_blur"
+      ></div>
+      <div
+        class="clip"
+        data-composition-id="scene-2"
+        data-composition-src="compositions/scene-2.html"
+        data-start="1.5"
+        data-duration="1.5"
+        data-transition-type="soft_cut"
+      ></div>
+      <h1 id="title">A type the register never named</h1>
+      <script>
+        window.__timelines = window.__timelines || {};
+        var tl = gsap.timeline({ paused: true });
+        tl.to("#title", { opacity: 1, duration: 0.4, ease: "power2.out" }, 0);
+        window.__timelines["main"] = tl;
+      </script>
+    </div>
+  </body>
+</html>

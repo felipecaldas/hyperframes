@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+  <head>
+    <title>a scene file whose root lives in a template</title>
+    <meta
+      name="tabario-project"
+      content="{&quot;schema&quot;:1,&quot;template_id&quot;:&quot;punchy_creator&quot;,&quot;brand_profile_id&quot;:null,&quot;compiler_version&quot;:&quot;1.0.0&quot;,&quot;policies&quot;:{&quot;motion&quot;:{&quot;transitions&quot;:{&quot;primary&quot;:&quot;circle_iris&quot;,&quot;accents&quot;:[]},&quot;durations&quot;:{&quot;fast&quot;:0.2,&quot;medium&quot;:0.4,&quot;slow&quot;:0.6},&quot;allowed_eases&quot;:[&quot;power2.out&quot;,&quot;power3.out&quot;,&quot;power1.inOut&quot;,&quot;none&quot;],&quot;bans&quot;:[&quot;no overshoot past 1.04&quot;],&quot;brand_kit_override&quot;:null},&quot;strong_transition_limit&quot;:2}}"
+    />
+  </head>
+  <body>
+    <template>
+      <div
+        id="scene-1"
+        data-composition-id="scene-1"
+        data-width="1920"
+        data-height="1080"
+        data-duration="2"
+      >
+        <h1 id="scene-title">A scene the template unwrap would have hidden</h1>
+        <script>
+          window.__timelines = window.__timelines || {};
+          var tl = gsap.timeline({ paused: true });
+          tl.to("#scene-title", { opacity: 1, duration: 0.4, ease: "power2.out" }, 0);
+          tl.to("#scene-title", { scale: 1, duration: 0.6, ease: "back.out(1.7)" }, 0.4);
+          window.__timelines["scene-1"] = tl;
+        </script>
+      </div>
+    </template>
+  </body>
+</html>

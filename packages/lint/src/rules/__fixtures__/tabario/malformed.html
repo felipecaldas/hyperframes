@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+  <head>
+    <title>a tag that does not parse</title>
+    <meta name="tabario-project" content="{schema:" />
+  </head>
+  <body>
+    <div id="main" data-composition-id="main" data-width="1920" data-height="1080" data-duration="3">
+      <div
+        class="clip"
+        data-composition-id="scene-1"
+        data-composition-src="compositions/scene-1.html"
+        data-start="0"
+        data-duration="3"
+        data-transition-type="zoom_blur"
+      ></div>
+      <h1 id="title">A truncated register</h1>
+      <script>
+        window.__timelines = window.__timelines || {};
+        var tl = gsap.timeline({ paused: true });
+        tl.to("#title", { opacity: 1, duration: 0.4, ease: "back.out(1.7)" }, 0);
+        window.__timelines["main"] = tl;
+      </script>
+    </div>
+  </body>
+</html>

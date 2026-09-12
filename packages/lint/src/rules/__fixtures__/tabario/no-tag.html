@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+  <head>
+    <title>no tabario-project tag</title>
+  </head>
+  <body>
+    <div id="main" data-composition-id="main" data-width="1920" data-height="1080" data-duration="3">
+      <div
+        class="clip"
+        data-composition-id="scene-1"
+        data-composition-src="compositions/scene-1.html"
+        data-start="0"
+        data-duration="1.5"
+        data-transition-type="zoom_blur"
+      ></div>
+      <h1 id="title">An untagged project</h1>
+      <script>
+        window.__timelines = window.__timelines || {};
+        var tl = gsap.timeline({ paused: true });
+        tl.to("#title", { opacity: 1, duration: 0.4, ease: "back.out(1.7)" }, 0);
+        window.__timelines["main"] = tl;
+      </script>
+    </div>
+  </body>
+</html>
