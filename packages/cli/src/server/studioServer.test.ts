@@ -316,13 +316,20 @@ describe("frame_screenshot and contact_sheet are receipts, not vision", () => {
     expect(result.cellSeconds).toBeCloseTo(90 / 35, 5);
     const times = recorder.calls[0]?.at ?? [];
     expect(times).toHaveLength(CONTACT_SHEET_CELLS);
-    // The last cell is the readable tail, not the exact end. The runtime
+    // A cell captures the readable tail, not the exact end. The runtime
     // unmounts a clip at its own end, so `tailFrameTime` backs off 3% of the
     // duration and a sample at 90.0 would come back blank. On a 90s film that
     // is 2.7s, wider than one cell, which is why this asserts the tail itself
     // rather than "within one cellSeconds of the end".
-    expect(times.at(-1)).toBeCloseTo(tailFrameTime(90), 5);
+    expect(times).toContain(tailFrameTime(90));
+    expect(times).toEqual([...times].sort((a, b) => a - b));
     expect(times[0]).toBe(0);
+    expect(result.durationSeconds).toBe(90);
+    expect(result.framesPerPage).toBe(9);
+    expect(result.frameCount).toBe(36);
+    expect(result.pageFrameTimes).toHaveLength(4);
+    expect(result.pageFrameTimes?.flat()).toEqual(times);
+    for (const page of result.pageFrameTimes ?? []) expect(page).toHaveLength(9);
   });
 
   it("a short composition gets fewer cells rather than a sub-frame interval", async () => {
@@ -338,6 +345,63 @@ describe("frame_screenshot and contact_sheet are receipts, not vision", () => {
     expect(result.cellSeconds).toBe(0.5);
     expect(recorder.calls[0]?.at).toHaveLength(7);
     expect(result.pages).toBe(1);
+    expect(result.pageFrameTimes).toEqual([recorder.calls[0]?.at]);
+  });
+
+  it("refuses to report requested timestamps when capture omitted a frame", async () => {
+    const stateDir = tmpProject();
+    const projectDir = stagedProject(stateDir, composition(3));
+    process.env.HYPERFRAMES_STATE_DIR = stateDir;
+    const recorder = recordingCapture();
+    const result = await captureContactSheetReceipt(
+      { projectDir },
+      new ReceiptStore(join(stateDir, "studio-receipts")),
+      {
+        ...recorder.capture,
+        capture: async (dir, opts) => (await recorder.capture.capture(dir, opts)).slice(1),
+      },
+    );
+    expect(result).toEqual({
+      ran: false,
+      error: "snapshot count does not match requested timestamps",
+    });
+  });
+
+  it("refuses to label missing sheet pages as complete coverage", async () => {
+    const stateDir = tmpProject();
+    const projectDir = stagedProject(stateDir, composition(90));
+    process.env.HYPERFRAMES_STATE_DIR = stateDir;
+    const recorder = recordingCapture();
+    const result = await captureContactSheetReceipt(
+      { projectDir },
+      new ReceiptStore(join(stateDir, "studio-receipts")),
+      {
+        ...recorder.capture,
+        sheet: async (dir, output) => (await recorder.capture.sheet(dir, output)).slice(1),
+      },
+    );
+    expect(result).toEqual({
+      ran: false,
+      error: "contact sheet page count does not match captured frames",
+    });
+  });
+
+  it("partial final pages report only their actual sample times", async () => {
+    const stateDir = tmpProject();
+    const projectDir = stagedProject(stateDir, composition(5));
+    process.env.HYPERFRAMES_STATE_DIR = stateDir;
+    const recorder = recordingCapture();
+    const result = await captureContactSheetReceipt(
+      { projectDir },
+      new ReceiptStore(join(stateDir, "studio-receipts")),
+      recorder.capture,
+    );
+    if (!result.ran) throw new Error(result.error);
+    expect(result.pages).toBe(2);
+    expect(result.frameCount).toBe(11);
+    expect(result.pageFrameTimes?.map((times) => times.length)).toEqual([9, 2]);
+    expect(result.pageFrameTimes?.flat()).toEqual(recorder.calls[0]?.at);
+    expect(result.pageFrameTimes?.[1]).toEqual([4.5, 4.85]);
   });
 
   it("no screenshot or contact sheet result carries image bytes (D21)", async () => {

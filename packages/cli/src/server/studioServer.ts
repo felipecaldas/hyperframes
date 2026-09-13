@@ -546,9 +546,19 @@ export async function captureContactSheetReceipt(
         const { cells, cellSeconds } = planContactSheetCells(frame.duration);
         const { computeSnapshotTimes } = await import("../commands/snapshot.js");
         const { times } = computeSnapshotTimes(frame.duration, { frames: cells });
-        await capture.capture(opts.projectDir, { at: times, includeEnd: false, outputDir });
+        const snapshots = await capture.capture(opts.projectDir, {
+          at: times,
+          includeEnd: false,
+          outputDir,
+        });
+        if (snapshots.length !== times.length) {
+          return { ran: false, error: "snapshot count does not match requested timestamps" };
+        }
         const pages = await capture.sheet(outputDir, join(outputDir, "contact-sheet.jpg"));
         if (pages.length === 0) return { ran: false, error: "no contact sheet was produced" };
+        if (pages.length !== Math.ceil(times.length / CONTACT_SHEET_PAGE_CELLS)) {
+          return { ran: false, error: "contact sheet page count does not match captured frames" };
+        }
         const urls = pages.map(
           (page) => store.put(session, revision, basename(page), readFileSync(page)).url,
         );
@@ -561,6 +571,12 @@ export async function captureContactSheetReceipt(
           pages: urls.length,
           pageUrls: urls,
           cellSeconds,
+          durationSeconds: frame.duration,
+          framesPerPage: CONTACT_SHEET_PAGE_CELLS,
+          frameCount: times.length,
+          pageFrameTimes: pages.map((_, index) =>
+            times.slice(index * CONTACT_SHEET_PAGE_CELLS, (index + 1) * CONTACT_SHEET_PAGE_CELLS),
+          ),
         };
       } catch (error) {
         return { ran: false, error: error instanceof Error ? error.message : String(error) };

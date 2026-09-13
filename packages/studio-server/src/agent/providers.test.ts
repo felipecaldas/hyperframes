@@ -1745,6 +1745,13 @@ describe("Tabario AI provider", () => {
     expect(system.content).toContain("check is not lint");
     expect(system.content).toContain("run_check");
     expect(system.content).toContain("you get a link and you give them the link");
+    expect(system.content).toContain("report sampled page ranges only from `pageFrameTimes`");
+    expect(system.content).toContain("If exact timestamps are absent");
+    const sheet = body.tools.find(
+      (t: { function: { name: string } }) => t.function.name === "contact_sheet",
+    );
+    expect(sheet.function.description).toContain("Use pageFrameTimes");
+    expect(sheet.function.description).toContain("never infer page ranges from cellSeconds");
   });
 
   it("passes a ran:false check result through verbatim rather than smoothing it", async () => {
@@ -1792,6 +1799,27 @@ describe("Tabario AI provider", () => {
       expect(result.ran).toBe(false);
       expect(result.error).toContain("This Studio server cannot");
     }
+  });
+
+  it("passes exact contact sheet timestamps to the model unchanged", async () => {
+    const receipt = {
+      ran: true,
+      url: "/studio/receipts/abc/def/0123456789abcdef0123456789abcdef.jpg",
+      revision: "def",
+      width: 720,
+      height: 720,
+      pages: 1,
+      pageUrls: ["/studio/receipts/abc/def/0123456789abcdef0123456789abcdef.jpg"],
+      cellSeconds: 0.5,
+      durationSeconds: 3,
+      framesPerPage: 9,
+      frameCount: 7,
+      pageFrameTimes: [[0, 0.5, 1, 1.5, 2, 2.5, 2.91]],
+    };
+    const contactSheet = vi.fn().mockResolvedValue(receipt);
+    const { fetchImpl, root } = await runWithCall(call("c", "contact_sheet", {}), { contactSheet });
+    expect(contactSheet).toHaveBeenCalledWith(expect.objectContaining({ projectDir: root }));
+    expect(toolResultFrom(fetchImpl, 1, "c")).toEqual(receipt);
   });
 
   it("gives the model a receipt URL and no bytes", async () => {

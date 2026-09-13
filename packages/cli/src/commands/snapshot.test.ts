@@ -294,6 +294,20 @@ describe("computeSnapshotTimes (FINDING [7]: tail is always captured)", () => {
     expect(computeSnapshotTimes(8, { frames: 1 }).times).toEqual([4]);
   });
 
+  it("dense generated samples stay chronological when the readable tail precedes a sample", () => {
+    const { times } = computeSnapshotTimes(42.208333333333336, { frames: 36 });
+    expect(times).toHaveLength(36);
+    expect(times).toEqual([...times].sort((a, b) => a - b));
+    expect(times).toContain(40.942);
+    expect(times.at(-1)).toBe(41.002);
+  });
+
+  it("does not reorder explicitly requested samples", () => {
+    expect(computeSnapshotTimes(8, { frames: 3, at: [6, 1, 3], includeEnd: false }).times).toEqual([
+      6, 1, 3,
+    ]);
+  });
+
   it("explicit --at: keeps the user's times AND appends an end-of-timeline frame", () => {
     const { times, appendedTail } = computeSnapshotTimes(8, { frames: 5, at: [1, 2, 3] });
     expect(times.slice(0, 3)).toEqual([1, 2, 3]);

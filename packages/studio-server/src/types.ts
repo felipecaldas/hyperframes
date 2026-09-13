@@ -121,8 +121,8 @@ export type RunCheckResult =
  *
  * `width` and `height` are the composition's frame size — the size of a
  * screenshot, and the size of each cell's source frame in a contact sheet.
- * `pages` and `cellSeconds` are present for a contact sheet, where the interval
- * is derived from the composition's duration and belongs in the answer.
+ * Contact sheets include exact per-page sampled times. The nominal grid
+ * interval is not uniform at the readable tail: never derive page ranges from it.
  */
 export type ReceiptResult =
   | {
@@ -134,7 +134,14 @@ export type ReceiptResult =
       pages?: number;
       /** Every page's URL when there is more than one, in order. */
       pageUrls?: string[];
+      /** Nominal grid spacing before readable-tail adjustment, not page coverage. */
       cellSeconds?: number;
+      durationSeconds?: number;
+      /** Maximum cells per page; the final page may have fewer. */
+      framesPerPage?: number;
+      frameCount?: number;
+      /** Exact sampled seconds in cell order, aligned with pageUrls. */
+      pageFrameTimes?: number[][];
     }
   | { ran: false; error: string };
 

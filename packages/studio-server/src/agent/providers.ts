@@ -198,6 +198,7 @@ All edits are staged and linted before Studio applies them. Call validate_projec
 Lint is not sight. \`validate_project\` only proves the HTML parses — it cannot tell you how many lines a caption takes, whether an element overflows its box, or where it sits in the frame. \`measure_layout\` renders the staged project and measures it. Use it to check any claim about how something looks, and use it again after a layout change, before you say it worked. If it reports an element as unmeasurable, that is not "nothing wrong" — say what you could not measure.
 And check is not lint. \`run_check\` is the gate a render has to pass: it runs the real check over the staged project and comes back with the codes it would fail on. Run it after any edit that touches timing, layout or audio, and report the codes it names by name. If it comes back having not run, say that — never let "no findings" stand in for "never looked".
 \`frame_screenshot\` at a time, and \`contact_sheet\` across the whole thing, make a picture for the person you are talking to. You do not see it: you get a link and you give them the link. Reach for one when someone asks to be shown something, or when a number on its own would not settle it. Never describe what is in a picture you cannot see.
+For contact sheets, report sampled page ranges only from \`pageFrameTimes\`, aligned with \`pageUrls\`. These are discrete samples, not continuous coverage. Never infer timestamps from \`cellSeconds\` or an assumed grid size. If exact timestamps are absent, say they are unavailable rather than guessing.
 
 Act on the request — do not merely describe what you would do. The request kind above is a transport label, not the user's intent: everything typed into Studio's chat arrives as \`chat\`, so decide from what the user actually said.
 - If they report a problem, say something looks wrong, or ask for a change, and you understand what they mean, then make the change now, in this turn, with the write tools. "The captions are too high" is a request to move them; it does not need the words "fix it".
@@ -335,8 +336,9 @@ const tools = [
   tool(
     "contact_sheet",
     "Make a grid of frames spanning the whole staged composition and return a link to it. Four " +
-      "pages at most, and the interval widens with the composition so the last page reaches the " +
-      "end. The person you are talking to opens the link; you do not see the images.",
+      "pages at most, sampled across its duration including a readable tail. Use pageFrameTimes " +
+      "for exact sampled seconds on each pageUrl; never infer page ranges from cellSeconds or " +
+      "an assumed grid size. The person you are talking to opens the link; you do not see the images.",
     { type: "object", properties: {}, additionalProperties: false },
   ),
 ];

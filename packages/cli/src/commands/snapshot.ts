@@ -249,7 +249,9 @@ export function computeSnapshotTimes(
   const times = Array.from({ length: n }, (_, i) => (i / (n - 1)) * duration);
   // Replace the final (exact-duration, blank) point with the readable tail.
   if (includeEnd) times[times.length - 1] = tail;
-  return { times: times.map(round), appendedTail: false };
+  // Dense grids can already have a sample after the readable tail. Keep
+  // generated sheets chronological without changing explicit --at ordering.
+  return { times: times.map(round).sort((a, b) => a - b), appendedTail: false };
 }
 
 /**
