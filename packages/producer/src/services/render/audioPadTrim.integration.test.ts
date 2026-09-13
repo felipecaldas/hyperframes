@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -177,5 +178,62 @@ describe.skipIf(!hasFfmpeg)("audio pad real-media packet contract", () => {
     expect(
       Math.abs(deliveredLevel.integratedLufs - sourceLevel.integratedLufs),
     ).toBeLessThanOrEqual(3);
+
+    // Limiter lookahead must be compensated: keep all three seconds, including
+    // the last audible block, instead of shifting narration and cutting its tail.
+    const pcm = execFileSync(
+      ffmpeg,
+      ["-v", "error", "-i", delivered, "-f", "f32le", "-ac", "2", "-ar", "48000", "-"],
+      { maxBuffer: 2 * 1024 * 1024 },
+    );
+    expect(pcm.length / (4 * 2)).toBeGreaterThanOrEqual(3 * 48000);
+    for (const offset of [0, (3 * 48000 - 1024) * 8]) {
+      let energy = 0;
+      for (let sample = 0; sample < 1024; sample++)
+        energy += pcm.readFloatLE(offset + sample * 8) ** 2;
+      expect(Math.sqrt(energy / 1024)).toBeGreaterThan(0.1);
+    }
   });
+
+  it.each(["anullsrc=r=48000:cl=stereo", "sine=frequency=440:sample_rate=48000"])(
+    "keeps already-safe AAC samples unchanged (%s)",
+    async (signal) => {
+      const dir = mkdtempSync(join(tmpdir(), "hf-aac-safe-"));
+      dirs.push(dir);
+      const input = join(dir, "input.m4a"),
+        output = join(dir, "output.m4a");
+      const ffmpeg = getFfmpegBinary();
+      execFileSync(ffmpeg, [
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        signal,
+        "-t",
+        "1",
+        "-c:a",
+        "aac",
+        input,
+      ]);
+      const result = await padOrTrimAudioToVideoFrameCount({
+        videoPath: join(dir, "unused.mp4"),
+        audioPath: input,
+        outputPath: output,
+        probeVideoFrameInfo: async () => ({ frameCount: 30, fpsNum: 30, fpsDen: 1 }),
+        probeAudioInfo: async () => ({ durationSeconds: 1 }),
+      });
+      expect(result.success, result.error).toBe(true);
+      expect(result.operation).toBe("copy");
+      const decodedHash = (file: string) =>
+        createHash("sha256")
+          .update(
+            execFileSync(ffmpeg, ["-v", "error", "-i", file, "-f", "f32le", "-"], {
+              maxBuffer: 1024 * 1024,
+            }),
+          )
+          .digest("hex");
+      expect(decodedHash(output)).toBe(decodedHash(input));
+    },
+  );
 });

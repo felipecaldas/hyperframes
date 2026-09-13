@@ -14,6 +14,9 @@
  */
 
 import { describe, expect, it, mock } from "bun:test";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   buildPadTrimAudioArgs,
   buildPadTrimAudioPlan,
@@ -306,7 +309,7 @@ describe("padOrTrimAudioToVideoFrameCount", () => {
     expect(captured.args).toHaveLength(1);
   });
 
-  it("attenuates the duration-normalized artifact from its measured AAC true peak", async () => {
+  it("limits the duration-normalized artifact without auto-gain or lookahead delay", async () => {
     const calls: string[][] = [];
     const { input } = harness({
       video: { frameCount: 90, fpsNum: 30, fpsDen: 1 },
@@ -326,8 +329,62 @@ describe("padOrTrimAudioToVideoFrameCount", () => {
     expect(result.error).toBe("synthetic correction stop");
     expect(calls).toHaveLength(2);
     const correctionArgs = calls[1]!;
-    expect(correctionArgs[correctionArgs.indexOf("-af") + 1]).toBe("volume=-2.500dB");
+    expect(correctionArgs[correctionArgs.indexOf("-af") + 1]).toBe(
+      "alimiter=limit=0.891250938:level=false:latency=true",
+    );
     expect(correctionArgs[correctionArgs.indexOf("-t") + 1]).toBe("3.000000");
+  });
+
+  it("rechecks encoded peaks and tightens the limiter without cascading lossy encodes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-peak-loop-"));
+    try {
+      const calls: string[][] = [];
+      const peaks = [1.5, -0.1, -0.5, -1.4];
+      const { input } = harness({
+        video: { frameCount: 90, fpsNum: 30, fpsDen: 1 },
+        audio: { durationSeconds: 3 },
+      });
+      input.outputPath = join(dir, "audio.m4a");
+      input.probeAudioTruePeakDbfs = async () => {
+        const peak = peaks.shift();
+        if (peak === undefined) throw new Error("unexpected extra probe");
+        return peak;
+      };
+      input.runFfmpeg = async (args) => {
+        calls.push(args);
+        const output = args.at(-1);
+        if (!output) throw new Error("missing output");
+        writeFileSync(output, `candidate-${calls.length}`);
+        return { success: true };
+      };
+      const result = await padOrTrimAudioToVideoFrameCount(input);
+      expect(result.success).toBe(true);
+      expect(peaks).toEqual([]);
+      expect(calls).toHaveLength(4);
+      for (const [i, call] of calls.slice(1).entries()) {
+        expect(call[call.indexOf("-i") + 1]).toBe(input.outputPath);
+        const ceiling = [-1, -2, -2.6][i]!;
+        expect(call[call.indexOf("-af") + 1]).toBe(
+          `alimiter=limit=${(10 ** (ceiling / 20)).toFixed(9)}:level=false:latency=true`,
+        );
+      }
+      expect(readFileSync(input.outputPath, "utf8")).toBe("candidate-4");
+      expect(readdirSync(dir)).toEqual(["audio.m4a"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed after three unsuccessful limiter passes", async () => {
+    const { input, captured } = harness({
+      video: { frameCount: 90, fpsNum: 30, fpsDen: 1 },
+      audio: { durationSeconds: 3 },
+    });
+    input.probeAudioTruePeakDbfs = async () => 0;
+    const result = await padOrTrimAudioToVideoFrameCount(input);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("after 3 correction passes");
+    expect(captured.args).toHaveLength(4);
   });
 });
 

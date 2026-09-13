@@ -43,6 +43,7 @@ const AUDIO_DURATION_TOLERANCE_SECONDS = 0.001;
 /** Delivery headroom applied after every AAC encode in this stage. */
 export const AAC_DELIVERY_TRUE_PEAK_DBFS = -1;
 const MAX_TRUE_PEAK_CORRECTION_PASSES = 3;
+const TRUE_PEAK_RETRY_MARGIN_DB = 0.1;
 
 export interface ProbeVideoFrameInfo {
   /** Number of video frames in the stream. */
@@ -120,7 +121,7 @@ function buildAacTruePeakCorrectionArgs(
   inputPath: string,
   outputPath: string,
   targetDurationSeconds: number,
-  attenuationDb: number,
+  limiterCeilingDb: number,
 ): string[] {
   return [
     "-i",
@@ -129,7 +130,9 @@ function buildAacTruePeakCorrectionArgs(
     "0:a:0",
     "-vn",
     "-af",
-    `volume=${attenuationDb.toFixed(3)}dB`,
+    // Auto-level would undo the ceiling. Compensate lookahead latency so the
+    // limiter does not shift narration or truncate the tail at the -t boundary.
+    `alimiter=limit=${Math.max(0.0625, 10 ** (limiterCeilingDb / 20)).toFixed(9)}:level=false:latency=true`,
     "-t",
     formatSeconds(targetDurationSeconds),
     "-c:a",
@@ -431,7 +434,7 @@ async function enforceAacTruePeak(
   try {
     scratchDir = mkdtempSync(join(dirname(input.audioPath), ".true-peak-"));
     const correctedPath = join(scratchDir, "audio.m4a");
-    let attenuationDb = 0;
+    let limiterCeilingDb = AAC_DELIVERY_TRUE_PEAK_DBFS;
     let measuredPath = input.audioPath;
     for (let pass = 0; pass <= MAX_TRUE_PEAK_CORRECTION_PASSES; pass += 1) {
       const truePeakDbfs = await input.probeTruePeak(measuredPath, input.signal);
@@ -444,13 +447,20 @@ async function enforceAacTruePeak(
       }
       if (pass === MAX_TRUE_PEAK_CORRECTION_PASSES) break;
 
-      attenuationDb += AAC_DELIVERY_TRUE_PEAK_DBFS - truePeakDbfs;
+      // Limit peaks instead of turning the whole mix down by its worst spike.
+      // AAC can create new inter-sample peaks; measure each encoded candidate
+      // and lower the limiter ceiling on retries, always from the same source.
+      // The first pass starts at the delivery ceiling, independent of how far
+      // the uncorrected input overshot it. Leave a margin for 0.1 dB probe rounding.
+      if (pass > 0) {
+        limiterCeilingDb += AAC_DELIVERY_TRUE_PEAK_DBFS - truePeakDbfs - TRUE_PEAK_RETRY_MARGIN_DB;
+      }
       const result = await input.runner(
         buildAacTruePeakCorrectionArgs(
           input.audioPath,
           correctedPath,
           input.targetDurationSeconds,
-          attenuationDb,
+          limiterCeilingDb,
         ),
       );
       if (!result.success) {
