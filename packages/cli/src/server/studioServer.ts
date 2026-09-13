@@ -846,7 +846,10 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
   // Receipts outlive the run that made them, so something has to end them:
   // sweeping once per server start keeps a week of pictures rather than a disk
   // full of them (T-08-04), and costs one directory walk.
-  const receiptStore = new ReceiptStore();
+  // The owner is the published project, never the temporary agent staging dir.
+  // Persist it outside staging so the compositor can authorize a receipt before
+  // forwarding, and another project's loopback server also refuses the bytes.
+  const receiptStore = new ReceiptStore(undefined, projectDir);
   try {
     receiptStore.sweep();
   } catch (error) {
@@ -1419,12 +1422,10 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
 
   // Receipts — the pictures Tabario AI makes for the person it is talking to.
   //
-  // No session check here, and none is possible: the compositor strips the
-  // Tabario session cookie before forwarding (`proxy.ts:116`), so this server
-  // cannot tell one caller from another. The 128-bit id in the path is the
-  // control on this side; ownership is enforced in the compositor, where the
-  // session is known. An unknown id answers exactly as an ill-formed one does,
-  // so the response never confirms that an id exists.
+  // The compositor authenticates the caller and verifies the persisted owner
+  // before forwarding. This server also confines reads to its bound project:
+  // knowing an unguessable URL must not let another project's server read it.
+  // Missing ownership metadata (including legacy receipts) fails closed.
   app.get(`${RECEIPTS_URL_PREFIX}/*`, (c) => {
     const parsed = parseReceiptPath(c.req.path.slice(RECEIPTS_URL_PREFIX.length));
     const bytes = parsed ? receiptStore.get(parsed.session, parsed.revision, parsed.file) : null;

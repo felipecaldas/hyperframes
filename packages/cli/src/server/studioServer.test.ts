@@ -376,9 +376,10 @@ describe("the receipts route serves a stored picture and nothing else", () => {
   it("serves a stored receipt and answers an unknown id exactly as an ill-formed one", async () => {
     const stateDir = tmpProject();
     process.env.HYPERFRAMES_STATE_DIR = stateDir;
-    const store = new ReceiptStore();
+    const projectDir = tmpProject();
+    const store = new ReceiptStore(undefined, projectDir);
     const receipt = store.put("session-1", "rev-1", "frame.png", Buffer.from("bytes", "utf-8"));
-    server = createStudioServer({ projectDir: tmpProject() });
+    server = createStudioServer({ projectDir });
 
     const found = await server.app.request(receipt.url);
     const unknown = await server.app.request("/studio/receipts/session-1/rev-1/deadbeef.png");
@@ -390,6 +391,14 @@ describe("the receipts route serves a stored picture and nothing else", () => {
     expect(unknown.status).toBe(404);
     expect(malformed.status).toBe(404);
     expect(await unknown.text()).toBe(await malformed.text());
+    const foreign = createStudioServer({ projectDir: tmpProject() });
+    try {
+      const denied = await foreign.app.request(receipt.url);
+      expect(denied.status).toBe(404);
+      expect(await denied.text()).toBe("not found");
+    } finally {
+      foreign.watcher.close();
+    }
   });
 });
 

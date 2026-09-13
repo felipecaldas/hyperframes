@@ -20,6 +20,27 @@ afterEach(() => {
 const PNG = Buffer.from("not a real png, but real bytes", "utf-8");
 
 describe("ReceiptStore", () => {
+  it("binds receipts to the published project, across server restarts", () => {
+    const root = tmpDir("hf-receipts-owned-");
+    const first = new ReceiptStore(root, "/published/run-a/project");
+    const foreign = new ReceiptStore(root, "/published/run-b/project");
+    const receipt = first.put("session-1", "rev-1", "frame.png", PNG);
+    expect(foreign.get("session-1", "rev-1", receipt.file)).toBeNull();
+    expect(
+      new ReceiptStore(root, "/published/run-a/project").get("session-1", "rev-1", receipt.file),
+    ).toEqual(PNG);
+    expect(() => foreign.put("session-1", "rev-1", "frame.png", PNG)).toThrow("owner");
+  });
+
+  it("does not serve ownership metadata or an unowned legacy receipt", () => {
+    const root = tmpDir("hf-receipts-legacy-");
+    const legacy = new ReceiptStore(root);
+    const receipt = legacy.put("session-1", "rev-1", "frame.png", PNG);
+    const owned = new ReceiptStore(root, "/published/run-a/project");
+    expect(owned.get("session-1", "rev-1", receipt.file)).toBeNull();
+    expect(owned.get("session-1", "rev-1", ".owner.json")).toBeNull();
+  });
+
   // D44: the agent's staging dir is removed the moment a run ends, so a
   // receipt written inside it would be gone before the founder clicked the
   // link. This is the test that says so.

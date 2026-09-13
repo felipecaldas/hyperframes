@@ -103,9 +103,11 @@ export interface ReceiptWriter {
  */
 export class ReceiptStore implements ReceiptWriter {
   readonly rootDir: string;
+  private readonly projectKey: string | undefined;
 
-  constructor(rootDir: string = studioReceiptsRoot()) {
+  constructor(rootDir: string = studioReceiptsRoot(), projectDir?: string) {
     this.rootDir = resolve(rootDir);
+    this.projectKey = projectDir === undefined ? undefined : receiptSessionId(projectDir);
   }
 
   /** Write bytes and return the link to them. */
@@ -117,6 +119,14 @@ export class ReceiptStore implements ReceiptWriter {
     const file = `${id}${extname(name) || ".png"}`;
     const dir = join(this.rootDir, session, revision);
     mkdirSync(dir, { recursive: true });
+    if (this.projectKey !== undefined) {
+      const ownerPath = join(dir, ".owner.json");
+      if (existsSync(ownerPath)) {
+        if (!this.owns(dir)) throw new Error("receipt owner mismatch");
+      } else {
+        writeFileSync(ownerPath, JSON.stringify({ projectKey: this.projectKey }), { flag: "wx" });
+      }
+    }
     const path = join(dir, file);
     writeFileSync(path, bytes);
     return { id, file, path, url: `${RECEIPTS_URL_PREFIX}/${session}/${revision}/${file}` };
@@ -124,10 +134,27 @@ export class ReceiptStore implements ReceiptWriter {
 
   /** The bytes behind a receipt URL, or null when there is nothing there. */
   get(session: string, revision: string, file: string): Buffer | null {
-    if (!isSafeSegment(session) || !isSafeSegment(revision) || !isSafeSegment(file)) return null;
+    if (![session, revision, file].every(isSafeSegment)) return null;
+    if (!/^[a-f0-9]{32}\.(png|jpg|jpeg)$/.test(file)) return null;
+    if (this.projectKey !== undefined && !this.owns(join(this.rootDir, session, revision)))
+      return null;
     const path = join(this.rootDir, session, revision, file);
     if (!isWithin(this.rootDir, path) || !existsSync(path) || !statSync(path).isFile()) return null;
     return readFileSync(path);
+  }
+
+  private owns(dir: string): boolean {
+    try {
+      const owner: unknown = JSON.parse(readFileSync(join(dir, ".owner.json"), "utf-8"));
+      return (
+        typeof owner === "object" &&
+        owner !== null &&
+        "projectKey" in owner &&
+        owner.projectKey === this.projectKey
+      );
+    } catch {
+      return false;
+    }
   }
 
   /**
