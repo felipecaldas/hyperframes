@@ -127,7 +127,11 @@ const STAY_IN_REGISTER =
   "Every tween you write uses an ease from allowed_eases and a duration from the durations " +
   "table. Direction words such as fast, snappy or smooth map through the word table in FRAME.md; " +
   "if a word is not in the table, ask, do not guess. Never add a transition type the register " +
-  "does not list.";
+  "does not list. A comparative request such as snappier means the snappy ease AND the fast duration " +
+  "from that file's word table, not an arbitrary shorter time or a different allowed ease. " +
+  "If the target already matches both values, leave it unchanged and explain that it already " +
+  "matches the register; never halve the duration to manufacture an edit. Preserve all clip " +
+  "timing attributes and word onset positions when changing an element's own tween.";
 
 const NO_REGISTER =
   "There is no register to follow: this project has no FRAME.md; keep today's eases, durations " +
@@ -881,6 +885,7 @@ async function requestCompletion(
 
 /** What a round of tools did, for the gate that runs when the model tries to finish. */
 interface ToolRunState {
+  readFrameMd: boolean;
   /**
    * Any tool ran at all, including one that threw. A run that never looked at
    * the project cannot answer for it (TAB-1063): the live run that motivated
@@ -944,12 +949,31 @@ function transcriptEntry(call: ToolCall, content: string): AgentToolTranscriptEn
  * thrown error leaves nothing to quote.
  */
 function noteToolOutcome(state: ToolRunState, call: ToolCall, result: unknown): void {
+  if (isFrameRead(call, result)) state.readFrameMd = true;
   if (WRITE_TOOLS.has(call.function.name) && isRenderable(parseArguments(call).path)) {
     state.changedRenderable = true;
     state.measuredSinceWrite = null;
   }
   if (call.function.name === "measure_layout" && isLayoutMeasurement(result))
     state.measuredSinceWrite = result;
+}
+
+function isFrameRead(call: ToolCall, result: unknown): boolean {
+  return (
+    call.function.name === "read_file" &&
+    typeof result === "object" &&
+    result !== null &&
+    "path" in result &&
+    result.path === "FRAME.md"
+  );
+}
+
+function assertFrameRead(call: ToolCall, options: TabarioModelOptions, state: ToolRunState): void {
+  if (!WRITE_TOOLS.has(call.function.name) && call.function.name !== "delete_file") return;
+  if (state.readFrameMd || !existsSync(join(options.stagingDir, "FRAME.md"))) return;
+  throw new Error(
+    "Before editing, read FRAME.md in this run and use its word table. Earlier conversation is not the current register.",
+  );
 }
 
 async function executeToolCalls(
@@ -970,6 +994,7 @@ async function executeToolCalls(
     state.calledAnyTool = true;
     let result: unknown;
     try {
+      assertFrameRead(call, options, state);
       result = await executeTool(call, options);
       noteToolOutcome(state, call, result);
     } catch (error) {
@@ -1173,6 +1198,7 @@ export async function runTabarioModel(options: TabarioModelOptions): Promise<Tab
   const fetchImpl = options.fetchImpl ?? fetch;
   let assistantText = "";
   const state: ToolRunState = {
+    readFrameMd: false,
     calledAnyTool: false,
     changedRenderable: false,
     measuredSinceWrite: null,

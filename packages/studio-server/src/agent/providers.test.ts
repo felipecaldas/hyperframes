@@ -134,6 +134,60 @@ describe("Tabario AI provider", () => {
     });
   });
 
+  it("refuses a write until this run reads FRAME.md, even with prior register discussion", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-register-first-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    writeFileSync(join(root, "FRAME.md"), FRAME_MD);
+    const hash = createHash("sha256").update(HTML).digest("hex");
+    const edit = {
+      path: "index.html",
+      old_string: "before",
+      new_string: "after",
+      expected_hash: hash,
+    };
+    const results: string[] = [];
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(completion("", [call("blocked", "edit_file", edit)]))
+      .mockImplementationOnce(async () => {
+        expect(readFileSync(join(root, "index.html"), "utf8")).toBe(HTML);
+        return completion("", [
+          call("frame", "read_file", { path: "FRAME.md" }),
+          call("allowed", "edit_file", edit),
+        ]);
+      })
+      .mockImplementation(async () => completion("Updated."));
+    await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [
+        {
+          role: "assistant",
+          text: "I read the register in the last turn.",
+          at: new Date().toISOString(),
+        },
+        { role: "user", text: "Make the title snappier", at: new Date().toISOString() },
+      ],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      onToolResult: (entry) => {
+        results.push(entry.result);
+      },
+      fetchImpl,
+    });
+    expect(results[0]).toContain("read FRAME.md in this run");
+    expect(readFileSync(join(root, "index.html"), "utf8")).toContain("after");
+    const body = JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body));
+    expect(body.messages[0].content).toContain(
+      "snappier means the snappy ease AND the fast duration",
+    );
+    expect(body.messages[0].content).toContain("already matches");
+    expect(body.messages[0].content).not.toContain("power3.out");
+  });
+
   /**
    * TAB-781. The model refused a timeline question — "my capabilities are
    * limited to file operations" — while holding every tool needed to answer it.
