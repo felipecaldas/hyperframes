@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -99,6 +99,82 @@ function estimateFreq(s: Float32Array, sampleRate: number, from = 0.05, to?: num
 }
 
 describe("readWav / writeWav", () => {
+  function extensibleWav(float: boolean): Buffer {
+    const p = join(dir, "extensible-source.wav");
+    writeWav(p, new Float32Array([0.5, -0.5, 0.25, -0.25]), SR, 2, float);
+    const canonical = readFileSync(p);
+    const buffer = Buffer.concat([
+      canonical.subarray(0, 36),
+      Buffer.alloc(24),
+      canonical.subarray(36),
+    ]);
+    buffer.writeUInt32LE(buffer.length - 8, 4);
+    buffer.writeUInt32LE(40, 16);
+    buffer.writeUInt16LE(0xfffe, 20);
+    buffer.writeUInt16LE(22, 36);
+    buffer.writeUInt16LE(float ? 32 : 16, 38);
+    buffer.writeUInt32LE(3, 40); // front left + right
+    buffer.writeUInt32LE(float ? 3 : 1, 44);
+    Buffer.from("00001000800000aa00389b71", "hex").copy(buffer, 48);
+    return buffer;
+  }
+
+  it.each([false, true])("reads extensible WAV and bakes its envelope (float=%s)", (float) => {
+    const p = join(dir, "extensible.wav");
+    writeFileSync(p, extensibleWav(float));
+    const before = readWav(p);
+    expect(before.channels).toBe(2);
+    expect(before.sampleRate).toBe(SR);
+    expect(before.float).toBe(float);
+    for (const [i, expected] of [0.5, -0.5, 0.25, -0.25].entries()) {
+      expect(before.samples[i]).toBeCloseTo(expected, float ? 6 : 4);
+    }
+    expect(
+      applyVolumeEnvelopeToWav(
+        p,
+        [
+          { time: 0, volume: 0.5 },
+          { time: 1, volume: 0.5 },
+        ],
+        0,
+        1,
+      ),
+    ).toBe(true);
+    const after = readWav(p).samples;
+    for (const [i, expected] of [0.25, -0.25, 0.125, -0.125].entries()) {
+      expect(after[i]).toBeCloseTo(expected, float ? 6 : 4);
+    }
+  });
+
+  it.each([
+    ["foreign GUID", 48, 1],
+    ["foreign subtype high word", 46, 1],
+    ["unsupported subtype", 44, 6],
+    ["short extension", 36, 20],
+    ["oversized extension", 36, 24],
+    ["short fmt chunk", 16, 16],
+    ["truncated fmt chunk", 16, 65535],
+    ["invalid precision", 38, 33],
+  ])("refuses extensible WAV with %s without modifying it", (_label, offset, value) => {
+    const p = join(dir, "invalid-extensible.wav");
+    const buffer = extensibleWav(true);
+    buffer.writeUInt16LE(value, offset);
+    writeFileSync(p, buffer);
+    expect(() => readWav(p)).toThrow(AudioFxRenderError);
+    expect(
+      applyVolumeEnvelopeToWav(
+        p,
+        [
+          { time: 0, volume: 0.5 },
+          { time: 1, volume: 0.5 },
+        ],
+        0,
+        1,
+      ),
+    ).toBe(false);
+    expect(readFileSync(p)).toEqual(buffer);
+  });
+
   it("round-trips samples as 16-bit PCM, the format the volume bake requires", () => {
     const p = join(dir, "rt.wav");
     const src = new Float32Array([0, 0.5, -0.5, 0.25]);

@@ -310,8 +310,8 @@ describe("applyVolumeEnvelopeToWav", () => {
     /**
      * The fixtures above are hand-built canonical 44-byte headers, which is NOT
      * what the group sub-mix actually hands this function: ffmpeg's `pcm_f32le`
-     * writes an 18-byte `fmt ` chunk plus a `fact` chunk, putting `data` at
-     * offset 92. Every assertion above would still pass if this function could
+     * may write an extended `fmt ` chunk plus `fact` and LIST chunks, or use
+     * WAVE_FORMAT_EXTENSIBLE. Every assertion above would still pass if this function could
      * not read a real one — and an unreadable file returns false, which the
      * caller reads as "no automation here" and drops the group's envelope.
      */
@@ -338,11 +338,9 @@ describe("applyVolumeEnvelopeToWav", () => {
       expect(made.status).toBe(0);
 
       const before = readFileSync(path);
-      // The format tag is the load-bearing part; the chunk LAYOUT is this
-      // build's quirk, so it is logged as context rather than required — a
-      // build emitting a canonical 16-byte fmt with data at 44 is legal and
-      // handled, and pinning 18/92 would fail on the good case.
-      expect(before.readUInt16LE(20)).toBe(3); // WAVE_FORMAT_IEEE_FLOAT
+      // FFmpeg may emit IEEE_FLOAT directly or its extensible subtype. Check
+      // the real fade below, not one build's choice of header representation.
+      expect([3, 0xfffe]).toContain(before.readUInt16LE(20));
 
       expect(
         applyVolumeEnvelopeToWav(
