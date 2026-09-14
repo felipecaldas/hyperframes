@@ -147,7 +147,16 @@ export function estimateDiskCaptureBytes(
   return Math.ceil(totalFrames) * outputWidth * outputHeight * 4;
 }
 
-export function assertDiskCaptureHeadroom(
+/**
+ * Unknown free space (`freeBytes: null`) counts as available: the gate can
+ * only reject when it has a measurement.
+ */
+export type DiskCaptureHeadroom =
+  | { available: true; estimatedBytes: number; freeBytes: number | null }
+  | { available: false; estimatedBytes: number; freeBytes: number };
+
+/** Shared 90% disk gate used by both fallback planning and disk execution. */
+export function inspectDiskCaptureHeadroom(
   framesDir: string,
   totalFrames: number,
   captureOptions: CaptureOptions,
@@ -159,14 +168,31 @@ export function assertDiskCaptureHeadroom(
       return null;
     }
   },
-): void {
+): DiskCaptureHeadroom {
   const freeBytes = freeDiskBytes(framesDir);
-  if (freeBytes === null) return;
   const estimatedBytes = estimateDiskCaptureBytes(totalFrames, captureOptions);
-  if (estimatedBytes <= freeBytes * 0.9) return;
+  if (freeBytes === null || estimatedBytes <= freeBytes * 0.9) {
+    return { available: true, estimatedBytes, freeBytes };
+  }
+  return { available: false, estimatedBytes, freeBytes };
+}
+
+export function assertDiskCaptureHeadroom(
+  framesDir: string,
+  totalFrames: number,
+  captureOptions: CaptureOptions,
+  freeDiskBytes?: (path: string) => number | null,
+): void {
+  const headroom = inspectDiskCaptureHeadroom(
+    framesDir,
+    totalFrames,
+    captureOptions,
+    freeDiskBytes,
+  );
+  if (headroom.available) return;
   throw new Error(
-    `Disk capture may need ~${(estimatedBytes / 1e6).toFixed(1)} MB of temporary frame storage, ` +
-      `but only ${(freeBytes / 1e6).toFixed(1)} MB is free at ${framesDir}. ` +
+    `Disk capture may need ~${(headroom.estimatedBytes / 1e6).toFixed(1)} MB of temporary frame storage, ` +
+      `but only ${(headroom.freeBytes / 1e6).toFixed(1)} MB is free at ${framesDir}. ` +
       "Re-run with --low-memory-mode to stream frames, raise " +
       "PRODUCER_STREAMING_ENCODE_MAX_DURATION_SECONDS if streaming is supported, " +
       "or free up disk space.",

@@ -35,7 +35,7 @@ import {
   createStudioApi,
   createProjectSignature,
   createBackgroundRemovalJob,
-  consumeFileWriteReceipt,
+  identifyFileWrite,
   fileContentVersion,
   getMimeType,
   affectsProjectSignature,
@@ -76,6 +76,12 @@ import {
 } from "../browser/gpuPolicy.js";
 
 const STUDIO_MANUAL_EDITS_PATH = ".hyperframes/studio-manual-edits.json";
+
+// Vite emits only content-hashed files under dist/assets; hand-authored
+// public/ files land at the dist root. The route is the signal because the
+// filename is not: rollup's base64url hash may itself contain a hyphen.
+const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
+
 const REMOTE_GIF_IMG_SRC_RE =
   /<img\b[^>]*?\bsrc\s*=\s*["'](https?:\/\/[^"']+\.gif(?:[?#][^"']*)?)["'][^>]*>/gi;
 
@@ -1362,9 +1368,12 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
         } catch {
           // A deletion has no current bytes to match against an API write receipt.
         }
-        const receipt = version ? consumeFileWriteReceipt(absPath, version) : null;
+        // `version` ships even when no receipt matches: it is the client's only
+        // identity for an unlabelled change, and without it every duplicate
+        // delivery of one watcher event drains and reloads again.
+        const receipt = version ? identifyFileWrite(absPath, version) : null;
         stream
-          .writeSSE({ event: "file-change", data: JSON.stringify(receipt ?? { path }) })
+          .writeSSE({ event: "file-change", data: JSON.stringify({ path, version, ...receipt }) })
           .catch(() => {});
       };
       // Re-applied here because the watcher now also emits the signature
@@ -1473,17 +1482,17 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
   });
 
   // Studio SPA static files
-  const serveStudioStaticFile = (c: Context) => {
+  const serveStudioStaticFile = (cacheControl: string) => (c: Context) => {
     const filePath = resolve(studioDir, c.req.path.slice(1));
     const content = readBundleFile(filePath);
     if (content === null) return c.text("not found", 404);
     return new Response(content, {
-      headers: { "Content-Type": getMimeType(filePath), "Cache-Control": "no-store" },
+      headers: { "Content-Type": getMimeType(filePath), "Cache-Control": cacheControl },
     });
   };
-  app.get("/assets/*", serveStudioStaticFile);
-  app.get("/icons/*", serveStudioStaticFile);
-  app.get("/favicon.svg", serveStudioStaticFile);
+  app.get("/assets/*", serveStudioStaticFile(IMMUTABLE_CACHE_CONTROL));
+  app.get("/icons/*", serveStudioStaticFile("no-store"));
+  app.get("/favicon.svg", serveStudioStaticFile("no-store"));
 
   // ── Runtime env injection ───────────────────────────────────────────────
   // When the studio is served as a pre-built SPA, Vite `VITE_STUDIO_*` env
@@ -1579,7 +1588,10 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
     if (headScript) {
       html = html.replace("<head>", `<head>${headScript}`);
     }
-    return c.html(html);
+    // The shell names the current hashed bundle, so it always revalidates.
+    // `no-cache` not `no-store`: same refetch without an ETag, but `no-store`
+    // would blocklist the document from Chrome's bfcache.
+    return c.html(html, 200, { "Cache-Control": "no-cache" });
   });
 
   return { app, watcher, adapter };

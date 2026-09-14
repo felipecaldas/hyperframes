@@ -386,6 +386,25 @@ describe("padOrTrimAudioToVideoFrameCount", () => {
     expect(result.error).toContain("after 3 correction passes");
     expect(captured.args).toHaveLength(4);
   });
+
+  it("reports measured peaks and limiter ceilings when correction is exhausted", async () => {
+    const peaks = [0, -0.4, -0.6, -0.8];
+    let probeIndex = 0;
+    const { input, captured } = harness({
+      video: { frameCount: 90, fpsNum: 30, fpsDen: 1 },
+      audio: { durationSeconds: 3 },
+    });
+    input.probeAudioTruePeakDbfs = async () => peaks[probeIndex++]!;
+
+    const result = await padOrTrimAudioToVideoFrameCount(input);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("pass 0: 0.000 dBFS before limiting");
+    expect(result.error).toContain("pass 1: -0.400 dBFS at -1.000 dB limiter ceiling");
+    expect(result.error).toContain("pass 2: -0.600 dBFS at -1.700 dB limiter ceiling");
+    expect(result.error).toContain("pass 3: -0.800 dBFS at -2.200 dB limiter ceiling");
+    expect(captured.args).toHaveLength(4);
+  });
 });
 
 // ── Public-path path redaction ────────────────────────────────────────────

@@ -119,6 +119,7 @@ import { ArtifactTransaction } from "./render/artifactTransaction.js";
 import {
   createCapturePlan,
   replanAfterFailure,
+  streamingCaptureFailure,
   type CapturePlan,
   type SdrDiskCapturePlan,
   type CaptureRouting,
@@ -164,7 +165,7 @@ import { runProbeStage } from "./render/stages/probeStage.js";
 import { validateRenderDuration } from "./render/planValidation.js";
 import { runExtractVideosStage } from "./render/stages/extractVideosStage.js";
 import { runAudioStage } from "./render/stages/audioStage.js";
-import { runCaptureStage } from "./render/stages/captureStage.js";
+import { inspectDiskCaptureHeadroom, runCaptureStage } from "./render/stages/captureStage.js";
 import {
   type CaptureStreamingStageResult,
   runCaptureStreamingStage,
@@ -3780,12 +3781,13 @@ async function executeRenderPipeline(input: {
                   : "capture failed; retrying with a fresh screenshot session",
           );
           const failedRouting = capturePlan.routing.kind;
-          capturePlan = replanAfterFailure(
+          const failure = streamingCaptureFailure(
             capturePlan,
-            isVerifyError
-              ? { kind: "draw_element_verification" }
-              : { kind: "capture_failure", memoryExhaustion: isMemoryExhaustion },
+            { isVerifyError, isMemoryExhaustion },
+            () =>
+              inspectDiskCaptureHeadroom(framesDir, totalFrames, buildCaptureOptions()).available,
           );
+          capturePlan = replanAfterFailure(capturePlan, failure);
           syncCapturePlan();
           updateCaptureObservability({
             forceScreenshot: capturePlan.forceScreenshot,
@@ -3809,24 +3811,26 @@ async function executeRenderPipeline(input: {
             probeSession = null;
             await closeOrphanedProbeForRetry(orphaned, closeCaptureSession, log, "streaming");
           }
-          if (failedRouting === "worker_inversion") {
-            // The inversion bet on drawElement and lost — re-render on the
-            // pre-inversion parallel screenshot path instead of single-worker
-            // screenshot streaming (the slowest capture shape for this size).
-            // "reverted" (not cleared) so telemetry keeps the lost-inversion
-            // cohort distinguishable from renders that never inverted.
+          if (failedRouting !== "default") {
+            // The inversion's / router's bet on the pinned path lost. Prefer
+            // the pre-routing parallel screenshot route; a verification
+            // failure alone also retains the already supported low-worker
+            // screenshot stream when that disk route lacks storage headroom
+            // (OOM takes the same target for RAM; other capture failures
+            // revert unconditionally). Routing stays "reverted" (not
+            // cleared) so telemetry keeps the lost-bet cohort distinguishable
+            // from renders that never routed.
+            const route =
+              failedRouting === "worker_inversion" ? "worker inversion" : "parallel router";
+            const diskFallbackLacksHeadroom =
+              failure.kind === "draw_element_verification" &&
+              failure.diskFallbackAvailable === false;
             log.info(
-              `[Render] Reverting worker inversion for the retry: ${capturePlan.workerCount} workers, ` +
-                `plan=${capturePlan.kind}.`,
-            );
-          } else if (failedRouting === "parallel_router") {
-            // The router's bet on verified parallel streaming lost — re-render
-            // on the ordinary (non-DE) parallel path at the pre-router worker
-            // count, same "reverted, not cleared" telemetry contract as the
-            // inversion above.
-            log.info(
-              `[Render] Reverting parallel router for the retry: ${capturePlan.workerCount} workers, ` +
-                `plan=${capturePlan.kind}.`,
+              diskFallbackLacksHeadroom
+                ? `[Render] ${route} disk fallback lacks headroom; retrying with ` +
+                    `${capturePlan.workerCount}-worker screenshot streaming.`
+                : `[Render] Reverting ${route} for the retry: ${capturePlan.workerCount} workers, ` +
+                    `plan=${capturePlan.kind}.`,
             );
           }
           if (capturePlan.kind === "sdr_streaming") {

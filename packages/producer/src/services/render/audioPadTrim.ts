@@ -434,10 +434,16 @@ async function enforceAacTruePeak(
   try {
     scratchDir = mkdtempSync(join(dirname(input.audioPath), ".true-peak-"));
     const correctedPath = join(scratchDir, "audio.m4a");
+    const measurements: string[] = [];
     let limiterCeilingDb = AAC_DELIVERY_TRUE_PEAK_DBFS;
     let measuredPath = input.audioPath;
     for (let pass = 0; pass <= MAX_TRUE_PEAK_CORRECTION_PASSES; pass += 1) {
       const truePeakDbfs = await input.probeTruePeak(measuredPath, input.signal);
+      measurements.push(
+        pass === 0
+          ? `pass 0: ${truePeakDbfs.toFixed(3)} dBFS before limiting`
+          : `pass ${pass}: ${truePeakDbfs.toFixed(3)} dBFS at ${limiterCeilingDb.toFixed(3)} dB limiter ceiling`,
+      );
       if (Number.isNaN(truePeakDbfs) || truePeakDbfs === Number.POSITIVE_INFINITY) {
         return { success: false, error: "audioPadTrim: FFmpeg reported an invalid true peak" };
       }
@@ -477,7 +483,7 @@ async function enforceAacTruePeak(
     }
     return {
       success: false,
-      error: `audioPadTrim: AAC true peak remained above ${AAC_DELIVERY_TRUE_PEAK_DBFS} dBFS after ${MAX_TRUE_PEAK_CORRECTION_PASSES} correction passes`,
+      error: `audioPadTrim: AAC true peak remained above ${AAC_DELIVERY_TRUE_PEAK_DBFS} dBFS after ${MAX_TRUE_PEAK_CORRECTION_PASSES} correction passes; ${measurements.join("; ")}`,
     };
   } catch (err) {
     return {
