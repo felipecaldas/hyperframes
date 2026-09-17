@@ -235,12 +235,16 @@ describe("Tabario AI provider", () => {
     expect(system.content).toContain("Never rewrite, duplicate or inline the highlight loop");
     expect(system.content).toContain("never merge or split word spans");
     expect(system.content).toContain("never copy a `data-hf-id`");
-    // TAB-1064: the fit script makes "two lines" unreachable by width alone,
-    // and the attribute that opts one caption out of it is named.
+    // TAB-1163, correcting TAB-1064. This assertion used to pin the sentence
+    // "remove `data-caption-base-px` from that caption element only" — the
+    // instruction that caused the defect, because removing the attribute stops
+    // the shrink and the container still cannot wrap, so the caption grows and
+    // overflows. It was a prompt test asserting the bug rather than catching it.
+    // Now it pins the correction and the edit that actually works.
     expect(system.content).toContain("data-caption-base-px");
-    expect(system.content).toContain(
-      "remove `data-caption-base-px` from that caption element only",
-    );
+    expect(system.content).toContain("does NOT make a one-line caption wrap");
+    expect(system.content).toContain('style="flex-wrap: wrap;"');
+    expect(system.content).toContain("hf-caption-break");
     expect(system.content).toContain("data-duration");
     expect(system.content).toContain("data-composition-src");
     // And the explicit instruction not to plead blindness.
