@@ -243,8 +243,16 @@ describe("Tabario AI provider", () => {
     // Now it pins the correction and the edit that actually works.
     expect(system.content).toContain("data-caption-base-px");
     expect(system.content).toContain("does NOT make a one-line caption wrap");
-    expect(system.content).toContain('style="flex-wrap: wrap;"');
-    expect(system.content).toContain("hf-caption-break");
+    // The edit that works on an EXISTING project, which is the only case the
+    // agent can act on: Studio has no compile step, so a project built before
+    // the caption style field existed will never gain the `.hf-caption-break`
+    // rule. The first cut of this correction taught that class anyway, which
+    // would have done nothing there. These pin the parts that do not depend on
+    // a stylesheet the project may not have.
+    expect(system.content).toContain("flex-wrap: wrap");
+    expect(system.content).toContain("flex-basis:100%;height:0");
+    expect(system.content).toContain("font-size");
+    expect(system.content).toContain("is a measurement, not a guess");
     expect(system.content).toContain("data-duration");
     expect(system.content).toContain("data-composition-src");
     // And the explicit instruction not to plead blindness.
