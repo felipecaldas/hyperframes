@@ -253,6 +253,12 @@ describe("Tabario AI provider", () => {
     expect(system.content).toContain("flex-basis:100%;height:0");
     expect(system.content).toContain("font-size");
     expect(system.content).toContain("is a measurement, not a guess");
+    // The line-count bullet must not read as "you have no per-caption reach"
+    // while the bullet above teaches a per-caption edit — an agent that believes
+    // both will refuse work it can do, which is the TAB-781/TAB-1063 failure
+    // mode. It says which of the two routes it is describing instead.
+    expect(system.content).not.toContain("not a per-caption setting");
+    expect(system.content).toContain("manual edit above is the only per-caption route");
     expect(system.content).toContain("data-duration");
     expect(system.content).toContain("data-composition-src");
     // And the explicit instruction not to plead blindness.
