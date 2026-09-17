@@ -553,3 +553,100 @@ describe("useInlineTextEdit with styled runs", () => {
     act(() => root.unmount());
   });
 });
+
+/**
+ * A check result arriving must not take the caret with it (TAB-1147).
+ *
+ * The acceptance is "a single focus action permits full text entry" and "checks
+ * do not remount the content field". The field is this session: it lives on the
+ * preview element, and the overlay above it is mounted unconditionally and
+ * unkeyed, so an async status change re-renders the tree without replacing the
+ * node the caret is in. That property is structural, which is exactly why it
+ * needs pinning — a `key` derived from a revision or a status is a one-line
+ * change that would silently close the edit on every result that arrived.
+ */
+describe("an async status update does not disturb an open edit", () => {
+  /** A field whose parent re-renders with a new status, as a check result does. */
+  function statusHarness({ remountOnStatus = false } = {}) {
+    const controls: { current: InlineTextEditControls | null } = { current: null };
+    function Field({ status }: { status: string }) {
+      controls.current = useInlineTextEdit({ onCommit: vi.fn() });
+      return <span data-status={status} />;
+    }
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const render = (status: string) =>
+      act(() => {
+        // `remountOnStatus` is the defect this file exists to notice. Keying the
+        // field on the status is what "checks remount the content field" means,
+        // and the negative control below asserts it really does lose the edit —
+        // without that, a passing test here would only mean the harness cannot
+        // fail.
+        root.render(
+          remountOnStatus ? <Field key={status} status={status} /> : <Field status={status} />,
+        );
+      });
+    render("checking");
+    return { controls: () => controls.current!, render, root };
+  }
+
+  async function openOn(element: HTMLElement, controls: () => InlineTextEditControls) {
+    act(() => {
+      controls().start(element);
+    });
+    await act(async () => {
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+    });
+  }
+
+  it("keeps the node, the session and the caret across every status", async () => {
+    const element = heading("Motion Playground");
+    const { controls, render, root } = statusHarness();
+    await openOn(element, controls);
+
+    const session = controls().session;
+    const node = element;
+    expect(session).not.toBeNull();
+    // One focus action, and the caret is in the text.
+    expect(document.activeElement).toBe(node);
+    expect(node.getAttribute("contenteditable")).toBe("true");
+
+    // The operator types. happy-dom runs no editing pipeline, so the characters
+    // go in directly — what is under test is whether the node holding them
+    // survives the status change, not whether happy-dom can type.
+    node.textContent = "Motion Playground, revised";
+
+    for (const status of ["passed", "needs_repair", "stale", "cannot_verify"]) {
+      render(status);
+      expect(controls().session).toBe(session);
+      expect(element).toBe(node);
+      expect(node.isConnected).toBe(true);
+      expect(node.getAttribute("contenteditable")).toBe("true");
+      expect(document.activeElement).toBe(node);
+      expect(node.textContent).toBe("Motion Playground, revised");
+    }
+
+    act(() => root.unmount());
+  });
+
+  it("loses the edit when the field IS keyed on the status — the negative control", async () => {
+    // If this ever stops failing to hold, the test above has stopped meaning
+    // anything: it would be asserting a property of a harness that cannot lose
+    // a session. This is the same tree with the one-line defect applied.
+    const element = heading("Motion Playground");
+    const { controls, render, root } = statusHarness({ remountOnStatus: true });
+    await openOn(element, controls);
+    expect(controls().session).not.toBeNull();
+
+    render("passed");
+
+    // The session tore down with the unmount, and the element is no longer
+    // editable — the caret and everything typed since are gone.
+    expect(controls().session).toBeNull();
+    expect(element.getAttribute("contenteditable")).toBeNull();
+    expect(document.activeElement).not.toBe(element);
+
+    act(() => root.unmount());
+  });
+});
