@@ -202,6 +202,42 @@ describe("measureInPage line counting", () => {
   });
 
   /**
+   * TAB-1169's actual cause, and the half the break element was blamed for.
+   *
+   * The emitter's karaoke pop scales the active word about its baseline, and
+   * `getClientRects()` **reflects transforms** — so the scaled word's rect rises above the
+   * row the word sits on and reports a `top` of its own. Measured on the Tier-1 harness, one
+   * caption, box identical at `907.2x195.5` in every reading:
+   *
+   *     seek_time 0        (word 0 popping)  -> lines: 3
+   *     seek_time 0.2167   (between words)   -> lines: 2
+   *     seek_time 0.85     (word 3 popping)  -> lines: 3
+   *     seek_time 0.9167   (between words)   -> lines: 2
+   *
+   * A reading that changes with the animation is worse than one that is always wrong: the
+   * agent is told to trust this number, and which number it gets depends on when it asked.
+   */
+  it("does not count a word the karaoke pop has lifted out of its row (TAB-1169)", () => {
+    const popped = caption([
+      [span(-6, 0, 120, 44)], // row 1, lifted 6px by the active pop
+      [span(0, 130, 200, 40)],
+      [span(96, 0, 120, 44)], // row 2, a full line down, also popping
+      [span(100, 130, 200, 40)],
+    ]);
+    expect(linesOf(popped)).toBe(2);
+  });
+
+  /**
+   * The guard against over-correcting, for the pop rather than the break. A displacement on
+   * the scale of a whole line is a real second row and must still count as one — the
+   * tolerance is half a painted line, not "whatever the nearest row is".
+   */
+  it("still separates two rows a full line apart when neither is popping", () => {
+    const plain = caption([[span(0, 0, 120, 40)], [span(100, 0, 200, 40)]]);
+    expect(linesOf(plain)).toBe(2);
+  });
+
+  /**
    * The other branch: an element with no element children is measured through a Range
    * over its contents. Unchanged by this fix, and asserted so that it stays that way.
    */

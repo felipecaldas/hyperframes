@@ -110,32 +110,59 @@ export function measureInPage(selectors: string[]): RawLayoutProbe {
   const round = (n: number) => Math.round(n * 10) / 10;
 
   /**
-   * Distinct rendered line-box tops — the wrap count, however it is composed.
+   * Group painted rects into rows, tolerating the few px a transform can displace one.
    *
-   * Rects that paint nothing are skipped. The caption emitter breaks a line with
-   * `<div class="hf-caption-break">` at `flex-basis: 100%; height: 0` (see
-   * `video-compositor`'s `captions.ts`): the flex basis gives it a line of its own, so
-   * it reports a client rect with its own `top`, but nothing is drawn in that line.
-   * Counting it made every correctly wrapped caption measure one line too many
-   * (TAB-1169) — and the agent, told to trust this number, chased a criterion the
-   * instrument could not return, once by deleting a word from the caption.
+   * The tolerance is the rects' own median painted height, so it scales with the text
+   * rather than being a pixel constant that a small font would make meaningless. Half a
+   * painted line is comfortably more than the displacement a karaoke pop produces and
+   * comfortably less than the line-height separating two genuinely different rows.
+   */
+  function clusterRows(
+    rects: { top: number; left: number; right: number; height: number }[],
+  ): { top: number; left: number; right: number }[] {
+    const sorted = [...rects].sort((a, b) => a.top - b.top);
+    const heights = sorted.map((r) => r.height).sort((a, b) => a - b);
+    const median = heights[Math.floor(heights.length / 2)] ?? 0;
+    const tolerance = median / 2;
+    const rows: { top: number; left: number; right: number }[] = [];
+    for (const r of sorted) {
+      const row = rows[rows.length - 1];
+      if (row && r.top - row.top <= tolerance) {
+        row.left = Math.min(row.left, r.left);
+        row.right = Math.max(row.right, r.right);
+      } else {
+        rows.push({ top: r.top, left: r.left, right: r.right });
+      }
+    }
+    return rows;
+  }
+
+  /**
+   * The rows the text occupies, however the wrap was composed.
    *
-   * Height is the test rather than the class name on purpose: the probe is generic and
-   * must not learn one emitter's markup. A line box is a line only if something is
-   * painted in it.
+   * Two things that look like a line and are not, both measured on the Tier-1 harness:
+   *
+   * - **A rect that paints nothing.** The caption emitter breaks a line with
+   *   `<div class="hf-caption-break">` at `flex-basis: 100%; height: 0` (see
+   *   `video-compositor`'s `captions.ts`). The flex basis gives it a line of its own, so it
+   *   reports a client rect, but nothing is drawn in it.
+   * - **A rect a transform has moved.** `getClientRects()` reflects transforms, and the
+   *   emitter's karaoke pop scales the active word about its baseline. The scaled word's
+   *   rect rises above the row the word sits on and reports a `top` of its own — so a
+   *   two-row caption reads three for as long as a word is popping, and two in the gaps
+   *   between words. One caption, box identical at `907.2x195.5` throughout, measured
+   *   `lines: 3` at `seek_time` 0 and 0.85 and `lines: 2` at 0.2167 and 0.9167 (TAB-1169).
+   *
+   * Both are stated as properties of the geometry rather than of one emitter's markup: the
+   * probe measures arbitrary user HTML and must not learn a class name. A line box is a
+   * line only if something is painted in it, on the row the layout put it on.
    */
   function readLines(el: Element): { lines: number; widestLinePx: number } {
-    const rows = new Map<number, { left: number; right: number }>();
-    const collect = (rects: DOMRectList) => {
-      for (const r of Array.from(rects)) {
+    const rects: { top: number; left: number; right: number; height: number }[] = [];
+    const collect = (list: DOMRectList) => {
+      for (const r of Array.from(list)) {
         if (Math.round(r.height) === 0) continue;
-        const top = Math.round(r.top);
-        const row = rows.get(top);
-        if (!row) rows.set(top, { left: r.left, right: r.right });
-        else {
-          row.left = Math.min(row.left, r.left);
-          row.right = Math.max(row.right, r.right);
-        }
+        rects.push({ top: r.top, left: r.left, right: r.right, height: r.height });
       }
     };
     if (el.children.length > 0) {
@@ -145,13 +172,15 @@ export function measureInPage(selectors: string[]): RawLayoutProbe {
       range.selectNodeContents(el);
       collect(range.getClientRects());
     }
+
+    const rows = clusterRows(rects);
     // Width comes off the same rects the count does — one pass, and the two can
     // never disagree about what a line is (TAB-1173). Each row keeps the span
     // from its leftmost paint to its rightmost, so a flex row of word spans
     // reports the line a reader sees rather than one word's box.
     let widestLinePx = 0;
-    for (const row of rows.values()) widestLinePx = Math.max(widestLinePx, row.right - row.left);
-    return { lines: rows.size, widestLinePx };
+    for (const row of rows) widestLinePx = Math.max(widestLinePx, row.right - row.left);
+    return { lines: rows.length, widestLinePx };
   }
 
   /**
