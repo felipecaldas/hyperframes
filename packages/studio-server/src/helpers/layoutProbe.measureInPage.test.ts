@@ -5,11 +5,22 @@
  *
  * `layoutProbe.test.ts` covers `classifyLayoutProbe`, the pure decision half. It cannot
  * reach `measureInPage`, which is where the defect lived: `countLines` added a line top
- * for **every child**, so the caption emitter's break element —
- * `<div class="hf-caption-break">` at `flex-basis: 100%; height: 0`, which takes a flex
- * line of its own while painting nothing — was counted as a line of text. Every
- * correctly wrapped caption therefore measured one line too many, and the agent, told to
- * trust `measure_layout`, chased a `lines: 2` the instrument could only answer with `3`.
+ * for **every child** and took the number of distinct tops to be the wrap count. Anything
+ * that moved a child's rect without moving any text — a scaled word, a zero-height flex
+ * child holding a line of its own — contributed a top no line of text was on.
+ *
+ * ## The cause the ticket named, and the cause the measurement found
+ *
+ * TAB-1169 was filed against the break element — `<div class="hf-caption-break">` at
+ * `flex-basis: 100%; height: 0`, which takes a flex line of its own while painting
+ * nothing. It is **not** what inflated the count: its rect's top is exactly the following
+ * row's top, so it adds no distinct top at all. The tests covering it are kept below,
+ * because the rule they assert is right on its own terms.
+ *
+ * The real cause is the karaoke pop, asserted further down. The count depended on **when
+ * it was asked**, which is why the defect looked intermittent and why an earlier pass
+ * concluded it did not reproduce at all. TAB-1168's regression test was passing on the
+ * inflated number the whole time.
  *
  * ## Why this evaluates the function's source instead of calling it
  *
@@ -23,11 +34,11 @@
  * ## What this does and does not establish
  *
  * The inputs are **explicit rects**, so this asserts the counting rule given geometry:
- * which rects constitute a line. It does not establish that a real browser gives a
- * zero-height flex child its own rect — that is a layout fact, it was measured directly
- * on the Tier-1 Studio (same words, `box.height` 50px both times: no break → `lines: 2`,
- * with break → `lines: 3`), and it is recorded in TAB-1168's story. This test guards the
- * rule against being reverted; the browser fact is what the rule is for.
+ * which rects constitute a line. It does not establish the geometry a real browser
+ * reports — that a popped word's rect rises above the row the word sits on, and by how
+ * much. That is a layout fact, measured on the Tier-1 harness (the four readings are in
+ * TAB-1169's ticket), and it is the fact these rules are for. What this test owns is
+ * guarding the rules against being reverted.
  */
 
 import { describe, expect, it } from "vitest";
