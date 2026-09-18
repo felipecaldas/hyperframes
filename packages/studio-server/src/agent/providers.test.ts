@@ -253,6 +253,18 @@ describe("Tabario AI provider", () => {
     expect(system.content).toContain("flex-basis:100%;height:0");
     expect(system.content).toContain("font-size");
     expect(system.content).toContain("is a measurement, not a guess");
+    // TAB-1170. The caption compiler stopped emitting a sizing script at all,
+    // so the prompt cannot keep saying the project's own script sizes every
+    // caption: on a project compiled since, nothing does. An agent told
+    // otherwise will look for a script that is not in the file, and — the
+    // TAB-1158 lesson — will report having fixed a sizing problem that no
+    // longer has a mechanism.
+    expect(system.content).toContain("no sizing script at all");
+    expect(system.content).toContain("nothing reads any more");
+    // Where a line ends is now decided by width, in the compiler. "After the
+    // fourth word for four words per line" is the rule TAB-1170 removed, so it
+    // must not return to the prompt as the instruction for a manual break.
+    expect(system.content).not.toContain("after the fourth word");
     // The line-count bullet must not read as "you have no per-caption reach"
     // while the bullet above teaches a per-caption edit — an agent that believes
     // both will refuse work it can do, which is the TAB-781/TAB-1063 failure
