@@ -23,6 +23,21 @@ export interface RawLayoutElement {
   box?: { x: number; y: number; width: number; height: number };
   /** Distinct rendered line-box tops of the element's content. */
   lines?: number;
+  /**
+   * The widest rendered line, in px (TAB-1173).
+   *
+   * The count says a caption is on three lines; this says how much room those
+   * lines had. Without it "does the text fit its box" is unanswerable — the
+   * measurement returned a count and no width, so an instruction to fit the text
+   * by measuring it named a number the instrument never took.
+   */
+  widestLinePx?: number;
+  /**
+   * The element's content box width — what text may occupy, which is not the
+   * border box once padding is on it (TAB-1173). A caption carries horizontal
+   * padding, so comparing a line against `box.width` overstates the room.
+   */
+  contentBoxPx?: number;
   scroll?: { width: number; height: number; clientWidth: number; clientHeight: number };
   display?: string;
   visibility?: string;
@@ -42,6 +57,9 @@ export interface LayoutElementMeasurement {
   /** Present only when the element was genuinely measured. */
   box?: { x: number; y: number; width: number; height: number };
   lines?: number;
+  /** The widest rendered line in px, and the content width it had to fit (TAB-1173). */
+  widestLinePx?: number;
+  contentBoxPx?: number;
   overflows?: boolean;
   visibility?: string;
   /** The inline box pin a manual Studio resize leaves behind, when there is one. */
@@ -92,22 +110,54 @@ export function measureInPage(selectors: string[]): RawLayoutProbe {
    * must not learn one emitter's markup. A line box is a line only if something is
    * painted in it.
    */
-  function countLines(el: Element): number {
-    const tops = new Set<number>();
+  function readLines(el: Element): { lines: number; widestLinePx: number } {
+    const rows = new Map<number, { left: number; right: number }>();
     const collect = (rects: DOMRectList) => {
       for (const r of Array.from(rects)) {
         if (Math.round(r.height) === 0) continue;
-        tops.add(Math.round(r.top));
+        const top = Math.round(r.top);
+        const row = rows.get(top);
+        if (!row) rows.set(top, { left: r.left, right: r.right });
+        else {
+          row.left = Math.min(row.left, r.left);
+          row.right = Math.max(row.right, r.right);
+        }
       }
     };
     if (el.children.length > 0) {
       for (const child of Array.from(el.children)) collect(child.getClientRects());
-      return tops.size;
+    } else {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      collect(range.getClientRects());
     }
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    collect(range.getClientRects());
-    return tops.size;
+    // Width comes off the same rects the count does — one pass, and the two can
+    // never disagree about what a line is (TAB-1173). Each row keeps the span
+    // from its leftmost paint to its rightmost, so a flex row of word spans
+    // reports the line a reader sees rather than one word's box.
+    let widestLinePx = 0;
+    for (const row of rows.values()) widestLinePx = Math.max(widestLinePx, row.right - row.left);
+    return { lines: rows.size, widestLinePx };
+  }
+
+  /**
+   * The width text may occupy — the content box, not the border box.
+   *
+   * A caption carries horizontal padding (video-compositor's emitter sets
+   * `padding: 0 <safe zone>`), so a line compared against `box.width` is judged
+   * against room it never had, and the overflow this probe exists to catch reads
+   * as fitting (TAB-1173).
+   *
+   * Padding only, and the borders are deliberately **not** subtracted:
+   * `clientWidth` is already the inner width, which includes padding and
+   * excludes borders and scrollbars. Taking the border off a second time
+   * under-reports the content box by its total border width, so a bordered
+   * element would be told less room than it has — the opposite error to the one
+   * this function exists to fix, and just as wrong.
+   */
+  function contentBoxWidth(html: HTMLElement, style: CSSStyleDeclaration): number {
+    const padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+    return Math.max(0, html.clientWidth - (Number.isFinite(padding) ? padding : 0));
   }
 
   function find(selector: string): Element | null {
@@ -124,6 +174,7 @@ export function measureInPage(selectors: string[]): RawLayoutProbe {
     const style = getComputedStyle(el);
     const rect = el.getBoundingClientRect();
     const html = el as HTMLElement;
+    const { lines, widestLinePx } = readLines(el);
     return {
       selector,
       found: true,
@@ -133,7 +184,9 @@ export function measureInPage(selectors: string[]): RawLayoutProbe {
         width: round(rect.width),
         height: round(rect.height),
       },
-      lines: countLines(el),
+      lines,
+      widestLinePx: round(widestLinePx),
+      contentBoxPx: round(contentBoxWidth(html, style)),
       scroll: {
         width: html.scrollWidth,
         height: html.scrollHeight,
@@ -202,6 +255,10 @@ export function classifyLayoutProbe(raw: RawLayoutProbe, seekTime: number): Layo
       selector: el.selector,
       box: el.box,
       lines: el.lines,
+      // Only when a line was actually painted. On an element with no text the
+      // count is 0 and the width is 0, and reporting "widest line 0px" reads as
+      // a finding about a line that does not exist (TAB-1173).
+      ...(el.lines ? { widestLinePx: el.widestLinePx, contentBoxPx: el.contentBoxPx } : {}),
       overflows: overflowsBox(el),
       visibility: el.visibility,
       ...(pinned ? { pinnedByManualEdit: pinned } : {}),

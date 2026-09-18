@@ -59,6 +59,31 @@ const word = (top: number) => rect(top, 40);
 const breakEl = (top: number) => rect(top, 0);
 
 /**
+ * A rect with a horizontal extent, for TAB-1173.
+ *
+ * `rect()` pins `left: 0, right: 100`, which is all a line *count* needs and is
+ * exactly useless for a width — every line would measure 100 and the assertion
+ * could not tell a wide line from a narrow one, which is the failure mode this
+ * file's own history warns about.
+ */
+function span(top: number, left: number, right: number, height = 40): DOMRect {
+  return {
+    top,
+    height,
+    bottom: top + height,
+    width: right - left,
+    x: left,
+    y: top,
+    left,
+    right,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
+/** A break element with a horizontal extent: paints nothing, so it measures nothing. */
+const wideBreak = (top: number) => span(top, 0, 500, 0);
+
+/**
  * The three tops a real browser reports for a two-line caption: line 1's words at 0, the
  * break's own line at 20, line 2's words at 40. Three distinct tops, two lines of text —
  * which is how `lines: 3` came back for a caption with two.
@@ -96,7 +121,7 @@ function caption(childRects: DOMRect[][], rangeRects: DOMRect[] = []): Element {
  * Run the real `measureInPage` against a stub page, exactly as Puppeteer would: the
  * function's source is evaluated with only `document` and `getComputedStyle` in scope.
  */
-function measure(target: Element): RawLayoutProbe {
+function measure(target: Element, style: Record<string, string> = {}): RawLayoutProbe {
   const documentStub = {
     querySelector: (selector: string) => (selector === "#caption-0" ? target : null),
     createRange: () => ({
@@ -107,7 +132,7 @@ function measure(target: Element): RawLayoutProbe {
     }),
     documentElement: { clientWidth: 720, clientHeight: 720 },
   };
-  const getComputedStyleStub = () => ({ display: "flex", visibility: "visible" });
+  const getComputedStyleStub = () => ({ display: "flex", visibility: "visible", ...style });
 
   const run = new Function(
     "document",
@@ -183,5 +208,90 @@ describe("measureInPage line counting", () => {
   it("measures a text-only element from its Range rects", () => {
     const plain = caption([], [rect(0, 40), rect(40, 40)]);
     expect(linesOf(plain)).toBe(2);
+  });
+});
+
+/**
+ * TAB-1173 — the probe now returns how wide the widest line is, and how much room
+ * it had.
+ *
+ * Why this exists: the agent was told to fit a caption by "measuring the longest
+ * line and setting the size so it fits", and the instrument it was told to use
+ * could not return a width. `measure_layout` reported the line *count* — the
+ * rects' `top` values — and threw the `left`/`right` of those same rects away one
+ * line after reading them. An instruction naming a number the tool never produces
+ * is not an instruction, and the run that motivated this ticket is what that looks
+ * like: the model could see it had three lines and could not see how far past the
+ * box the third one reached, so it guessed a font size.
+ *
+ * These assert the rule — a line's width is its leftmost paint to its rightmost,
+ * compared against the content box — rather than the caption emitter's markup, so
+ * they hold for any element measured through this probe.
+ */
+describe("measureInPage line widths (TAB-1173)", () => {
+  const widthOf = (target: Element, style?: Record<string, string>) =>
+    measure(target, style).elements[0]?.widestLinePx;
+  const contentOf = (target: Element, style?: Record<string, string>) =>
+    measure(target, style).elements[0]?.contentBoxPx;
+
+  it("reports the widest line, not the first one", () => {
+    // The whole point: line 2 is the one that does not fit, and a probe that
+    // reported the first line's width would call this caption laid out fine.
+    const ragged = caption([[span(0, 0, 80)], [span(40, 0, 140)]]);
+    expect(widthOf(ragged)).toBe(140);
+  });
+
+  it("measures a line from its leftmost to its rightmost paint", () => {
+    // Two word spans on one line: neither is the line, and reporting either one
+    // would understate the row by the other's width plus the gap between them.
+    const oneLine = caption([[span(0, 0, 60), span(0, 70, 120)]]);
+    expect(widthOf(oneLine)).toBe(120);
+  });
+
+  it("compares a line against the content box, not the border box", () => {
+    // A caption carries horizontal padding, so the room text has is narrower than
+    // the element. Comparing against the border box is how a line that overflows
+    // reads as fitting.
+    const padded = caption([[span(0, 0, 90)]]);
+    expect(contentOf(padded, { paddingLeft: "8px", paddingRight: "8px" })).toBe(84);
+  });
+
+  it("does not also subtract the border, which clientWidth already excludes", () => {
+    // The first cut of this subtracted `borderLeftWidth` + `borderRightWidth` on
+    // top of the padding, which double-counts: `clientWidth` is the inner width,
+    // so it already excludes borders. A bordered element was told it had 20px
+    // less room than it does. No caption has a border, so the caption case could
+    // not have caught it — which is the reason the assertion is here rather than
+    // in a caption fixture.
+    const bordered = caption([[span(0, 0, 90)]]);
+    expect(contentOf(bordered, { borderLeftWidth: "10px", borderRightWidth: "10px" })).toBe(100);
+  });
+
+  it("treats an unset padding as zero rather than as NaN", () => {
+    // `getComputedStyle` in a real page always answers, but the stub here and any
+    // future caller may not — and `parseFloat(undefined)` would make the content
+    // box NaN, which compares false against everything and would silently report
+    // no overflow forever.
+    const bare = caption([[span(0, 0, 90)]]);
+    expect(contentOf(bare)).toBe(100);
+  });
+
+  it("does not let the break element widen a line", () => {
+    // Same rule the count follows, for the same reason: `flex-basis: 100%` gives
+    // the break a flex line of its own, and at `height: 0` nothing is painted in
+    // it. A break that reached 500px would otherwise report as the widest line in
+    // a caption whose real lines are 80px, and the number the agent is told to
+    // trust would be about an element that draws nothing.
+    const wrapped = caption([[span(0, 0, 80)], [wideBreak(20)], [span(40, 0, 60)]]);
+    expect(widthOf(wrapped)).toBe(80);
+  });
+
+  it("reports no width for an element with no painted line", () => {
+    // 0 would read as "a line of zero width", which is a different claim from
+    // "there is no line here". The caller drops the fields rather than reporting
+    // them, and this pins the raw value that decision is made on.
+    const empty = caption([[]]);
+    expect(linesOf(empty)).toBe(0);
+    expect(widthOf(empty)).toBe(0);
   });
 });

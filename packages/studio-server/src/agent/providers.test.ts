@@ -393,8 +393,25 @@ describe("Tabario AI provider", () => {
     // a stylesheet the project may not have.
     expect(system.content).toContain("flex-wrap: wrap");
     expect(system.content).toContain("flex-basis:100%;height:0");
-    expect(system.content).toContain("font-size");
-    expect(system.content).toContain("is a measurement, not a guess");
+    // TAB-1173, reframing what TAB-1163 added. That correction taught the edit,
+    // and then told the model to size the font until the longest line fitted —
+    // and the tool it was told to measure with returned a line *count* and no
+    // width, so the instruction named a number nothing produced. The live run
+    // that motivated this is what that looks like: the model could see it had
+    // three lines, could not see how far the third reached, and guessed a size.
+    //
+    // The size is the template's now, so what is pinned is the prohibition. The
+    // bare word "font-size" is deliberately not the assertion: the instruction
+    // being replaced contained it too, so a test for the word alone passed
+    // against the very sentence it needed to catch.
+    expect(system.content).toContain("do not set a `font-size`");
+    expect(system.content).toContain("not yours to change");
+    expect(system.content).not.toContain("is a measurement, not a guess");
+    // And the check that replaced it names a number the measurement now returns,
+    // rather than the "measure the longest line" it could not answer.
+    expect(system.content).toContain(
+      "widest rendered line against the element's content-box width",
+    );
     // TAB-1170. The caption compiler stopped emitting a sizing script at all,
     // so the prompt cannot keep saying the project's own script sizes every
     // caption: on a project compiled since, nothing does. An agent told
@@ -1762,6 +1779,140 @@ describe("Tabario AI provider", () => {
     // And the ledger can now say what the tools returned.
     expect(transcript.map((entry) => entry.name)).toEqual(["edit_file", "measure_layout"]);
     expect(JSON.parse(transcript[1]!.result).elements[0].lines).toBe(1);
+  });
+
+  /**
+   * TAB-1173. The width, in the string the model actually reads.
+   *
+   * The caption instruction told the model to fit a caption by measuring the
+   * longest line — and `measure_layout` reported a line *count* and no width, so
+   * the number it was told to consult was one the tool never took. Adding the
+   * field to the probe is only half the fix: the number has to reach the model,
+   * and this is the assertion that says it does. Without it, a later edit could
+   * drop the clause from `describeMeasuredElement` and every test would still
+   * pass while the instruction went back to naming a number nothing produces.
+   */
+  it("quotes the widest line and the content box it had to fit (TAB-1173)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    const source =
+      '<html data-composition-id="demo"><body><p id="caption-0">WIDE</p></body></html>\n';
+    writeFileSync(join(root, "index.html"), source);
+    const hash = createHash("sha256").update(source).digest("hex");
+    // A caption two lines deep whose second line runs past its content box —
+    // the exact shape the founder reported, and the one the model could not see.
+    const measureLayout = vi.fn().mockResolvedValue({
+      measured: true,
+      seekTime: 0,
+      frame: { width: 720, height: 720 },
+      elements: [
+        {
+          selector: "#caption-2",
+          box: { x: 58, y: 947, width: 604, height: 208 },
+          lines: 2,
+          widestLinePx: 641,
+          contentBoxPx: 604,
+          overflows: false,
+          text: "bottleneck without adding more people",
+        },
+      ],
+    });
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("e", "edit_file", {
+            path: "index.html",
+            old_string: "WIDE",
+            new_string: "WIDER",
+            expected_hash: hash,
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(
+        completion("", [call("m", "measure_layout", { selectors: ["#caption-2"] })]),
+      )
+      .mockResolvedValueOnce(completion("It is on two lines now."))
+      .mockResolvedValueOnce(completion("It is on two lines."));
+
+    await runTabarioModel({
+      adapter: { ...adapter(), measureLayout },
+      stagingDir: root,
+      kind: "chat",
+      transcript: [
+        { role: "user", text: "make caption 2 two lines", at: new Date().toISOString() },
+      ],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      onToolResult: () => {},
+      fetchImpl,
+    });
+
+    const last = JSON.parse(String(fetchImpl.mock.calls[3]?.[1]?.body));
+    const demand = last.messages[last.messages.length - 1];
+    expect(demand.content).toContain("widest line 641px in a 604px content box, 37px too wide");
+  });
+
+  it("says a line is within its content box rather than reporting a width alone", async () => {
+    // The other half of the same sentence, and the reason it is a comparison
+    // rather than two numbers: "widest line 600px" answers nothing on its own.
+    // A model given the two figures side by side can see the fit; one given a
+    // width has to be told the box as well and do the subtraction itself.
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    const source =
+      '<html data-composition-id="demo"><body><p id="caption-0">WIDE</p></body></html>\n';
+    writeFileSync(join(root, "index.html"), source);
+    const hash = createHash("sha256").update(source).digest("hex");
+    const measureLayout = vi.fn().mockResolvedValue({
+      measured: true,
+      seekTime: 0,
+      elements: [
+        {
+          selector: "#caption-0",
+          box: { x: 0, y: 0, width: 600, height: 100 },
+          lines: 1,
+          widestLinePx: 512,
+          contentBoxPx: 600,
+          text: "short",
+        },
+      ],
+    });
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("e", "edit_file", {
+            path: "index.html",
+            old_string: "WIDE",
+            new_string: "WIDER",
+            expected_hash: hash,
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(
+        completion("", [call("m", "measure_layout", { selectors: ["#caption-0"] })]),
+      )
+      .mockResolvedValueOnce(completion("Done."))
+      .mockResolvedValueOnce(completion("Done."));
+
+    await runTabarioModel({
+      adapter: { ...adapter(), measureLayout },
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "check caption 0", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      onToolResult: () => {},
+      fetchImpl,
+    });
+
+    const last = JSON.parse(String(fetchImpl.mock.calls[3]?.[1]?.body));
+    const demand = last.messages[last.messages.length - 1];
+    expect(demand.content).toContain("widest line 512px in a 600px content box, within it");
+    expect(demand.content).not.toContain("too wide");
   });
 
   /**
