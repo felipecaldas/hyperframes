@@ -77,11 +77,28 @@ export interface LayoutMeasurement {
 export function measureInPage(selectors: string[]): RawLayoutProbe {
   const round = (n: number) => Math.round(n * 10) / 10;
 
-  /** Distinct rendered line-box tops — the wrap count, however it is composed. */
+  /**
+   * Distinct rendered line-box tops — the wrap count, however it is composed.
+   *
+   * Rects that paint nothing are skipped. The caption emitter breaks a line with
+   * `<div class="hf-caption-break">` at `flex-basis: 100%; height: 0` (see
+   * `video-compositor`'s `captions.ts`): the flex basis gives it a line of its own, so
+   * it reports a client rect with its own `top`, but nothing is drawn in that line.
+   * Counting it made every correctly wrapped caption measure one line too many
+   * (TAB-1169) — and the agent, told to trust this number, chased a criterion the
+   * instrument could not return, once by deleting a word from the caption.
+   *
+   * Height is the test rather than the class name on purpose: the probe is generic and
+   * must not learn one emitter's markup. A line box is a line only if something is
+   * painted in it.
+   */
   function countLines(el: Element): number {
     const tops = new Set<number>();
     const collect = (rects: DOMRectList) => {
-      for (const r of Array.from(rects)) tops.add(Math.round(r.top));
+      for (const r of Array.from(rects)) {
+        if (Math.round(r.height) === 0) continue;
+        tops.add(Math.round(r.top));
+      }
     };
     if (el.children.length > 0) {
       for (const child of Array.from(el.children)) collect(child.getClientRects());
