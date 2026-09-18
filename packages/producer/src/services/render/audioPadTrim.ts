@@ -40,8 +40,14 @@ import { redactKnownPaths, redactTelemetryString } from "@hyperframes/core";
  */
 const AUDIO_DURATION_TOLERANCE_SECONDS = 0.001;
 
-/** Delivery headroom applied after every AAC encode in this stage. */
-export const AAC_DELIVERY_TRUE_PEAK_DBFS = -1;
+/**
+ * Delivery headroom applied after every AAC encode in this stage.
+ *
+ * Not exported: it is read four times below and nowhere else, so the `export`
+ * was a wider surface than the symbol has consumers for. The fork's fallow gate
+ * flagged it as an unused export (TAB-1172).
+ */
+const AAC_DELIVERY_TRUE_PEAK_DBFS = -1;
 const MAX_TRUE_PEAK_CORRECTION_PASSES = 3;
 const TRUE_PEAK_RETRY_MARGIN_DB = 0.1;
 
