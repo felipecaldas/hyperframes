@@ -295,3 +295,42 @@ describe("measureInPage line widths (TAB-1173)", () => {
     expect(widthOf(empty)).toBe(0);
   });
 });
+
+/**
+ * TAB-1177 — the probe now reports the rendered font size.
+ *
+ * Why this exists: the user asked twice for 32px captions and the run answered
+ * "It is now displaying at 32px" about a project whose every caption read 48px.
+ * The probe returned the box, the line count and the widest line, and no size —
+ * so the one number the request was phrased in was the one number nothing could
+ * check. The claim was not merely unchecked; it was uncheckable.
+ *
+ * Read from the computed style, which is the part that matters for captions:
+ * their size normally comes from the shared `.hf-captions` rule rather than an
+ * inline `font-size`, so a probe reading the element's own `style` attribute
+ * would report nothing for the element the agent is nearly always asked about.
+ */
+describe("measureInPage font size (TAB-1177)", () => {
+  const fontOf = (target: Element, style?: Record<string, string>) =>
+    measure(target, style).elements[0]?.fontPx;
+
+  it("reports the rendered font size", () => {
+    const oneLine = caption([[span(0, 0, 80)]]);
+    expect(fontOf(oneLine, { fontSize: "46.8px" })).toBe(46.8);
+  });
+
+  it("reads the computed size, not the element's own inline style", () => {
+    // The fixture's own `style` carries no font size at all, and the computed
+    // one does — so this passes only if the reading comes from what the browser
+    // resolved, which is where a caption's size lives.
+    const fromSharedRule = caption([[span(0, 0, 80)]]);
+    expect(fontOf(fromSharedRule, { fontSize: "70.2px" })).toBe(70.2);
+  });
+
+  it("reports nothing when the page resolves no size", () => {
+    // 0 is the raw "no reading" value, and the classifier drops the field on it
+    // rather than reporting a size of zero — the same rule the width follows.
+    const bare = caption([[span(0, 0, 80)]]);
+    expect(fontOf(bare)).toBe(0);
+  });
+});

@@ -180,6 +180,11 @@ function measuredElementLine(el: LayoutElementMeasurement): string {
   const parts: string[] = [];
   if (typeof el.lines === "number") parts.push(`${el.lines} line${el.lines === 1 ? "" : "s"}`);
   if (el.box) parts.push(`${el.box.width} × ${el.box.height} px`);
+  // TAB-1177. The size the reply talks in, shown where nothing the model says
+  // can change it: a live run answered "It is now displaying at 32px" about a
+  // project whose every caption read 48px, and the person reading it had no
+  // number from the browser to set against it.
+  if (typeof el.fontPx === "number" && el.fontPx > 0) parts.push(`text ${el.fontPx}px`);
   if (el.overflows) parts.push("overflows its box");
   return `${el.selector}: ${parts.join(" · ") || "measured"}`;
 }

@@ -38,6 +38,18 @@ export interface RawLayoutElement {
    * padding, so comparing a line against `box.width` overstates the room.
    */
   contentBoxPx?: number;
+  /**
+   * The element's rendered font size, in px (TAB-1177).
+   *
+   * The size was the one number the probe never took, and it is the number a
+   * user changing captions talks in. A live run asked twice for 32px captions
+   * replied "It is now displaying at 32px" against a project where every
+   * caption read 48px, and nothing in this module could have contradicted it.
+   * Read from the computed style, so a size set by a shared rule and a size set
+   * by an inline `font-size` report the same way — which is what makes "is every
+   * caption the size it was asked to be" a question a sweep can ask of each one.
+   */
+  fontPx?: number;
   scroll?: { width: number; height: number; clientWidth: number; clientHeight: number };
   display?: string;
   visibility?: string;
@@ -60,6 +72,8 @@ export interface LayoutElementMeasurement {
   /** The widest rendered line in px, and the content width it had to fit (TAB-1173). */
   widestLinePx?: number;
   contentBoxPx?: number;
+  /** The rendered font size in px (TAB-1177). See `RawLayoutElement.fontPx`. */
+  fontPx?: number;
   overflows?: boolean;
   visibility?: string;
   /** The inline box pin a manual Studio resize leaves behind, when there is one. */
@@ -160,6 +174,19 @@ export function measureInPage(selectors: string[]): RawLayoutProbe {
     return Math.max(0, html.clientWidth - (Number.isFinite(padding) ? padding : 0));
   }
 
+  /**
+   * The rendered font size, or 0 when the page gave none.
+   *
+   * A computed `font-size` is always an absolute length in px, so there is no
+   * unit to interpret — but `parseFloat("")` is NaN, and a NaN reaching the
+   * caller would compare false against every size the model was told to expect.
+   * 0 is the "no reading" value, and the caller drops the field on it.
+   */
+  function fontSizePx(style: CSSStyleDeclaration): number {
+    const size = parseFloat(style.fontSize);
+    return Number.isFinite(size) ? size : 0;
+  }
+
   function find(selector: string): Element | null {
     try {
       return document.querySelector(selector);
@@ -187,6 +214,7 @@ export function measureInPage(selectors: string[]): RawLayoutProbe {
       lines,
       widestLinePx: round(widestLinePx),
       contentBoxPx: round(contentBoxWidth(html, style)),
+      fontPx: round(fontSizePx(style)),
       scroll: {
         width: html.scrollWidth,
         height: html.scrollHeight,
@@ -257,8 +285,13 @@ export function classifyLayoutProbe(raw: RawLayoutProbe, seekTime: number): Layo
       lines: el.lines,
       // Only when a line was actually painted. On an element with no text the
       // count is 0 and the width is 0, and reporting "widest line 0px" reads as
-      // a finding about a line that does not exist (TAB-1173).
-      ...(el.lines ? { widestLinePx: el.widestLinePx, contentBoxPx: el.contentBoxPx } : {}),
+      // a finding about a line that does not exist (TAB-1173). The font size
+      // goes with them and for the same reason (TAB-1177): a size on an element
+      // that paints nothing is a reading about text that is not there, and a
+      // model asked to check a caption's size would count it as one that matched.
+      ...(el.lines
+        ? { widestLinePx: el.widestLinePx, contentBoxPx: el.contentBoxPx, fontPx: el.fontPx }
+        : {}),
       overflows: overflowsBox(el),
       visibility: el.visibility,
       ...(pinned ? { pinnedByManualEdit: pinned } : {}),

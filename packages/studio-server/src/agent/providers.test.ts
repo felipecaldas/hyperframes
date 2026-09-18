@@ -2163,4 +2163,228 @@ describe("Tabario AI provider", () => {
     expect(JSON.stringify(result)).not.toContain("base64");
     expect(result).toMatchObject({ ran: true, revision: "def", width: 1080 });
   });
+
+  /**
+   * TAB-1176, TAB-1178, TAB-1179. Three things the caption bullets were missing,
+   * each the direct cause of a failure in one live session on the Tier-1 Studio.
+   */
+  it("finishes the set it was asked to change, and knows where a size change belongs (TAB-1176, TAB-1178, TAB-1179)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readIndexFirst())
+      .mockResolvedValueOnce(completion("An answer."));
+
+    await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [
+        { role: "user", text: "how are the captions set?", at: new Date().toISOString() },
+      ],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    const body = JSON.parse(String((fetchImpl.mock.calls[0]?.[1] as RequestInit)?.body));
+    const system = body.messages.find((message: { role: string }) => message.role === "system");
+    // TAB-1176. The recipe's first step was the one the bullet above it spends a
+    // paragraph explaining the harm of: on a project carrying the pre-TAB-1170
+    // fit script, removing `data-caption-base-px` stops the shrink so the text
+    // grows back and overflows its box. The user's report — captions "in one
+    // line, going beyond the boundaries of the canvas" — is that outcome, and
+    // the run reached it by following the instruction.
+    expect(system.content).toContain("Two things together");
+    expect(system.content).not.toContain("remove that caption's `data-caption-base-px`");
+    // TAB-1178. The plural case, and the permission the old wording withheld:
+    // "leave every other caption alone unless the user asks for the same change
+    // there" granted the case in the abstract and instructed nothing about it.
+    expect(system.content).toContain("the whole set is the job");
+    expect(system.content).toContain("not permission to change one element and describe the rest");
+    expect(system.content).toContain("in this turn");
+    // TAB-1179. A size request covering every caption had no correct action —
+    // the bullet forbade one and named no other — so the model claimed a change
+    // it had not made. Both cases are named now, and the false claim with them.
+    expect(system.content).toContain("Every caption's size");
+    expect(system.content).toContain("Never state a size that no reading produced");
+    // The per-caption prohibition survives, narrowed to the case it was written
+    // for: the request that names one element, not the one that names them all.
+    expect(system.content).toContain("not yours to change");
+  });
+
+  /**
+   * TAB-1178. Asked to review every caption, a live run changed one and answered
+   * "I will now proceed to review the remaining captions" — then the turn ended,
+   * and the user had to ask again. The prompt already forbids it in as many
+   * words ("Do not say what you 'will' do; do it"), which is the TAB-791 lesson:
+   * an instruction the model can decline is not a gate. This is the gate.
+   */
+  it("sends a reply that promises the rest of the work back to do it (TAB-1178)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    const source =
+      '<html data-composition-id="demo"><body><p id="caption-7">WIDE</p></body></html>\n';
+    writeFileSync(join(root, "index.html"), source);
+    const hash = createHash("sha256").update(source).digest("hex");
+    const measureLayout = vi.fn().mockResolvedValue({
+      measured: true,
+      seekTime: 0,
+      elements: [
+        { selector: "#caption-7", box: { x: 0, y: 0, width: 604, height: 108 }, lines: 2 },
+      ],
+    });
+    // The reply verbatim, from the run the ticket is about.
+    const promised =
+      "I have adjusted Caption 7 to display on two lines. I will now proceed to review the " +
+      "remaining captions and apply similar adjustments where necessary.";
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("e", "edit_file", {
+            path: "index.html",
+            old_string: "WIDE",
+            new_string: "WIDER",
+            expected_hash: hash,
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(completion(promised))
+      .mockImplementation(async () => completion("All four captions are on two lines now."));
+
+    const result = await runTabarioModel({
+      adapter: { ...adapter(), measureLayout },
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "review all captions", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    // The nudge rides on the request that follows the promise.
+    const nudged = JSON.parse(String(fetchImpl.mock.calls[2]?.[1]?.body));
+    const demand = nudged.messages[nudged.messages.length - 1];
+    expect(demand.role).toBe("user");
+    expect(demand.content).toContain("A turn ends when that work is done");
+    // The bound the other four demands share: asked once, never looped, so the
+    // run finishes with the same reply it would have finished with anyway.
+    // Four requests and not five: the nudge at index 2 sends the run back to
+    // work, the reply after it meets the measure demand — nothing was ever
+    // measured — and the request after that ends the turn.
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(result.assistantText).toBe("All four captions are on two lines now.");
+  });
+
+  /**
+   * The other side of that gate. It is the only demand in the file that reads the
+   * reply rather than the run's state, so the false-positive case is the one it
+   * owes an answer for: a closing sentence that happens to be future-tense about
+   * something the run is not doing must pass through untouched. "Know" is not an
+   * action, which is the whole reason the pattern's verb list is enumerated.
+   */
+  it("does not nudge a reply that is not deferring work (TAB-1178)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readIndexFirst())
+      .mockResolvedValueOnce(
+        completion("The captions sit at 85% of the frame. Let me know if you'd like them moved."),
+      );
+
+    const result = await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "where are the captions?", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    const bodies = fetchImpl.mock.calls.map((c) => String((c[1] as RequestInit)?.body));
+    expect(bodies.some((b) => b.includes("A turn ends when that work is done"))).toBe(false);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(result.assistantText).toContain("Let me know");
+  });
+
+  /**
+   * TAB-1177. The size a user changes captions by was the one number the probe
+   * never took, and the reply talked in it anyway: asked twice for 32px, a live
+   * run answered "It is now displaying at 32px" about a project whose every
+   * caption read 48px. Nothing in the measurement could contradict it, so
+   * nothing did. This pins the reading reaching the model through the same
+   * reconcile message every claim of this kind is settled by (TAB-1061).
+   */
+  it("quotes the rendered font size the run actually measured (TAB-1177)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-provider-"));
+    const source =
+      '<html data-composition-id="demo"><body><p id="caption-7">WIDE</p></body></html>\n';
+    writeFileSync(join(root, "index.html"), source);
+    const hash = createHash("sha256").update(source).digest("hex");
+    const measureLayout = vi.fn().mockResolvedValue({
+      measured: true,
+      seekTime: 0,
+      frame: { width: 720, height: 720 },
+      elements: [
+        {
+          selector: "#caption-7",
+          box: { x: 58, y: 533, width: 604.8, height: 108 },
+          lines: 2,
+          widestLinePx: 381.7,
+          contentBoxPx: 557,
+          fontPx: 48,
+          overflows: false,
+          text: "and video stays a service line instead",
+        },
+      ],
+    });
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("e", "edit_file", {
+            path: "index.html",
+            old_string: "WIDE",
+            new_string: "WIDER",
+            expected_hash: hash,
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(
+        completion("", [call("m", "measure_layout", { selectors: ["#caption-7"] })]),
+      )
+      .mockResolvedValueOnce(completion("It is on two lines now."))
+      .mockResolvedValueOnce(completion("It is on two lines."));
+
+    await runTabarioModel({
+      adapter: { ...adapter(), measureLayout },
+      stagingDir: root,
+      kind: "chat",
+      transcript: [
+        { role: "user", text: "make caption 7 two lines", at: new Date().toISOString() },
+      ],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    const last = JSON.parse(String(fetchImpl.mock.calls[3]?.[1]?.body));
+    const demand = last.messages[last.messages.length - 1];
+    expect(demand.content).toContain("rendered at 48px");
+    // Beside the width comparison rather than instead of it: a size on its own
+    // says nothing about whether the line fits, which is why the two ship
+    // together and why the reply can now speak in either.
+    expect(demand.content).toContain("widest line 381.7px in a 557px content box");
+  });
 });

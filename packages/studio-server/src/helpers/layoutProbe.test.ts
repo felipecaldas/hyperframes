@@ -115,6 +115,32 @@ describe("classifyLayoutProbe", () => {
     );
     expect(result.elements[0].pinnedByManualEdit).toBeUndefined();
   });
+
+  /**
+   * TAB-1177. The size the reply talks in. A live run answered "It is now
+   * displaying at 32px" over a project whose every caption read 48px, and the
+   * measurement it was told to trust had no size to contradict it with.
+   */
+  it("reports the rendered font size beside the lines it was rendered in", () => {
+    const result = classifyLayoutProbe(probe({ ...PINNED_CAPTION, fontPx: 46.8 }), 0);
+    expect(result.elements[0].fontPx).toBe(46.8);
+    expect(result.elements[0].lines).toBe(3);
+  });
+
+  /**
+   * The same rule the width follows, for the same reason: an element that paints
+   * nothing has no line, so a size reported against it is a reading about text
+   * that is not there. A sweep asking "is every caption 32px" would count such an
+   * element as one that matched.
+   */
+  it("drops the font size when no line was painted", () => {
+    const result = classifyLayoutProbe(
+      probe({ ...PINNED_CAPTION, lines: 0, widestLinePx: 0, fontPx: 46.8 }),
+      0,
+    );
+    expect(result.elements[0].fontPx).toBeUndefined();
+    expect(result.elements[0].widestLinePx).toBeUndefined();
+  });
 });
 
 describe("unavailableMeasurement", () => {

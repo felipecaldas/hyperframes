@@ -182,9 +182,13 @@ A HyperFrames project's timeline IS its HTML — reading the files is how you in
 - Media live in \`assets/\` and are referenced by \`<video>\`, \`<img>\` and \`<audio>\` elements; captions are text elements on their own track.
 - Motion is the GSAP block in \`index.html\`: \`tl.to\`, \`tl.fromTo\` and \`tl.set\` calls, each with a position in seconds.
 - Captions are compiler-owned karaoke units. A container with \`data-hf-atomic\` and class \`hf-captions\` is ONE caption: its word spans carry \`data-w-start\`/\`data-w-end\` timings, and one shared script loop drives every caption's highlight. To change a caption, edit a word span's text or the caption's \`data-w-*\`, \`data-active-color\`, \`data-rest-color\` or \`data-active-scale\` attributes — nothing else. Never rewrite, duplicate or inline the highlight loop; never merge or split word spans; never copy a \`data-hf-id\` from one element to another; never rename an element's \`id\`.
-- How a caption is sized was decided when the project was compiled, and it is not what the CSS alone tells you. A project compiled before TAB-1170 carries a script that runs once fonts load: a one-line caption carries \`data-caption-base-px\` and holds every word on a single line — the container says \`flex-wrap: nowrap\` — and the script shrinks the font until the line fits; a caption compiled for several lines wraps, and the script sizes it so its widest row fits. A project compiled since TAB-1170 carries **no sizing script at all** — nothing resizes a caption at runtime, so the size in the CSS is the size the video renders — though it still emits \`data-caption-base-px\`, which nothing reads any more. **Removing \`data-caption-base-px\` on its own does NOT make a one-line caption wrap.** Where the script still exists it stops the shrink, so the text grows back to full size and the container still refuses to break, so it overflows its box; where it does not, the attribute is inert and removing it changes nothing. That is the exact result this instruction used to cause, and it is not a fix.
-- To put a one-line caption onto more lines, make every part of the change on that one caption element. An inline \`style\` attribute beats the shared \`.hf-captions\` CSS rule, and every caption on the frame reads that rule — never edit the rule to fix one caption. Three things together, and this is the one exception to the "nothing else" above: remove that caption's \`data-caption-base-px\`; add \`flex-wrap: wrap\` to its inline \`style\`; and write a literal break element \`<div style="flex-basis:100%;height:0"></div>\` between the words where the line should end. **Placing that break is the whole change — do not set a \`font-size\` on that element or on any other.** Where the line ends is a question about width, not about a count: break after the last word that fits the element's content box, so a line of short words holds more of them than a line of long ones does. A project compiled since TAB-1170 may already carry breaks — a literal \`<div class="hf-caption-break">\` or an inline \`flex-basis:100%\` — and one break per line end is the rule, so move an existing one rather than adding a second. Sizing the break inline rather than on a class is not a style preference: a project compiled before the caption style field existed has no rule for any break class, so a class-only break does nothing there. The break must be a literal element in the file, because Studio can only patch elements that already exist, and it must be a \`div\` and not a \`span\`, so the word-counting scripts skip it.
-- **The caption's size belongs to the template, not to this caption, and it is not yours to change.** Every caption in the project is compiled at one size — its style's \`caption_scale\` of the frame's short edge — so a caption given its own \`font-size\` stops matching every other caption in the video. That difference is the defect, not the fix. The instruction here used to be to measure the longest line and shrink the text until it fitted, and that is what produced captions of four different sizes on one timeline: the size followed whichever caption the user had last complained about. Choosing a break decides where a line ends; it does not change how big the words are. So when the count the user asked for is not reachable at the template's size, place the break where the width runs out, measure it, and report the count that came back along with what the width allowed. **A caption showing more lines than was asked for is a true result to state, not a failure to cover up by shrinking the text.** Leave every other caption alone unless the user asks for the same change there.
+- How a caption is sized was decided when the project was compiled, and it is not what the CSS alone tells you. A project compiled before TAB-1170 carries a script that runs once fonts load: a one-line caption carries \`data-caption-base-px\` and holds every word on a single line — the container says \`flex-wrap: nowrap\` — and the script shrinks the font until the line fits; a caption compiled for several lines wraps, and the script sizes it so its widest row fits. A project compiled since TAB-1170 carries **no sizing script at all** — nothing resizes a caption at runtime, so the size in the CSS is the size the video renders — though it still emits \`data-caption-base-px\`, which nothing reads any more. **Removing \`data-caption-base-px\` on its own does NOT make a one-line caption wrap.** Where the script still exists it stops the shrink, so the text grows back to full size and the container still refuses to break, so it overflows its box; where it does not, the attribute is inert and removing it changes nothing. That is the exact result this instruction used to cause, and it is not a fix. The wrap recipe below therefore does not ask for it, and a run that removes it anyway has either changed nothing or broken something.
+- To put a one-line caption onto more lines, make every part of the change on that one caption element. An inline \`style\` attribute beats the shared \`.hf-captions\` CSS rule, and every caption on the frame reads that rule — never edit the rule to fix one caption. Two things together, and this is the one exception to the "nothing else" above: add \`flex-wrap: wrap\` to that element's inline \`style\`; and write a literal break element \`<div style="flex-basis:100%;height:0"></div>\` between the words where the line should end. **Placing that break is the whole change — do not set a \`font-size\` on that element or on any other.** Where the line ends is a question about width, not about a count: break after the last word that fits the element's content box, so a line of short words holds more of them than a line of long ones does. A project compiled since TAB-1170 may already carry breaks — a literal \`<div class="hf-caption-break">\` or an inline \`flex-basis:100%\` — and one break per line end is the rule, so move an existing one rather than adding a second. When you move one, leave it in the form the file already uses; a break you add is always the inline one, because copying the class form into a project that has no rule for it produces an element that draws nothing and breaks nothing. Sizing the break inline rather than on a class is not a style preference: a project compiled before the caption style field existed has no rule for any break class, so a class-only break does nothing there. The break must be a literal element in the file, because Studio can only patch elements that already exist, and it must be a \`div\` and not a \`span\`, so the word-counting scripts skip it.
+- **The caption's size belongs to the template, not to this caption: a single caption's size is not yours to change.** Every caption in the project is compiled at one size — its style's \`caption_scale\` of the frame's short edge — so a caption given its own \`font-size\` stops matching every other caption in the video. That difference is the defect, not the fix. The instruction here used to be to measure the longest line and shrink the text until it fitted, and that is what produced captions of four different sizes on one timeline: the size followed whichever caption the user had last complained about. Choosing a break decides where a line ends; it does not change how big the words are. So when the count the user asked for is not reachable at the template's size, place the break where the width runs out, measure it, and report the count that came back along with what the width allowed. **A caption showing more lines than was asked for is a true result to state, not a failure to cover up by shrinking the text.** Two different requests name a size and they are different jobs:
+  - **One caption's size** — a single element named or selected, "make this one smaller". Refuse it and say why: one caption at its own size is the mismatch every other caption then shows. Offer the whole-video version instead.
+  - **Every caption's size** — "set all the captions to 32px", "the subtitles are too big". That is one number, and it is not the per-caption change. Every caption reads the same \`.hf-captions\` rule, so setting \`font-size\` there once moves all of them together and keeps them identical — the invariant the per-caption version breaks. Do that, then say what it means: this edits the project's compiled stylesheet, so a recompile from the template puts the template's size back.
+  - **Never state a size that no reading produced** — not one element's and not the project's. \`measure_layout\` reports every measured element's rendered size in px; quote that, or read the number out of the stylesheet you changed and say which you did. "It is now displaying at 32px" is a claim about a measurement, and one made without taking it is worse than saying the size could not be measured.
+- A request can cover more than one element, and then the whole set is the job. "All the captions", "every title", "each scene", or a list of names is one request, not permission to change one element and describe the rest. Find the members first — search the files for the label or the class, and say how many there are — then make the same change on every one of them **in this turn**: read each, edit each, and measure them in batches when the set is larger than the twelve selectors one measurement takes. This is the case the "change only what was asked" rule reserves rather than forbids: the user asked for the whole set, so touching all of it is what was asked. Do not end the turn on what you are about to do with the rest — a reply that says what it "will" do has not done it, and the run that did that had been asked to review every caption, changed one, and stopped. If some member cannot be changed, finish the others, then say plainly which were left and why.
 - \`measure_layout\` is how you check where the break landed, rather than asserting it. It reports each element's line count, and — since TAB-1173 — the widest rendered line against the element's content-box width. Compare the two: a widest line at or under the content box is a line that fits, and a line over it is the one the next word did not fit after. Both numbers come from the same pass that counts the lines, so they cannot disagree about what a line is. If you move a break and the count does not change, the break is not where you thought: read the measurement rather than repeating the description.
 - How many lines a caption may use is set for the whole project when it was compiled, and no attribute opts one caption out of it — so do not go looking for a project-level switch you can flip from here. The manual edit above is the only per-caption route, and it works; changing the setting itself means recompiling the project. Say which of the two you are doing rather than implying a reach you do not have.
 - Layout overrides are \`gsap.set("#id", {…})\` and \`tl.set("#id", {…}, 0)\` calls carrying \`x\`, \`y\`, \`width\` or \`height\`. These are **not motion**. They are the box a manual drag or resize in Studio left behind, they apply at time 0, and they override the element's CSS rule for that element only. When something wraps onto too many lines, overflows, sits too high or is too narrow, this is the first place to look — before its markup. Widening a pinned box, or removing the pin, is usually the change; re-typing the words inside it never is.
@@ -1090,6 +1094,48 @@ const READ_FRAME_BEFORE_EDITING =
   "always. Always end with a reply — never finish silently.";
 
 /**
+ * What the run says when the reply promises work the user asked it to finish
+ * (TAB-1178).
+ *
+ * The prompt already forbids this in as many words — "Never end a turn with a
+ * plan you have not carried out. Do not say what you 'will' do; do it, then say
+ * what you did" — and a live run did it anyway, twice in one session. Asked to
+ * review every caption, it changed one and answered "I will now proceed to
+ * review the remaining captions"; asked again, it repeated the shape. An
+ * instruction the model can decline is not a gate, so the deferral is caught
+ * here instead.
+ *
+ * The second sentence exists because this is the one demand whose evidence is
+ * wording, and a reply that reads as future tense about work already done must
+ * not send the run back to do it a second time.
+ */
+const FINISH_THE_WORK =
+  "Your reply describes what you are about to do with work the user asked you to finish. A turn " +
+  "ends when that work is done, not when you say you will do it. Do it now with the tools, then " +
+  "answer: say what you changed and what the measurement shows. If it is already done and only " +
+  "your wording was ahead of it, say what you did and stop — do not make the same change twice. " +
+  "If part of it cannot be done, do everything else and say plainly which part you left and why. " +
+  "Always end with a reply — never finish silently.";
+
+/**
+ * Does this reply defer work rather than report it?
+ *
+ * The only demand in this file that parses the reply instead of the run's
+ * state, so it is kept deliberately narrow. The prompt's own wording is the
+ * guide — "Do not say what you 'will' do" — so the pattern is a first-person
+ * promise followed by an action verb, optionally with "now" or "then" between
+ * them. Two shapes it must not catch: a closing sentence about something the
+ * run is not doing ("let me know if you'd like it different" — "know" is not an
+ * action verb), and any description of work already done, which is past tense.
+ */
+const DEFERRAL =
+  /\b(?:i(?:'|’)ll|i will|i am going to|i(?:'|’)m going to|let me)\s+(?:now\s+|then\s+)?(?:proceed|continue|go on|move on|start|begin|work on|review|check|adjust|fix|update|handle|wrap|place|make|change|set|do)\b/i;
+
+function defersWork(reply: string): boolean {
+  return DEFERRAL.test(reply);
+}
+
+/**
  * The line-width comparison as a finished clause, or null when the probe took
  * no width to compare (TAB-1173).
  *
@@ -1108,20 +1154,69 @@ function lineWidthClause(el: LayoutElementMeasurement): string | null {
   );
 }
 
-/** One element's reading in a sentence the model, and the user, can check. */
+/**
+ * The rendered font size as a clause, or null when no size was taken (TAB-1177).
+ *
+ * Extracted for the same reason `lineWidthClause` above it is: one more branch
+ * inline is what tips `describeMeasuredElement` over the fork's complexity gate.
+ *
+ * A size of 0 is "nothing was read", not "a size of zero" — `classifyLayoutProbe`
+ * drops `fontPx` when no line was painted, and this says the same thing for a
+ * caller holding a raw reading.
+ */
+function renderedSizeClause(el: LayoutElementMeasurement): string | null {
+  return typeof el.fontPx === "number" && el.fontPx > 0 ? `rendered at ${el.fontPx}px` : null;
+}
+
+/** "3 lines", or null when the probe took no count. */
+function lineCountClause(el: LayoutElementMeasurement): string | null {
+  if (typeof el.lines !== "number") return null;
+  return `${el.lines} line${el.lines === 1 ? "" : "s"}`;
+}
+
+/** The element's box, or null when it has none. */
+function boxClause(el: LayoutElementMeasurement): string | null {
+  return el.box ? `box ${el.box.width} x ${el.box.height} at (${el.box.x}, ${el.box.y})` : null;
+}
+
+/** The overflow the probe could decide, or null when it could not. */
+function overflowClause(el: LayoutElementMeasurement): string | null {
+  return el.overflows ? "content overflows its box" : null;
+}
+
+/** The inline box a manual Studio resize left behind, when there is one. */
+function pinClause(el: LayoutElementMeasurement): string | null {
+  const pin = el.pinnedByManualEdit;
+  if (!pin) return null;
+  const size = [pin.width, pin.height].filter(Boolean);
+  return `pinned by a manual resize to ${size.join(" x ")}`;
+}
+
+/**
+ * One element's reading in a sentence the model, and the user, can check.
+ *
+ * A list of clauses, one function each, since TAB-1177. The version this
+ * replaced accumulated them a branch at a time, and by the time the rendered
+ * font size arrived — the sixth field — the fork's complexity gate refused the
+ * commit at ten cyclomatic. Every field is a clause returning null when the
+ * probe took no reading of it, so the next one costs a list entry and no
+ * branch, and the gate stops being what decides when this function gets split.
+ *
+ * The order is the order the readings matter in, and it is the order they
+ * appeared: what it is, how big, whether the text fits, what the text is set
+ * at, whether it spilled, and what a manual edit pinned.
+ */
 function describeMeasuredElement(el: LayoutElementMeasurement): string {
   if (el.unmeasurable) return `${el.selector}: could not be measured (${el.unmeasurable})`;
-  const parts: string[] = [];
-  if (typeof el.lines === "number") parts.push(`${el.lines} line${el.lines === 1 ? "" : "s"}`);
-  if (el.box) parts.push(`box ${el.box.width} x ${el.box.height} at (${el.box.x}, ${el.box.y})`);
-  const width = lineWidthClause(el);
-  if (width) parts.push(width);
-  if (el.overflows) parts.push("content overflows its box");
-  if (el.pinnedByManualEdit) {
-    const pin = [el.pinnedByManualEdit.width, el.pinnedByManualEdit.height].filter(Boolean);
-    parts.push(`pinned by a manual resize to ${pin.join(" x ")}`);
-  }
-  return `${el.selector}: ${parts.join(", ") || "measured, no dimensions reported"}`;
+  const clauses = [
+    lineCountClause(el),
+    boxClause(el),
+    lineWidthClause(el),
+    renderedSizeClause(el),
+    overflowClause(el),
+    pinClause(el),
+  ].filter((clause): clause is string => clause !== null);
+  return `${el.selector}: ${clauses.join(", ") || "measured, no dimensions reported"}`;
 }
 
 /** The whole reading, one line per element, or the reason there is none. */
@@ -1249,10 +1344,11 @@ function claimDemand(
  * What the run has to say before the model may end the turn, or null when it
  * may end it now.
  *
- * Four demands, each made at most once per run:
+ * Five demands, each made at most once per run:
  *
  * - no tool ran at all: go and read the project (TAB-1063's gate);
  * - the pre-edit gate refused a write: read FRAME.md and retry (TAB-1171's);
+ * - the reply promises work it was asked to finish: do it now (TAB-1178's);
  * - a write landed on something measurable and nothing was measured since:
  *   go and measure (TAB-805's);
  * - measured since that write: here are your numbers, answer from them
@@ -1261,7 +1357,11 @@ function claimDemand(
  * Bounded at one extra round each, so a model that ignores them all still
  * finishes and its reply stands on its own — next to a receipt that does not.
  */
-function demandBeforeFinishing(state: ToolRunState, asked: FinishDemands): string | null {
+function demandBeforeFinishing(
+  state: ToolRunState,
+  asked: FinishDemands,
+  reply: string,
+): string | null {
   if (!state.calledAnyTool) {
     return claimDemand(asked, "inspect", INSPECT_BEFORE_ANSWERING);
   }
@@ -1273,6 +1373,12 @@ function demandBeforeFinishing(state: ToolRunState, asked: FinishDemands): strin
   if (state.refusedFrameMdWrite && !state.readFrameMd) {
     return claimDemand(asked, "frame", READ_FRAME_BEFORE_EDITING);
   }
+  // TAB-1178. Before the measure demands on purpose: a reply that defers is
+  // answered by doing the work, and doing it is what invalidates the reading
+  // the reconcile demand would otherwise quote.
+  if (defersWork(reply)) {
+    return claimDemand(asked, "defer", FINISH_THE_WORK);
+  }
   if (!state.changedRenderable) return null;
   if (!state.measuredSinceWrite) {
     return claimDemand(asked, "measure", MEASURE_BEFORE_ANSWERING);
@@ -1283,6 +1389,7 @@ function demandBeforeFinishing(state: ToolRunState, asked: FinishDemands): strin
 interface FinishDemands {
   inspect: boolean;
   frame: boolean;
+  defer: boolean;
   measure: boolean;
   reconcile: boolean;
 }
@@ -1303,6 +1410,7 @@ export async function runTabarioModel(options: TabarioModelOptions): Promise<Tab
   const asked: FinishDemands = {
     inspect: false,
     frame: false,
+    defer: false,
     measure: false,
     reconcile: false,
   };
@@ -1324,7 +1432,7 @@ export async function runTabarioModel(options: TabarioModelOptions): Promise<Tab
       // "it should now display correctly" without ever measuring — which is the
       // same unchecked claim TAB-805 exists to stop, one cause later. Asked
       // at the only moment that matters: when it tries to finish.
-      const demand = demandBeforeFinishing(state, asked);
+      const demand = demandBeforeFinishing(state, asked, assistantText);
       if (demand) {
         messages.push({ role: "user", content: demand });
         continue;
