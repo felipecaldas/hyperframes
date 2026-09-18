@@ -892,6 +892,15 @@ async function requestCompletion(
 interface ToolRunState {
   readFrameMd: boolean;
   /**
+   * A write tool was refused by the FRAME.md gate (TAB-1171).
+   *
+   * Distinct from `calledAnyTool`, which the refusal itself satisfies, and from
+   * `changedRenderable`, which a refused write never sets. Without it the loop
+   * had no evidence that a write had been asked for and declined, so it let the
+   * turn end on a reply that read as though it were still mid-task.
+   */
+  refusedFrameMdWrite: boolean;
+  /**
    * Any tool ran at all, including one that threw. A run that never looked at
    * the project cannot answer for it (TAB-1063): the live run that motivated
    * this asked "What is the exact text of caption 0?" with the caption's text
@@ -973,12 +982,27 @@ function isFrameRead(call: ToolCall, result: unknown): boolean {
   );
 }
 
+/**
+ * The FRAME.md pre-edit gate refusing a write.
+ *
+ * Its own type because the loop treats it differently from any other tool
+ * failure: it is recoverable inside the run — read FRAME.md, then retry — so
+ * the finish gate needs to know it happened (TAB-1171). The text is unchanged;
+ * only the loop's ability to recognise it is new.
+ */
+class FrameReadRequiredError extends Error {
+  constructor() {
+    super(
+      "Before editing, read FRAME.md in this run and use its word table. Earlier conversation is not the current register.",
+    );
+    this.name = "FrameReadRequiredError";
+  }
+}
+
 function assertFrameRead(call: ToolCall, options: TabarioModelOptions, state: ToolRunState): void {
   if (!WRITE_TOOLS.has(call.function.name) && call.function.name !== "delete_file") return;
   if (state.readFrameMd || !existsSync(join(options.stagingDir, "FRAME.md"))) return;
-  throw new Error(
-    "Before editing, read FRAME.md in this run and use its word table. Earlier conversation is not the current register.",
-  );
+  throw new FrameReadRequiredError();
 }
 
 async function executeToolCalls(
@@ -1003,6 +1027,11 @@ async function executeToolCalls(
       result = await executeTool(call, options);
       noteToolOutcome(state, call, result);
     } catch (error) {
+      // TAB-1171. A refusal by the pre-edit gate is recoverable in this run, so
+      // the finish gate has to know it happened. Every other tool failure is
+      // already visible to the model as an ordinary error result and needs no
+      // state of its own.
+      if (error instanceof FrameReadRequiredError) state.refusedFrameMdWrite = true;
       result = { error: error instanceof Error ? error.message : String(error) };
     }
     const content = JSON.stringify(result);
@@ -1041,6 +1070,23 @@ const MEASURE_BEFORE_ANSWERING =
   "as always: say what you changed and what the measurement shows. If the numbers do not match " +
   "what was asked, either change what the measurement points at or say plainly what it is now and " +
   "what you could not achieve. Always end with a reply — never finish silently.";
+
+/**
+ * What the run says when the pre-edit gate refused a write and the model tried
+ * to stop there (TAB-1171).
+ *
+ * The gate's own message already says what is missing. This says what to do
+ * about it, because a live run read the refusal, told the user it needed
+ * FRAME.md, and ended the turn — a run marked complete, with nothing changed
+ * and a reply that read as though it were still mid-task. One nudge, never a
+ * loop, like the two above it.
+ */
+const READ_FRAME_BEFORE_EDITING =
+  "Your edit was refused because FRAME.md has not been read in this run, so you do not yet know " +
+  "this project's register. Call read_file on FRAME.md now, then make the same edit again — the " +
+  "refusal is not a dead end, and nothing you have already read is lost. Use the word table you " +
+  "find there for any direction words in the request. Then reply in the same plain language as " +
+  "always. Always end with a reply — never finish silently.";
 
 /** One element's reading in a sentence the model, and the user, can check. */
 function describeMeasuredElement(el: LayoutElementMeasurement): string {
@@ -1159,39 +1205,62 @@ function initialMessages(options: TabarioModelOptions): ChatMessage[] {
 }
 
 /**
+ * Marks a finish demand as made, returning its message the first time and null
+ * once it has already been made.
+ *
+ * Every demand below carries the same guard, and the four copies of it pushed
+ * `demandBeforeFinishing` over the fork's complexity gate (TAB-1172) without
+ * making any one of them clearer to read. Behaviour is unchanged: the first ask
+ * returns its message, every later ask returns null.
+ */
+function claimDemand(
+  asked: FinishDemands,
+  key: keyof FinishDemands,
+  message: string,
+): string | null {
+  if (asked[key]) return null;
+  asked[key] = true;
+  return message;
+}
+
+/**
  * What the run has to say before the model may end the turn, or null when it
  * may end it now.
  *
- * Three demands, each made at most once per run:
+ * Four demands, each made at most once per run:
  *
  * - no tool ran at all: go and read the project (TAB-1063's gate);
+ * - the pre-edit gate refused a write: read FRAME.md and retry (TAB-1171's);
  * - a write landed on something measurable and nothing was measured since:
  *   go and measure (TAB-805's);
  * - measured since that write: here are your numbers, answer from them
  *   (TAB-1061's).
  *
- * Bounded at three extra rounds, so a model that ignores them all still
+ * Bounded at one extra round each, so a model that ignores them all still
  * finishes and its reply stands on its own — next to a receipt that does not.
  */
 function demandBeforeFinishing(state: ToolRunState, asked: FinishDemands): string | null {
   if (!state.calledAnyTool) {
-    if (asked.inspect) return null;
-    asked.inspect = true;
-    return INSPECT_BEFORE_ANSWERING;
+    return claimDemand(asked, "inspect", INSPECT_BEFORE_ANSWERING);
+  }
+  // TAB-1171, and it has to come before the `changedRenderable` return below.
+  // A refused write leaves that flag false, so a run that reached the gate and
+  // gave up used to fall straight through to the end of the turn — reporting a
+  // finished run whose reply said it still needed something, with the user's
+  // change never made. The refusal is recoverable in-run, so say how.
+  if (state.refusedFrameMdWrite && !state.readFrameMd) {
+    return claimDemand(asked, "frame", READ_FRAME_BEFORE_EDITING);
   }
   if (!state.changedRenderable) return null;
   if (!state.measuredSinceWrite) {
-    if (asked.measure) return null;
-    asked.measure = true;
-    return MEASURE_BEFORE_ANSWERING;
+    return claimDemand(asked, "measure", MEASURE_BEFORE_ANSWERING);
   }
-  if (asked.reconcile) return null;
-  asked.reconcile = true;
-  return reconcileWithMeasurement(state.measuredSinceWrite);
+  return claimDemand(asked, "reconcile", reconcileWithMeasurement(state.measuredSinceWrite));
 }
 
 interface FinishDemands {
   inspect: boolean;
+  frame: boolean;
   measure: boolean;
   reconcile: boolean;
 }
@@ -1204,11 +1273,17 @@ export async function runTabarioModel(options: TabarioModelOptions): Promise<Tab
   let assistantText = "";
   const state: ToolRunState = {
     readFrameMd: false,
+    refusedFrameMdWrite: false,
     calledAnyTool: false,
     changedRenderable: false,
     measuredSinceWrite: null,
   };
-  const asked: FinishDemands = { inspect: false, measure: false, reconcile: false };
+  const asked: FinishDemands = {
+    inspect: false,
+    frame: false,
+    measure: false,
+    reconcile: false,
+  };
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     if (options.signal.aborted) throw new DOMException("Tabario AI run cancelled.", "AbortError");

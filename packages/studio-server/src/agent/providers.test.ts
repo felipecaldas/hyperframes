@@ -189,6 +189,148 @@ describe("Tabario AI provider", () => {
   });
 
   /**
+   * TAB-1171. A live run on the deployed Studio tried the edit before reading
+   * FRAME.md, was refused by the gate, told the user it needed FRAME.md — and
+   * ended the turn. The run was recorded `complete` with **zero changed files**
+   * and a reply that read as though it were still mid-task, so the user's
+   * change was never made and nothing said so.
+   *
+   * The refusal is recoverable inside the run, so the finish gate now names the
+   * next step instead of letting the turn end. Modelled on the real transcript:
+   * read index.html, try the edit, get refused, try to stop.
+   */
+  it("sends a run the frame gate refused back to FRAME.md, and the retry lands", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-frame-retry-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    writeFileSync(join(root, "FRAME.md"), FRAME_MD);
+    const hash = createHash("sha256").update(HTML).digest("hex");
+    const edit = {
+      path: "index.html",
+      old_string: "before",
+      new_string: "after",
+      expected_hash: hash,
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      // The refusal, then the reply that tries to end the turn on it.
+      .mockResolvedValueOnce(completion("", [call("blocked", "edit_file", edit)]))
+      .mockResolvedValueOnce(completion("I need to read the FRAME.md file first."))
+      // Nudged: read the register, then make the same edit again.
+      .mockResolvedValueOnce(
+        completion("", [
+          call("frame", "read_file", { path: "FRAME.md" }),
+          call("allowed", "edit_file", edit),
+        ]),
+      )
+      .mockImplementation(async () => completion("Updated."));
+
+    const result = await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "Make the title snappier", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    // The demand rides on the request that follows the reply-the-refusal.
+    const nudged = JSON.parse(String(fetchImpl.mock.calls[2]?.[1]?.body));
+    const demand = nudged.messages.at(-1);
+    expect(demand.role).toBe("user");
+    expect(demand.content).toContain("FRAME.md has not been read in this run");
+    expect(demand.content).toContain("make the same edit again");
+    // The point of the nudge: the edit the gate refused actually lands.
+    expect(readFileSync(join(root, "index.html"), "utf8")).toContain("after");
+    expect(result.assistantText).toBe("Updated.");
+  });
+
+  /**
+   * The bound, matching the other three demands: asked once, never looped. A
+   * model that ignores the nudge still finishes, and its reply stands.
+   */
+  it("asks for the frame read once, then lets the answer stand", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-frame-once-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    writeFileSync(join(root, "FRAME.md"), FRAME_MD);
+    const hash = createHash("sha256").update(HTML).digest("hex");
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("blocked", "edit_file", {
+            path: "index.html",
+            old_string: "before",
+            new_string: "after",
+            expected_hash: hash,
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(completion("I need FRAME.md."))
+      .mockResolvedValueOnce(completion("Still not reading it."));
+
+    const result = await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "Make the title snappier", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(result.assistantText).toBe("Still not reading it.");
+    expect(readFileSync(join(root, "index.html"), "utf8")).toBe(HTML);
+  });
+
+  /**
+   * The other side of the gate: with no FRAME.md there is nothing to read, so
+   * `assertFrameRead` never fires and this demand must stay silent. The edit
+   * is expected to land, and the run then meets the pre-existing measure
+   * demand — which is what proves this branch is not interfering.
+   */
+  it("does not demand a frame read when the project has no FRAME.md", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tabario-no-frame-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    const hash = createHash("sha256").update(HTML).digest("hex");
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          call("allowed", "edit_file", {
+            path: "index.html",
+            old_string: "before",
+            new_string: "after",
+            expected_hash: hash,
+          }),
+        ]),
+      )
+      .mockImplementation(async () => completion("Updated."));
+
+    const result = await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "Make the title snappier", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+    });
+
+    const bodies = fetchImpl.mock.calls.map((c) => String((c[1] as RequestInit)?.body));
+    expect(bodies.some((b) => b.includes("has not been read in this run"))).toBe(false);
+    expect(readFileSync(join(root, "index.html"), "utf8")).toContain("after");
+    expect(result.assistantText).toBe("Updated.");
+  });
+
+  /**
    * TAB-781. The model refused a timeline question — "my capabilities are
    * limited to file operations" — while holding every tool needed to answer it.
    * The prompt permitted questions but never said the HTML *is* the timeline, so
