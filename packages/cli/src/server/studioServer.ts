@@ -68,7 +68,8 @@ import type { RenderJob } from "@hyperframes/producer";
 import { seekCompositionTimeline } from "../capture/captureCompositionFrame.js";
 import type { StaticProjectServer } from "../utils/staticProjectServer.js";
 import {
-  assertWebGpuRequirement,
+  assertWebGpuAdapterAvailable,
+  compositionRequiresWebGpu,
   resolveCaptureBrowserGpuMode,
   resolveLocalBrowserGpuMode,
   type BrowserGpuMode,
@@ -954,14 +955,14 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
       return cachedProjectSignature;
     },
 
-    async lint(html: string, opts?: { filePath?: string }) {
+    async lint(html: string, opts?: { filePath?: string; isSubComposition?: boolean }) {
       const { lintHyperframeHtml } = await import("@hyperframes/lint");
-      return await lintHyperframeHtml(html, opts);
+      return await lintHyperframeHtml(html, { ...opts, host: "studio" });
     },
 
     async lintProject(dir: string) {
       const { lintProject } = await import("@hyperframes/lint");
-      return await lintProject(dir);
+      return await lintProject(dir, undefined, { host: "studio" });
     },
 
     runtimeUrl: "/api/runtime.js",
@@ -1098,13 +1099,12 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
         return null;
       }
       const sourcePath = join(opts.project.dir, opts.compPath);
-      if (existsSync(sourcePath)) {
-        assertWebGpuRequirement(
-          readFileSync(sourcePath, "utf-8"),
-          session.requestedGpuMode,
-          session.resolvedGpuMode,
-        );
-      }
+      // The shared browser launches once, before any composition is known,
+      // so it can't gain a WebGPU flag it didn't start with. Checked live
+      // below, against this page, after navigation — see assertWebGpuAdapterAvailable.
+      const requiresWebGpu = existsSync(sourcePath)
+        ? compositionRequiresWebGpu(readFileSync(sourcePath, "utf-8"))
+        : false;
       let page: import("puppeteer-core").Page | null = null;
       const closePage = () => void page?.close().catch(() => {});
       opts.signal.addEventListener("abort", closePage, { once: true });
@@ -1119,6 +1119,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
           deviceScaleFactor: thumbnailDeviceScaleFactor(opts),
         });
         await page.goto(opts.previewUrl, { waitUntil: "domcontentloaded", timeout: 10000 });
+        await assertWebGpuAdapterAvailable(page, requiresWebGpu);
         await page
           .waitForFunction(
             () => {

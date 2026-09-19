@@ -334,6 +334,34 @@ describe("resolveVideoExtractionDuration", () => {
     ).toThrowError(expect.objectContaining({ kind: "media_start_out_of_range", retryable: false }));
   });
 
+  it("plans a one-frame held tail when an explicit non-looping slot starts past EOF", () => {
+    expect(resolveVideoExtractionWindow(video({ end: 6, mediaStart: 5 }), metadata(2))).toEqual({
+      compositionStart: 0,
+      mediaStart: 1.999999,
+      durationSeconds: 0.000001,
+      preserveTimelineEnd: true,
+      ensureFinalFrame: true,
+    });
+  });
+
+  it("keeps the playable suffix when an explicit non-looping slot starts just inside EOF", () => {
+    expect(
+      resolveVideoExtractionWindow(video({ end: 6, mediaStart: 1.9 }), metadata(2), 6),
+    ).toEqual({
+      compositionStart: 0,
+      mediaStart: 1.9,
+      durationSeconds: 0.10000000000000009,
+      preserveTimelineEnd: true,
+      ensureFinalFrame: true,
+    });
+  });
+
+  it("rejects a looping explicit slot that starts at source EOF", () => {
+    expect(() =>
+      resolveVideoExtractionWindow(video({ end: 6, mediaStart: 2, loop: true }), metadata(2), 6),
+    ).toThrowError(expect.objectContaining({ kind: "media_start_out_of_range", retryable: false }));
+  });
+
   it("rebases a loop phase when the visible window stays within one cycle", () => {
     expect(
       resolveVideoExtractionWindow(
@@ -1548,6 +1576,48 @@ describe.skipIf(!HAS_FFMPEG)("held tails on sparse-timestamp sources", () => {
     },
     30_000,
   );
+
+  it("renders the same final decoded frame just inside and past EOF", async () => {
+    const metadata = await extractVideoMetadata(cfrFixture);
+    const sourceDuration = metadata.videoStreamDurationSeconds;
+    const outputDir = mkdtempSync(join(fixtureDir, "eof-out-"));
+    const videos: VideoElement[] = [
+      {
+        id: "just-inside-eof",
+        src: cfrFixture,
+        start: 0,
+        end: 5,
+        mediaStart: sourceDuration - 0.001,
+        loop: false,
+        hasAudio: false,
+      },
+      {
+        id: "past-eof",
+        src: cfrFixture,
+        start: 0,
+        end: 5,
+        mediaStart: sourceDuration + 1,
+        loop: false,
+        hasAudio: false,
+      },
+    ];
+
+    const result = await extractAllVideoFrames(videos, fixtureDir, {
+      fps: 30,
+      format: "png",
+      outputDir,
+      timelineEnd: 5,
+    });
+
+    expect(result.errors).toEqual([]);
+    expect(result.extracted).toHaveLength(2);
+    const insideFrame = result.extracted[0]?.framePaths.get(0);
+    const pastFrame = result.extracted[1]?.framePaths.get(0);
+    expect(insideFrame).toBeDefined();
+    expect(pastFrame).toBeDefined();
+    if (!insideFrame || !pastFrame) throw new Error("expected both final-frame outputs");
+    expect(readFileSync(pastFrame)).toEqual(readFileSync(insideFrame));
+  }, 30_000);
 });
 
 // Regression test for the VFR (variable frame rate) freeze bug.
@@ -2168,6 +2238,30 @@ describe.skipIf(!HAS_FFMPEG)("extractAllVideoFrames on a VFR source", () => {
     ).toBe(false);
   }, 60_000);
 
+  it("keeps a finite SDR past-EOF slot in a mixed HDR timeline", async () => {
+    const SDR_SHORT = await synthCfrClip("sdr-past-eof.mp4", 1);
+    const HDR_SHORT = await synthHdrTaggedClip("hdr-past-eof-peer.mp4", 1);
+    const outputDir = join(FIXTURE_DIR, "out-hdr-past-eof");
+    mkdirSync(outputDir, { recursive: true });
+
+    const result = await extractAllVideoFrames(
+      [
+        cfrClipElement("sdr-past-eof", SDR_SHORT, 4, 5),
+        { ...cfrClipElement("hdr-peer", HDR_SHORT, 1), start: 1, end: 2 },
+      ],
+      FIXTURE_DIR,
+      { fps: 30, outputDir },
+    );
+
+    // The SDR slot must survive the mixed-HDR preflight and use the held-tail
+    // path. Reverting its guard to `mediaStart >= playableDuration` records an
+    // out-of-range error here and drops the slot before extraction.
+    expect(result.errors).toEqual([]);
+    expect(result.phaseBreakdown.hdrPreflightCount).toBe(1);
+    expect(extractedFor(result, "sdr-past-eof").totalFrames).toBe(1);
+    expect(extractedFor(result, "hdr-peer").totalFrames).toBeGreaterThan(0);
+  }, 60_000);
+
   it("keeps SDR→HDR cache entries distinct from plain SDR entries", async () => {
     const CACHE_DIR = mkdtempSync(join(tmpdir(), "hf-extract-hdr-cache-test-"));
     const SDR = await synthCfrClip("cache-hdr-sdr.mp4", 1);
@@ -2612,6 +2706,115 @@ describe.skipIf(!HAS_FFMPEG)("extractAllVideoFrames on a VFR source", () => {
     // mid-segment test.
     expect(frames.length).toBeGreaterThanOrEqual(297);
     expect(frames.length).toBeLessThanOrEqual(303);
+  }, 60_000);
+});
+
+describe.skipIf(!HAS_FFMPEG || process.platform === "darwin")("forced-SDR HDR extraction", () => {
+  let fixtureDir = "";
+
+  beforeAll(() => {
+    fixtureDir = mkdtempSync(join(tmpdir(), "hf-forced-sdr-tonemap-test-"));
+  });
+
+  afterAll(() => {
+    rmSync(fixtureDir, { recursive: true, force: true });
+  });
+
+  it("matches Studio's HLG tone map and isolates transformed cache entries", async () => {
+    const source = join(fixtureDir, "hlg-warm.mp4");
+    const synthesized = await runFfmpeg([
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "color=c=0xe0b080:s=64x64:r=1:d=1",
+      "-vf",
+      "zscale=pin=bt709:tin=bt709:min=bt709:p=bt2020:t=arib-std-b67:m=bt2020nc:r=tv,format=yuv420p",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      "-color_primaries",
+      "bt2020",
+      "-color_trc",
+      "arib-std-b67",
+      "-colorspace",
+      "bt2020nc",
+      "-bsf:v",
+      "h264_metadata=colour_primaries=9:transfer_characteristics=18:matrix_coefficients=9",
+      source,
+    ]);
+    if (!synthesized.success) {
+      throw new Error(`HLG fixture synthesis failed: ${synthesized.stderr.slice(-400)}`);
+    }
+
+    const reference = join(fixtureDir, "studio-reference.png");
+    const referenceResult = await runFfmpeg([
+      "-y",
+      "-ss",
+      "0",
+      "-i",
+      source,
+      "-t",
+      "1",
+      "-vf",
+      "fps=1,zscale=t=linear:npl=100,tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv",
+      "-q:v",
+      "0",
+      "-compression_level",
+      "1",
+      reference,
+    ]);
+    if (!referenceResult.success) {
+      throw new Error(`Studio reference extraction failed: ${referenceResult.stderr.slice(-400)}`);
+    }
+
+    const cacheDir = join(fixtureDir, "cache");
+    const video = (id: string): VideoElement => ({
+      id,
+      src: source,
+      start: 0,
+      end: 1,
+      mediaStart: 0,
+      loop: false,
+      hasAudio: false,
+    });
+    const extract = (id: string, toneMapHdrToSdr = false) =>
+      extractAllVideoFrames(
+        [video(id)],
+        fixtureDir,
+        {
+          fps: 1,
+          outputDir: join(fixtureDir, id),
+          format: "png",
+          toneMapHdrToSdr,
+        },
+        undefined,
+        { extractCacheDir: cacheDir },
+      );
+
+    const plain = await extract("plain");
+    const toneMapped = await extract("tone-mapped", true);
+    const toneMappedAgain = await extract("tone-mapped-again", true);
+
+    expect(plain.errors).toEqual([]);
+    expect(toneMapped.errors).toEqual([]);
+    expect(toneMapped.phaseBreakdown.cacheHits).toBe(0);
+    expect(toneMapped.phaseBreakdown.cacheMisses).toBe(1);
+    expect(toneMappedAgain.phaseBreakdown.cacheHits).toBe(1);
+    expect(readdirSync(cacheDir).filter((name) => name.startsWith(SCHEMA_PREFIX))).toHaveLength(2);
+
+    const frame = (result: ExtractionResult): Buffer => {
+      const path = result.extracted[0]?.framePaths.get(0);
+      if (!path) throw new Error("expected extracted frame");
+      return readFileSync(path);
+    };
+    expect(frame(toneMapped)).toEqual(readFileSync(reference));
+    expect(frame(plain)).not.toEqual(frame(toneMapped));
+    expect(frame(toneMappedAgain)).toEqual(frame(toneMapped));
   }, 60_000);
 });
 

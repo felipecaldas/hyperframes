@@ -1,3 +1,4 @@
+import { formatTimelineBlock } from "../player/lib/describeClips";
 import { buildProjectApiPath } from "../utils/projectRouting";
 import { useState, useCallback, useRef, useEffect } from "react";
 import { readTagSnippetByTarget } from "../utils/sourcePatcher";
@@ -91,6 +92,7 @@ export function useAskAgentModal({
       const prompt = buildElementAgentPrompt({
         selection: domEditSelection,
         currentTime: usePlayerStore.getState().currentTime,
+        timeline: formatTimelineBlock(usePlayerStore.getState().elements),
         tagSnippet,
         selectionContext: agentPromptSelectionContext,
         userInstruction,

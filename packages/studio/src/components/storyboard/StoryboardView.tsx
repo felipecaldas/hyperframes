@@ -100,7 +100,7 @@ audience: <who it's for>
 
 Add one \`## Frame N\` section per beat. Keep the arc tight.
 
-Then run the review loop from the hyperframes-core skill (references/review-loop.md): present the plan as a proposal, offer wireframe sketches on this board, and build on the confirmed layouts.`;
+Then run the review loop from the hyperframes skill (references/review-loop.md): present the plan as a proposal, offer wireframe sketches on this board, and build on the confirmed layouts.`;
 }
 
 function EmptyState({ path }: { path: string }) {

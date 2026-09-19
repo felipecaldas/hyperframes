@@ -38,6 +38,14 @@ const BASE_FLAG = "--base";
  */
 export const ALLOWED_DELETIONS = new Map([
   [
+    "packages/studio/src/components/StudioGlobalDragOverlay.tsx",
+    "the full-screen drop-to-add box is replaced by a landing preview on the timeline; no remaining references",
+  ],
+  [
+    "docs/snippets/catalog-overview-player.jsx",
+    "#4051 removes the Catalog overview's only consumer of this snippet (replaced by the browse-grid mount); confirmed unreferenced repo-wide before deleting",
+  ],
+  [
     "packages/studio/src/hooks/useSdkSession.test.ts",
     "tests only shouldReloadSdkSession, a function with no production callers removed with the preview reload fix",
   ],
@@ -156,6 +164,18 @@ export const ALLOWED_DELETIONS = new Map([
   [
     "packages/studio/src/player/store/groupLevels.ts",
     "#3454 deliberately removes group level-meter state",
+  ],
+  [
+    "docs/public/catalog/components/texture-mask-text.json",
+    "the item's directory exceeds the host budget and now falls back to its recorded video; the stale payload had no <base href> and dead relative asset references, so removing it is the fix, not the regression",
+  ],
+  [
+    "packages/studio/src/player/hooks/useExpandedTimelineElements.ts",
+    "the timeline shows top-level rows only, so the child-row expansion hook is replaced by useTimelineRowElements",
+  ],
+  [
+    "packages/studio/src/player/hooks/useExpandedTimelineElements.test.ts",
+    "tests for the removed child-row expansion hook",
   ],
 ]);
 

@@ -7,6 +7,8 @@ export * from "./outputResolutionCompatibility.js";
 export { unrollComputedTimeline } from "./gsapUnroll.js";
 export { queryByAttr } from "./utils/cssSelector.js";
 export * from "./compositionContract.js";
+export * from "./canvasScaffoldPatterns.js";
+export * from "./topLevelElements.js";
 
 // Pure, browser-safe composition primitives shared by the linter (so it can
 // consume them without depending on @hyperframes/core). The Node-only asset

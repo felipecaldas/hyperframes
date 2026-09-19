@@ -312,6 +312,294 @@ describe("render telemetry events", () => {
     expect(props.registry_blocks_used_count).toBeUndefined();
   });
 
+  // Output-shape request facts are resolved from CLI flags before the
+  // pipeline starts, so both render_complete and render_error must carry
+  // them: a failure before perfSummary exists is exactly the case these
+  // fields (unlike the perfSummary-derived ones) still need to cover.
+  it("carries output-shape request facts on render_complete", () => {
+    trackRenderComplete({
+      durationMs: 1000,
+      fps: 30,
+      quality: "high",
+      docker: false,
+      gpu: false,
+      outputResolutionPreset: "landscape-4k",
+      outputFormat: "gif",
+      hdrMode: "force-sdr",
+      videoFrameFormat: "png",
+      gifFpsCapped: true,
+    });
+    const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(props.output_resolution_preset).toBe("landscape-4k");
+    expect(props.output_format).toBe("gif");
+    expect(props.hdr_mode).toBe("force-sdr");
+    expect(props.video_frame_format).toBe("png");
+    expect(props.gif_fps_capped).toBe(true);
+  });
+
+  it("carries output-shape request facts on render_error", () => {
+    trackRenderError({
+      fps: 30,
+      quality: "high",
+      docker: false,
+      outputResolutionPreset: "portrait",
+      outputFormat: "mp4",
+      hdrMode: "auto",
+      videoFrameFormat: "auto",
+      gifFpsCapped: false,
+    });
+    const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(props.output_resolution_preset).toBe("portrait");
+    expect(props.output_format).toBe("mp4");
+    expect(props.hdr_mode).toBe("auto");
+    expect(props.video_frame_format).toBe("auto");
+    expect(props.gif_fps_capped).toBe(false);
+  });
+
+  it("omits output-shape request facts when the caller never resolved them", () => {
+    trackRenderComplete({ durationMs: 1, fps: 30, quality: "draft", docker: false, gpu: false });
+    const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(props.output_resolution_preset).toBeUndefined();
+    expect(props.output_format).toBeUndefined();
+    expect(props.hdr_mode).toBeUndefined();
+    expect(props.video_frame_format).toBeUndefined();
+    expect(props.gif_fps_capped).toBeUndefined();
+  });
+
+  // Local-preflight toolchain majors; absent on Docker renders (the
+  // container runs its own preflight, never surfaced to the host CLI).
+  it("carries local toolchain majors on render_complete", () => {
+    trackRenderComplete({
+      durationMs: 1000,
+      fps: 30,
+      quality: "high",
+      docker: false,
+      gpu: false,
+      ffmpegVersionMajor: 7,
+      browserVersionMajor: 119,
+    });
+    const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(props.ffmpeg_version_major).toBe(7);
+    expect(props.browser_version_major).toBe(119);
+  });
+
+  it("carries local toolchain majors on render_error", () => {
+    trackRenderError({
+      fps: 30,
+      quality: "high",
+      docker: false,
+      ffmpegVersionMajor: 6,
+      browserVersionMajor: 118,
+    });
+    const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(props.ffmpeg_version_major).toBe(6);
+    expect(props.browser_version_major).toBe(118);
+  });
+
+  it("omits toolchain majors on a Docker render", () => {
+    trackRenderComplete({ durationMs: 1, fps: 30, quality: "draft", docker: true, gpu: false });
+    const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(props.ffmpeg_version_major).toBeUndefined();
+    expect(props.browser_version_major).toBeUndefined();
+  });
+
+  it("reports which step resolved authoring-skill attribution", () => {
+    trackRenderComplete({
+      durationMs: 1,
+      fps: 30,
+      quality: "draft",
+      docker: false,
+      gpu: false,
+      authoringSkill: "product-launch-video",
+      authoringSkillSource: "flag",
+    });
+    const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(props.authoring_skill).toBe("product-launch-video");
+    expect(props.authoring_skill_source).toBe("flag");
+    expect(props.authoring_skill_invalid).toBeUndefined();
+  });
+
+  it("carries a malformed --skill value on render_error without a resolved source", () => {
+    trackRenderError({
+      fps: 30,
+      quality: "draft",
+      docker: false,
+      authoringSkillInvalid: "Not A Skill!",
+    });
+    const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(props.authoring_skill_invalid).toBe("Not A Skill!");
+    expect(props.authoring_skill_source).toBeUndefined();
+  });
+
+  it("carries the root/body scaffold-mismatch measurement from perfSummary on render_complete", () => {
+    trackRenderComplete({
+      durationMs: 1,
+      fps: 30,
+      quality: "draft",
+      docker: false,
+      gpu: false,
+      rootBodyMismatch: true,
+      rootBodyDeltaPxBucket: "51+",
+    });
+    const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(props.root_body_mismatch).toBe(true);
+    expect(props.root_body_delta_px_bucket).toBe("51+");
+  });
+
+  it("falls back to the live capture-observability measurement on render_error (no perfSummary)", () => {
+    trackRenderError({
+      fps: 30,
+      quality: "draft",
+      docker: false,
+      captureRootBodyMismatch: false,
+      captureRootBodyDeltaPxBucket: "0",
+    });
+    const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(props.root_body_mismatch).toBe(false);
+    expect(props.root_body_delta_px_bucket).toBe("0");
+  });
+
+  it("carries the names of HF/HYPERFRAMES env overrides present at plan time", () => {
+    trackRenderComplete({
+      durationMs: 1,
+      fps: 30,
+      quality: "draft",
+      docker: false,
+      gpu: false,
+      hfEnvOverrides: ["HF_DE_VERIFY", "HYPERFRAMES_FONT_CACHE_DIR"],
+    });
+    const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(props.hf_env_overrides).toEqual(["HF_DE_VERIFY", "HYPERFRAMES_FONT_CACHE_DIR"]);
+  });
+
+  it("reports an empty array, not an absent field, when no override was resolved", () => {
+    trackRenderError({ fps: 30, quality: "draft", docker: false });
+    const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(props.hf_env_overrides).toEqual([]);
+  });
+
+  it("names the runtime adapters a render exercised", () => {
+    trackRenderComplete({
+      durationMs: 1000,
+      fps: 30,
+      quality: "high",
+      docker: false,
+      gpu: false,
+      adaptersUsed: ["gsap", "three"],
+    });
+    const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(props.adapters_used).toEqual(["gsap", "three"]);
+  });
+
+  // adaptersUsed is a live+static UNION with no gating role (unlike
+  // compositionElementCount), so "no adapter detected" is a real measurement
+  // and must be reported as one: an absent property is indistinguishable from
+  // an older CLI that never sent it.
+  it("reports an empty adapter list rather than dropping the property", () => {
+    trackRenderComplete({
+      durationMs: 1000,
+      fps: 30,
+      quality: "high",
+      docker: false,
+      gpu: false,
+      adaptersUsed: [],
+    });
+    const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(props.adapters_used).toEqual([]);
+  });
+
+  it("omits adapters_used entirely when the caller never resolved it", () => {
+    trackRenderComplete({ durationMs: 1000, fps: 30, quality: "high", docker: false, gpu: false });
+    const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(props.adapters_used).toBeUndefined();
+  });
+
+  it("carries the composition scan's element/attribute counts and hasLut flag", () => {
+    trackRenderComplete({
+      durationMs: 1000,
+      fps: 30,
+      quality: "high",
+      docker: false,
+      gpu: false,
+      audioCount: 3,
+      imageCount: 5,
+      subCompositionCount: 1,
+      audioGroupCount: 2,
+      colorGradingCount: 4,
+      hasLut: true,
+    });
+    const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(props.audio_count).toBe(3);
+    expect(props.image_count).toBe(5);
+    expect(props.sub_composition_count).toBe(1);
+    expect(props.audio_group_count).toBe(2);
+    expect(props.color_grading_count).toBe(4);
+    expect(props.has_lut).toBe(true);
+  });
+
+  it("reports zero counts and hasLut false rather than dropping the properties", () => {
+    trackRenderComplete({
+      durationMs: 1000,
+      fps: 30,
+      quality: "high",
+      docker: false,
+      gpu: false,
+      audioCount: 0,
+      imageCount: 0,
+      subCompositionCount: 0,
+      audioGroupCount: 0,
+      colorGradingCount: 0,
+      hasLut: false,
+    });
+    const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(props.audio_count).toBe(0);
+    expect(props.image_count).toBe(0);
+    expect(props.sub_composition_count).toBe(0);
+    expect(props.audio_group_count).toBe(0);
+    expect(props.color_grading_count).toBe(0);
+    expect(props.has_lut).toBe(false);
+  });
+
+  // emitStudioRenderComplete never resolves perfSummary.drawElement, only the
+  // observability capture fields (captureAudioCount/captureRootBodyMismatch/etc),
+  // so these must fall back to the capture value or a studio render reports none
+  // of them despite having computed and sent it.
+  it("falls back to the observability capture value for a studio render, which never resolves the direct field", () => {
+    trackRenderComplete({
+      durationMs: 1000,
+      fps: 30,
+      quality: "high",
+      docker: false,
+      gpu: false,
+      source: "studio",
+      captureAudioCount: 2,
+      captureImageCount: 1,
+      captureRootBodyMismatch: true,
+      captureRootBodyDeltaPxBucket: "11-50",
+      captureAdaptersUsed: ["gsap"],
+    });
+    const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(props.audio_count).toBe(2);
+    expect(props.image_count).toBe(1);
+    expect(props.root_body_mismatch).toBe(true);
+    expect(props.root_body_delta_px_bucket).toBe("11-50");
+    expect(props.adapters_used).toEqual(["gsap"]);
+  });
+
+  it("prefers the direct drawElement-sourced value over the capture fallback when both are present", () => {
+    trackRenderComplete({
+      durationMs: 1000,
+      fps: 30,
+      quality: "high",
+      docker: false,
+      gpu: false,
+      audioCount: 3,
+      captureAudioCount: 99,
+    });
+    const props = trackEvent.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(props.audio_count).toBe(3);
+  });
+
   it("flushes immediately after render_complete and render_error (exit races the lazy flush)", () => {
     trackRenderComplete({ durationMs: 1000, fps: 30, quality: "draft", docker: false, gpu: false });
     expect(flush).toHaveBeenCalledTimes(1);

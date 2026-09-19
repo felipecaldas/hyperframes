@@ -36,7 +36,6 @@ import { useFrameCapture } from "./hooks/useFrameCapture";
 import { useLintModal } from "./hooks/useLintModal";
 import { useCompositionDimensions } from "./hooks/useCompositionDimensions";
 import { useToast } from "./hooks/useToast";
-import { useCompositionContentLoader } from "./hooks/useCompositionContentLoader";
 import { useStudioUrlState } from "./hooks/useStudioUrlState";
 import { useEffectiveTimelineDuration } from "./hooks/useEffectiveTimelineDuration";
 import {
@@ -63,7 +62,7 @@ import { useServerConnection } from "./hooks/useServerConnection";
 import { useStudioSessionStart } from "./hooks/useStudioSessionStart";
 import { useTimelineAddAtPlayhead } from "./hooks/useTimelineAddAtPlayhead";
 import { readStudioUrlStateFromWindow, resolveMasterCompositionPath } from "./utils/studioUrlState";
-import { useHydrateActiveCompPathFromUrl } from "./hooks/useHydrateActiveCompPathFromUrl";
+import { useActiveComposition } from "./hooks/useActiveComposition";
 const getTimelineSelectionSet = () => usePlayerStore.getState().selectedElementIds;
 // fallow-ignore-next-line complexity
 export function StudioApp() {
@@ -71,10 +70,6 @@ export function StudioApp() {
   const initialUrlStateRef = useRef(readStudioUrlStateFromWindow());
   const viewModeValue = useViewModeState();
   useStudioSessionStart(projectId, resolving, waitingForServer);
-  const [activeCompPath, setActiveCompPath] = useState<string | null>(null);
-  const [activeCompPathHydrated, setActiveCompPathHydrated] = useState(
-    () => initialUrlStateRef.current.activeCompPath == null,
-  );
   const [compIdToSrc, setCompIdToSrc] = useState<Map<string, string>>(new Map());
   const [previewIframe, setPreviewIframe] = useState<HTMLIFrameElement | null>(null);
   const [compositionLoading, setCompositionLoading] = useState(true);
@@ -82,10 +77,7 @@ export function StudioApp() {
   const [previewDocumentVersion, refreshPreviewDocumentVersion] = usePreviewDocumentVersion();
   const [blockPreview, setBlockPreview] = useState<BlockPreviewInfo | null>(null);
   const previewIframeRef = useRef<HTMLIFrameElement | null>(null);
-  const activeCompPathRef = useRef(activeCompPath);
-  activeCompPathRef.current = activeCompPath;
   const leftSidebarRef = useRef<LeftSidebarHandle>(null);
-  const renderQueue = useRenderQueue(projectId, activeCompPathRef);
   const captionEditMode = useCaptionStore((s) => s.isEditMode);
   const captionHasSelection = useCaptionStore((s) => s.selectedSegmentIds.size > 0);
   const captionSync = useCaptionSync(projectId);
@@ -115,22 +107,27 @@ export function StudioApp() {
     setRefreshKey,
   });
   const masterCompPath = useMemo(
-    () => resolveMasterCompositionPath(fileManager.fileTree),
-    [fileManager.fileTree],
+    () => resolveMasterCompositionPath(fileManager.compositions),
+    [fileManager.compositions],
   );
+  const { activeCompPath, activeCompPathHydrated, setActiveCompPath, handleSelectComposition } =
+    useActiveComposition({
+      projectId,
+      initialUrlStateRef,
+      fileTree: fileManager.fileTree,
+      fileTreeLoaded: fileManager.fileTreeLoaded,
+      masterCompPath,
+      setEditingFile: fileManager.setEditingFile,
+      showToast,
+    });
   const { sdkHandle, editFlowSdkSession } = useStudioSdkSessions(
     projectId,
     activeCompPath,
     masterCompPath,
   );
-  useHydrateActiveCompPathFromUrl({
-    hydrated: activeCompPathHydrated,
-    fileTreeLoaded: fileManager.fileTreeLoaded,
-    fileTree: fileManager.fileTree,
-    initialUrlStateRef,
-    setActiveCompPath,
-    setHydrated: setActiveCompPathHydrated,
-  });
+  const activeCompPathRef = useRef(activeCompPath);
+  activeCompPathRef.current = activeCompPath;
+  const renderQueue = useRenderQueue(projectId, activeCompPathRef);
   const previewPersistence = usePreviewPersistence({
     showToast,
     readOptionalProjectFile: fileManager.readOptionalProjectFile,
@@ -214,7 +211,7 @@ export function StudioApp() {
   const domEditDeleteBridge: DomEditDelete = (s, o) => handleDomEditElementDeleteRef.current(s, o);
   const resetKeyframesRef = useRef<() => boolean>(() => false);
   const deleteSelectedKeyframesRef = useRef<() => void>(() => {});
-  const { handleCopy, handlePaste, handleCut } = useClipboard({
+  const { handleCopy, handlePaste, handleCut, handleDuplicate, canPaste } = useClipboard({
     projectId,
     activeCompPath,
     domEditSelectionRef: domEditSelectionBridgeRef,
@@ -222,7 +219,7 @@ export function StudioApp() {
     writeProjectFile: fileManager.writeProjectFile,
     recordEdit: editHistory.recordEdit,
     reloadPreview,
-    handleTimelineElementDelete: timelineEditing.handleTimelineElementDelete,
+    handleTimelineElementsDelete: timelineEditing.handleTimelineElementsDelete,
     handleDomEditElementDelete: domEditDeleteBridge,
     previewIframeRef,
   });
@@ -243,6 +240,7 @@ export function StudioApp() {
     handleCopy,
     handlePaste,
     handleCut,
+    handleDuplicate,
     onResetKeyframes: () => resetKeyframesRef.current(),
     onDeleteSelectedKeyframes: () => deleteSelectedKeyframesRef.current(),
     onAfterUndoRedo: () => invalidateGsapCacheRef.current(),
@@ -295,6 +293,7 @@ export function StudioApp() {
     sdkSession: editFlowSdkSession,
     publishSdkSession: sdkHandle.publish,
     forceReloadSdkSession: sdkHandle.forceReload,
+    handleTimelineElementsDelete: timelineEditing.handleTimelineElementsDelete,
   });
   domEditSelectionBridgeRef.current = domEditSession.domEditSelection;
   handleDomZIndexReorderCommitRef.current = domEditSession.handleDomZIndexReorderCommit;
@@ -343,7 +342,7 @@ export function StudioApp() {
     setConsoleErrors,
     resetErrors: resetConsoleErrors,
   } = useConsoleErrorCapture(previewIframe);
-  const dragOverlay = useGlobalFileDrop(timelineEditing.handleTimelineFileDrop);
+  const fileDrop = useGlobalFileDrop(timelineEditing.handleTimelineFileDrop);
   const handleToggleRecordingRef = useRef<() => void>(() => {});
   const domEditSessionRef = useRef(domEditSession);
   domEditSessionRef.current = domEditSession;
@@ -372,13 +371,6 @@ export function StudioApp() {
     },
     [appHotkeys, resetConsoleErrors, refreshPreviewDocumentVersion],
   );
-  const { setEditingFile } = fileManager;
-  const handleSelectComposition = useCompositionContentLoader({
-    projectId,
-    setEditingFile,
-    setActiveCompPath,
-    showToast,
-  });
   const {
     designPanelActive,
     inspectorPanelActive,
@@ -455,10 +447,8 @@ export function StudioApp() {
               <DomEditProvider value={domEditSession}>
                 <div
                   className="flex flex-col h-full w-full bg-neutral-950 relative"
-                  onDragOver={dragOverlay.onDragOver}
-                  onDragEnter={dragOverlay.onDragEnter}
-                  onDragLeave={dragOverlay.onDragLeave}
-                  onDrop={dragOverlay.onDrop}
+                  onDragOver={fileDrop.onDragOver}
+                  onDrop={fileDrop.onDrop}
                 >
                   <StudioHeader
                     captureFrameHref={frameCapture.captureFrameHref}
@@ -547,6 +537,10 @@ export function StudioApp() {
                     handleTimelineElementSplit={timelineEditing.handleTimelineElementSplit}
                     handleRazorSplit={timelineEditing.handleRazorSplit}
                     handleRazorSplitAll={timelineEditing.handleRazorSplitAll}
+                    onCopyClip={handleCopy}
+                    onPasteClip={handlePaste}
+                    onDuplicateClip={handleDuplicate}
+                    canPasteClip={canPaste}
                     setCompIdToSrc={setCompIdToSrc}
                     setCompositionLoading={setCompositionLoading}
                     shouldShowMotionPath={shouldShowMotionPath}
@@ -577,7 +571,6 @@ export function StudioApp() {
                     clearConsoleErrors={() => setConsoleErrors(null)}
                     domEditSession={domEditSession}
                     activeCompPath={activeCompPath}
-                    dragOverlayActive={dragOverlay.active}
                     toasts={toasts}
                     dismissToast={dismissToast}
                   />

@@ -41,11 +41,13 @@ import {
   shouldRetryViaPinnedFallback,
   isDeRendererStallError,
   isSequentialCaptureStallError,
-  countElementTags,
+  scanElementTags,
   envInt,
   isDeParallelRouterEnabled,
   mergeWorkerInitObservability,
   resolveCompositionElementCount,
+  detectAdaptersStatic,
+  resolveAdaptersUsed,
   resolveDeShortBand,
   shouldClampDefaultDrawElement,
   shouldPreferParallelDrawElement,
@@ -302,18 +304,27 @@ describe("executeDiskCaptureWithAdaptiveRetry — transient Target-closed single
     vi.mocked(mergeWorkerFrames).mockReset();
   });
 
-  it("retries ONCE at the same worker count on a transient Target closed with zero progress", async () => {
+  // Both shapes classify as transient_browser: the tab dying mid-capture, and a
+  // CDP refusal of the capture call itself (no timeout wording, so it used to
+  // fall through to the fatal "authoring" bucket and was never retried).
+  it.each([
+    ["a transient Target closed", "Protocol error (Page.captureScreenshot): Target closed"],
+    [
+      "a non-timeout captureScreenshot protocol refusal",
+      "[Parallel] Capture failed: Worker 0: Protocol error (Page.captureScreenshot): Unable to capture screenshot",
+    ],
+  ])("retries ONCE at the same worker count on %s with zero progress", async (_label, message) => {
     const workDir = mkdtempSync(join(tmpdir(), "hf-transient-work-"));
     const framesDir = mkdtempSync(join(tmpdir(), "hf-transient-frames-"));
     const log = makeLog();
     let call = 0;
-    // First attempt: the tab dies before any frame is captured (frame 0) — zero
-    // forward progress, which the worker-halving retry deliberately bails on.
-    // The transient retry recovers it without changing the worker count.
+    // First attempt fails before any frame is captured (frame 0) — zero forward
+    // progress, which the worker-halving retry deliberately bails on. The
+    // transient retry recovers it without changing the worker count.
     vi.mocked(executeParallelCapture).mockImplementation(async () => {
       call++;
       if (call === 1) {
-        throw new Error("Protocol error (Page.captureScreenshot): Target closed");
+        throw new Error(message);
       }
       writeAllFrames(framesDir, 4);
       return [];
@@ -1629,6 +1640,13 @@ describe("adaptive missing-frame retry helpers", () => {
         ),
       ),
     ).toBe(true);
+    expect(
+      isRecoverableParallelCaptureError(
+        new Error(
+          "[Parallel] Capture failed: Worker 0: Protocol error (Page.captureScreenshot): Unable to capture screenshot",
+        ),
+      ),
+    ).toBe(true);
     expect(isRecoverableParallelCaptureError(new Error("Encoding failed: ffmpeg exited"))).toBe(
       false,
     );
@@ -2059,14 +2077,14 @@ describe("shouldPreferSingleWorkerDrawElement (DE priority inversion)", () => {
     });
   });
 
-  describe("countElementTags", () => {
+  describe("scanElementTags", () => {
     it("counts closing tags", () => {
-      expect(countElementTags("<div><span>a</span></div>")).toBe(2);
+      expect(scanElementTags("<div><span>a</span></div>").total).toBe(2);
     });
 
     it("counts void elements — an image gallery must not read as a tiny comp", () => {
-      expect(countElementTags("<img><br><hr>")).toBe(3);
-      expect(countElementTags('<img src="a.png"><IMG SRC="b.png">')).toBe(2);
+      expect(scanElementTags("<img><br><hr>").total).toBe(3);
+      expect(scanElementTags('<img src="a.png"><IMG SRC="b.png">').total).toBe(2);
     });
 
     // Review-flagged blocker (v1): SVG elements are neither closing-tag-shaped
@@ -2076,14 +2094,14 @@ describe("shouldPreferSingleWorkerDrawElement (DE priority inversion)", () => {
     // measured 1.8x regression case is made of. The ceiling cannot bound an
     // error that has no bound of its own.
     it("counts self-closing SVG elements — the 40k-node regression case must not read as empty", () => {
-      expect(countElementTags("<circle/>".repeat(40000))).toBe(40000);
-      expect(countElementTags('<path d="M0 0 L1 1" stroke="red" />')).toBe(1);
-      expect(countElementTags("<feGaussianBlur stdDeviation='2'/>")).toBe(1);
+      expect(scanElementTags("<circle/>".repeat(40000)).total).toBe(40000);
+      expect(scanElementTags('<path d="M0 0 L1 1" stroke="red" />').total).toBe(1);
+      expect(scanElementTags("<feGaussianBlur stdDeviation='2'/>").total).toBe(1);
     });
 
     it("does not double-count a self-closed void element (still just 1)", () => {
-      expect(countElementTags('<img src="a.png"/>')).toBe(1);
-      expect(countElementTags('<img src="a.png" />')).toBe(1);
+      expect(scanElementTags('<img src="a.png"/>').total).toBe(1);
+      expect(scanElementTags('<img src="a.png" />').total).toBe(1);
     });
 
     it("does not false-positive on minified JS division-after-comparison (the self-closing alt's real risk)", () => {
@@ -2092,16 +2110,16 @@ describe("shouldPreferSingleWorkerDrawElement (DE priority inversion)", () => {
       // starting a match — but it still requires the literal two-char "/>"
       // sequence, and here a "c" sits between the "/" and the ">", so
       // backtracking never finds one and it correctly fails to match.
-      expect(countElementTags("if(a<b/c>d){}")).toBe(0);
+      expect(scanElementTags("if(a<b/c>d){}").total).toBe(0);
     });
 
     it("does not false-positive on inline-script comparisons or void-prefixed words", () => {
       // Script bodies are stripped wholesale (with their own closing tag), so
       // nothing inside can match — including "<breadth" / "<imgWidth", which
       // would anyway fail the \b word boundary.
-      expect(countElementTags("<script>if (a < b && x <breadth && y <imgWidth) {}</script>")).toBe(
-        0,
-      );
+      expect(
+        scanElementTags("<script>if (a < b && x <breadth && y <imgWidth) {}</script>").total,
+      ).toBe(0);
     });
 
     // Review finding: the `</[a-zA-Z]` alternation matches ANY "</" + letter,
@@ -2110,16 +2128,17 @@ describe("shouldPreferSingleWorkerDrawElement (DE priority inversion)", () => {
     // on the ~83% of renders with no probe, for which this scan is the only
     // element signal.
     it("does not count closing tags written inside inline script strings", () => {
-      expect(countElementTags('<div></div><script>const h = "</div></div></div>";</script>')).toBe(
-        1,
-      );
       expect(
-        countElementTags("<p></p><script>const t = words.map(w => `</span>`).join('');</script>"),
+        scanElementTags('<div></div><script>const h = "</div></div></div>";</script>').total,
+      ).toBe(1);
+      expect(
+        scanElementTags("<p></p><script>const t = words.map(w => `</span>`).join('');</script>")
+          .total,
       ).toBe(1);
     });
 
     it("strips <style> bodies too — CSS content strings can carry the same shapes", () => {
-      expect(countElementTags('<div></div><style>a::after{content:"</div>"}</style>')).toBe(1);
+      expect(scanElementTags('<div></div><style>a::after{content:"</div>"}</style>').total).toBe(1);
     });
 
     // CodeQL "incomplete multi-character sanitization": a single-pass replace
@@ -2129,28 +2148,238 @@ describe("shouldPreferSingleWorkerDrawElement (DE priority inversion)", () => {
     it("strips script tags that reform after one pass", () => {
       // Inner <script> removed by pass 1 leaves "<script>alert(1)</script>",
       // which pass 2 removes. A single pass would leave a stray tag behind.
-      expect(countElementTags("<div></div><scr<script></script>ipt>alert(1)</script>")).toBe(1);
+      expect(scanElementTags("<div></div><scr<script></script>ipt>alert(1)</script>").total).toBe(
+        1,
+      );
     });
 
     it("terminates on input with no closing tag rather than looping", () => {
-      expect(countElementTags("<div></div><script>unterminated")).toBe(1);
+      expect(scanElementTags("<div></div><script>unterminated").total).toBe(1);
     });
 
     it("strips multiple and attributed script blocks, not just the first", () => {
       expect(
-        countElementTags(
+        scanElementTags(
           '<div></div><script type="module">"</span>"</script><script>"</span>"</script>',
-        ),
+        ).total,
       ).toBe(1);
     });
 
     it("is stable on empty and malformed input rather than throwing", () => {
-      expect(countElementTags("")).toBe(0);
-      expect(countElementTags("<<<>>>")).toBe(0);
+      expect(scanElementTags("").total).toBe(0);
+      expect(scanElementTags("<<<>>>").total).toBe(0);
     });
 
     it("scales to a large document without a full parse", () => {
-      expect(countElementTags("<p>x</p>".repeat(40000))).toBe(40000);
+      expect(scanElementTags("<p>x</p>".repeat(40000)).total).toBe(40000);
+    });
+
+    it("groups mixed native and custom hf-* tags by raw tag name", () => {
+      const html =
+        "<div><span>a</span></div><hf-caption></hf-caption><hf-audio-group></hf-audio-group><div></div>";
+      const scan = scanElementTags(html);
+      expect(scan.byTag).toEqual({ div: 2, span: 1, "hf-caption": 1, "hf-audio-group": 1 });
+      expect(scan.total).toBe(5);
+    });
+
+    it("normalizes case so <DIV>/<Div>/<div> collapse into one key", () => {
+      const scan = scanElementTags("<DIV></DIV><Div></Div><div></div>");
+      expect(scan.byTag).toEqual({ div: 3 });
+    });
+
+    it("count/map consistency: the sum of byTag always equals total", () => {
+      const html =
+        '<div><img src="a.png"><hf-caption></hf-caption></div><circle/><path d="M0 0" />' +
+        "<hf-audio-group></hf-audio-group>".repeat(3);
+      const scan = scanElementTags(html);
+      const sum = Object.values(scan.byTag).reduce((a, b) => a + b, 0);
+      expect(sum).toBe(scan.total);
+    });
+
+    it("caps distinct reported tags, folding the overflow into an `other` bucket", () => {
+      // 60 distinct single-use tag names, well past the 50-tag cap. "div"
+      // (100 uses) takes the top rank, leaving only 49 of the 50 slots for
+      // the 60 distinct tags — 11 of them fold into "other".
+      const distinctTags = Array.from({ length: 60 }, (_, i) => `hf-tag-${i}`);
+      const html = "<div></div>".repeat(100) + distinctTags.map((t) => `<${t}></${t}>`).join("");
+      const scan = scanElementTags(html);
+      expect(Object.keys(scan.byTag).length).toBe(51); // 50 reported + "other"
+      expect(scan.byTag.div).toBe(100);
+      expect(scan.byTag.other).toBe(11); // 60 distinct tags - 49 reported = 11 folded in
+      const sum = Object.values(scan.byTag).reduce((a, b) => a + b, 0);
+      expect(sum).toBe(scan.total);
+      expect(scan.total).toBe(100 + 60);
+    });
+
+    it("counts <video data-aroll=true> elements, not audio/img carrying the same attribute", () => {
+      const html =
+        '<video data-aroll="true" src="a.mp4"></video>' +
+        '<video src="b.mp4"></video>' +
+        '<audio data-aroll="true" src="a.mp3"></audio>' +
+        '<img data-aroll="true" src="a.png" />';
+      expect(scanElementTags(html).arollVideoCount).toBe(1);
+    });
+
+    it("counts <video data-media-source=heygen> elements only, not other provider values", () => {
+      const html =
+        '<video data-media-source="heygen" src="a.mp4"></video>' +
+        '<video src="b.mp4"></video>' +
+        '<video data-media-source="ltx.local" src="c.mp4"></video>' +
+        '<audio data-media-source="heygen" src="a.mp3"></audio>';
+      expect(scanElementTags(html).heygenVideoCount).toBe(1);
+    });
+
+    it("counts audio/image/audio-group elements from the uncapped Map, not the capped byTag", () => {
+      // 55 distinct single-use filler tags, each ranked (tied count=1) ahead
+      // of audio/img/hf-audio-group by insertion order in a stable sort,
+      // push all three past the 50-tag cap into "other" in byTag, but the
+      // dedicated counts must still report the true number.
+      const distinctTags = Array.from({ length: 55 }, (_, i) => `hf-tag-${i}`);
+      const html =
+        distinctTags.map((t) => `<${t}></${t}>`).join("") +
+        "<audio></audio><img/><hf-audio-group></hf-audio-group>";
+      const scan = scanElementTags(html);
+      expect(scan.audioCount).toBe(1);
+      expect(scan.imageCount).toBe(1);
+      expect(scan.audioGroupCount).toBe(1);
+      expect(scan.byTag.audio).toBeUndefined();
+      expect(scan.byTag.img).toBeUndefined();
+      expect(scan.byTag["hf-audio-group"]).toBeUndefined();
+    });
+
+    it("counts data-composition-src sub-composition mounts", () => {
+      const html =
+        '<div data-composition-src="a.html" data-duration="2"></div>' +
+        '<section data-composition-src="b.html"></section><div></div>';
+      expect(scanElementTags(html).subCompositionCount).toBe(2);
+    });
+
+    it("counts data-color-grading elements and detects a LUT reference", () => {
+      const html =
+        '<img data-color-grading=\'{"lut":{"src":"a.cube","intensity":0.5}}\'>' +
+        '<video data-color-grading=\'{"exposure":0.2,"lut":null}\'></video>';
+      const scan = scanElementTags(html);
+      expect(scan.colorGradingCount).toBe(2);
+      expect(scan.hasLut).toBe(true);
+    });
+
+    it("reports hasLut false when no color-grading element references a LUT", () => {
+      const html = '<img data-color-grading=\'{"exposure":0.2,"lut":null}\'>';
+      const scan = scanElementTags(html);
+      expect(scan.colorGradingCount).toBe(1);
+      expect(scan.hasLut).toBe(false);
+    });
+
+    it("decodes the &quot;-escaped attribute form the compile pipeline actually emits", () => {
+      // linkedom's serializer re-emits this attribute &quot;-escaped on every
+      // compile round-trip, the real mainstream shape, not single-quoted.
+      const html = '<img data-color-grading="{&quot;lut&quot;:&quot;a.cube&quot;}">';
+      const scan = scanElementTags(html);
+      expect(scan.colorGradingCount).toBe(1);
+      expect(scan.hasLut).toBe(true);
+    });
+
+    // Mirrors normalizeLut (@hyperframes/core colorGrading.ts): an empty
+    // string, an object with no `src`, or a blank `src` are all "no LUT",
+    // matching the runtime consumer, not just "the key is present".
+    it("reports hasLut false for an empty-string, srcless, or blank-src lut value", () => {
+      const html =
+        '<img data-color-grading=\'{"lut":""}\'>' +
+        "<img data-color-grading='{\"lut\":{}}'>" +
+        '<img data-color-grading=\'{"lut":{"src":"  "}}\'>';
+      const scan = scanElementTags(html);
+      expect(scan.colorGradingCount).toBe(3);
+      expect(scan.hasLut).toBe(false);
+    });
+
+    it("does not crash on malformed data-color-grading JSON, counts the element, no LUT signal", () => {
+      const html = "<img data-color-grading='{not json'>";
+      const scan = scanElementTags(html);
+      expect(scan.colorGradingCount).toBe(1);
+      expect(scan.hasLut).toBe(false);
+    });
+
+    it("reports zero (not undefined) for every count and an empty byTag when nothing matches", () => {
+      const scan = scanElementTags("plain text, no tags at all");
+      expect(scan.arollVideoCount).toBe(0);
+      expect(scan.heygenVideoCount).toBe(0);
+      expect(scan.audioCount).toBe(0);
+      expect(scan.imageCount).toBe(0);
+      expect(scan.subCompositionCount).toBe(0);
+      expect(scan.audioGroupCount).toBe(0);
+      expect(scan.colorGradingCount).toBe(0);
+      expect(scan.hasLut).toBe(false);
+      expect(scan.byTag).toEqual({});
+      expect(scan.total).toBe(0);
+      // Unlike the counts above, this pair reports absent (not a false/"0"
+      // default) when there's no root tag at all to compare against.
+      expect(scan.rootBodyMismatch).toBeUndefined();
+      expect(scan.rootBodyDeltaPxBucket).toBeUndefined();
+    });
+
+    describe("rootBodyMismatch / rootBodyDeltaPxBucket", () => {
+      function html(rootWidth: number, rootHeight: number, css: string): string {
+        return (
+          `<style>${css}</style>` +
+          `<body><div data-composition-id="c1" data-width="${rootWidth}" data-height="${rootHeight}"></div></body>`
+        );
+      }
+
+      it("reports no mismatch and bucket 0 when the scaffold's html/body CSS matches the root exactly", () => {
+        const scan = scanElementTags(
+          html(1080, 1920, "html, body { width: 1080px; height: 1920px; }"),
+        );
+        expect(scan.rootBodyMismatch).toBe(false);
+        expect(scan.rootBodyDeltaPxBucket).toBe("0");
+      });
+
+      it("buckets a small stale-scaffold delta as 1-10", () => {
+        const scan = scanElementTags(
+          html(1080, 1920, "html, body { width: 1085px; height: 1920px; }"),
+        );
+        expect(scan.rootBodyMismatch).toBe(true);
+        expect(scan.rootBodyDeltaPxBucket).toBe("1-10");
+      });
+
+      it("buckets a mid-size delta as 11-50", () => {
+        const scan = scanElementTags(
+          html(1080, 1920, "html, body { width: 1080px; height: 1950px; }"),
+        );
+        expect(scan.rootBodyMismatch).toBe(true);
+        expect(scan.rootBodyDeltaPxBucket).toBe("11-50");
+      });
+
+      it("buckets a landscape-scaffold-under-portrait-root delta as 51+ (the real #4001 shape)", () => {
+        const scan = scanElementTags(
+          html(1080, 1920, "html, body { width: 1920px; height: 1080px; }"),
+        );
+        expect(scan.rootBodyMismatch).toBe(true);
+        expect(scan.rootBodyDeltaPxBucket).toBe("51+");
+      });
+
+      it("reads a height-authored-before-width CSS block the same way", () => {
+        const scan = scanElementTags(
+          html(1080, 1920, "html, body { height: 1920px; width: 1080px; }"),
+        );
+        expect(scan.rootBodyMismatch).toBe(false);
+        expect(scan.rootBodyDeltaPxBucket).toBe("0");
+      });
+
+      it("reports absent, not a false default, when there is no composition root to read", () => {
+        const scan = scanElementTags(
+          "<style>html, body { width: 1080px; height: 1920px; }</style><p>no root</p>",
+        );
+        expect(scan.rootBodyMismatch).toBeUndefined();
+        expect(scan.rootBodyDeltaPxBucket).toBeUndefined();
+      });
+
+      it("reports absent, not a false default, when the scaffold has no html/body CSS block at all", () => {
+        const scan = scanElementTags(
+          '<body><div data-composition-id="c1" data-width="1080" data-height="1920"></div></body>',
+        );
+        expect(scan.rootBodyMismatch).toBeUndefined();
+        expect(scan.rootBodyDeltaPxBucket).toBeUndefined();
+      });
     });
   });
 
@@ -2177,6 +2406,15 @@ describe("shouldPreferSingleWorkerDrawElement (DE priority inversion)", () => {
       expect(await resolveCompositionElementCount(null, "<div><span></span></div>")).toEqual({
         count: 2,
         source: "static",
+        byTag: { div: 1, span: 1 },
+        arollVideoCount: 0,
+        heygenVideoCount: 0,
+        audioCount: 0,
+        imageCount: 0,
+        subCompositionCount: 0,
+        audioGroupCount: 0,
+        colorGradingCount: 0,
+        hasLut: false,
       });
     });
 
@@ -2185,6 +2423,15 @@ describe("shouldPreferSingleWorkerDrawElement (DE priority inversion)", () => {
       expect(await resolveCompositionElementCount(session, "<div></div>")).toEqual({
         count: 1,
         source: "static",
+        byTag: { div: 1 },
+        arollVideoCount: 0,
+        heygenVideoCount: 0,
+        audioCount: 0,
+        imageCount: 0,
+        subCompositionCount: 0,
+        audioGroupCount: 0,
+        colorGradingCount: 0,
+        hasLut: false,
       });
     });
 
@@ -2200,6 +2447,15 @@ describe("shouldPreferSingleWorkerDrawElement (DE priority inversion)", () => {
       expect(await resolveCompositionElementCount(session, "<div><span></span></div>")).toEqual({
         count: 2,
         source: "static",
+        byTag: { div: 1, span: 1 },
+        arollVideoCount: 0,
+        heygenVideoCount: 0,
+        audioCount: 0,
+        imageCount: 0,
+        subCompositionCount: 0,
+        audioGroupCount: 0,
+        colorGradingCount: 0,
+        hasLut: false,
       });
     });
 
@@ -2208,7 +2464,130 @@ describe("shouldPreferSingleWorkerDrawElement (DE priority inversion)", () => {
       expect(await resolveCompositionElementCount(session, "<div></div>")).toEqual({
         count: 1,
         source: "static",
+        byTag: { div: 1 },
+        arollVideoCount: 0,
+        heygenVideoCount: 0,
+        audioCount: 0,
+        imageCount: 0,
+        subCompositionCount: 0,
+        audioGroupCount: 0,
+        colorGradingCount: 0,
+        hasLut: false,
       });
+    });
+
+    it("omits byTag/arollVideoCount on the live path — that path never runs the static scan", async () => {
+      const session = { isInitialized: true, page: { evaluate: async () => 40001 } };
+      const result = await resolveCompositionElementCount(session, "<div><span></span></div>");
+      expect(result).not.toHaveProperty("byTag");
+      expect(result).not.toHaveProperty("arollVideoCount");
+      expect(result).not.toHaveProperty("heygenVideoCount");
+    });
+  });
+
+  describe("detectAdaptersStatic", () => {
+    it("returns empty for a composition using no tracked adapter", () => {
+      expect(detectAdaptersStatic("<div><span>hello</span></div>")).toEqual([]);
+    });
+
+    it("detects gsap from a timeline call, not a bare mention", () => {
+      expect(detectAdaptersStatic("<script>const gsap = 1;</script>")).toEqual([]);
+      expect(detectAdaptersStatic("<script>gsap.timeline().to('.a', {x:1});</script>")).toEqual([
+        "gsap",
+      ]);
+    });
+
+    it("detects the __hf<Name> registration token for each array-registered adapter", () => {
+      expect(detectAdaptersStatic("<script>window.__hfLottie.push(anim);</script>")).toEqual([
+        "lottie",
+      ]);
+      expect(detectAdaptersStatic("<script>window.__hfAnime.push(tl);</script>")).toEqual([
+        "animejs",
+      ]);
+      expect(detectAdaptersStatic("<script>window.__hfD3 = [t];</script>")).toEqual(["d3"]);
+      expect(detectAdaptersStatic("<script>window.__hfLeaflet.push(m);</script>")).toEqual([
+        "leaflet",
+      ]);
+      expect(detectAdaptersStatic("<script>window.__hfMapbox.push(m);</script>")).toEqual([
+        "mapbox",
+      ]);
+      expect(detectAdaptersStatic("<script>window.__hfMaplibre.push(m);</script>")).toEqual([
+        "maplibre",
+      ]);
+      expect(detectAdaptersStatic("<script>window.__hfGoogleMaps.push(m);</script>")).toEqual([
+        "google-maps",
+      ]);
+    });
+
+    it("detects three from a THREE global reference", () => {
+      expect(
+        detectAdaptersStatic("<script>const mgr = THREE.DefaultLoadingManager;</script>"),
+      ).toEqual(["three"]);
+    });
+
+    it("detects typegpu from the data-requires-webgpu authoring attribute", () => {
+      expect(
+        detectAdaptersStatic('<div data-composition-id="a" data-requires-webgpu></div>'),
+      ).toEqual(["typegpu"]);
+    });
+
+    it("detects css from an authored @keyframes rule", () => {
+      expect(detectAdaptersStatic("<style>@keyframes spin { to { opacity: 1; } }</style>")).toEqual(
+        ["css"],
+      );
+    });
+
+    it("detects waapi from an element.animate keyframe-array call", () => {
+      expect(
+        detectAdaptersStatic("<script>el.animate([{opacity:0},{opacity:1}], 500);</script>"),
+      ).toEqual(["waapi"]);
+    });
+
+    it("reports multiple adapters in KNOWN_RUNTIME_ADAPTERS order, not detection order", () => {
+      const html = "<script>gsap.timeline();window.__hfLottie.push(a);window.__hfD3=[t];</script>";
+      expect(detectAdaptersStatic(html)).toEqual(["d3", "gsap", "lottie"]);
+    });
+  });
+
+  describe("resolveAdaptersUsed", () => {
+    it("falls back to the static scan when there is no probe session", async () => {
+      const html = "<script>gsap.timeline();</script>";
+      expect(await resolveAdaptersUsed(null, html)).toEqual(["gsap"]);
+    });
+
+    it("falls back to the static scan when the probe session is not yet initialized", async () => {
+      const session = { isInitialized: false, page: { evaluate: async () => ["three"] } };
+      const html = "<script>gsap.timeline();</script>";
+      expect(await resolveAdaptersUsed(session, html)).toEqual(["gsap"]);
+    });
+
+    it("unions the live probe result with the static scan, deduped and canonically ordered", async () => {
+      const session = { isInitialized: true, page: { evaluate: async () => ["three", "lottie"] } };
+      const html = "<script>gsap.timeline();window.__hfLottie.push(a);</script>";
+      expect(await resolveAdaptersUsed(session, html)).toEqual(["gsap", "lottie", "three"]);
+    });
+
+    it("falls back to the static scan when page.evaluate throws", async () => {
+      const session = {
+        isInitialized: true,
+        page: {
+          evaluate: async () => {
+            throw new Error("Execution context was destroyed");
+          },
+        },
+      };
+      const html = "<script>gsap.timeline();</script>";
+      expect(await resolveAdaptersUsed(session, html)).toEqual(["gsap"]);
+    });
+
+    it("ignores unknown values the live probe might return", async () => {
+      const session = { isInitialized: true, page: { evaluate: async () => ["gsap", "bogus"] } };
+      expect(await resolveAdaptersUsed(session, "<div></div>")).toEqual(["gsap"]);
+    });
+
+    it("reports an empty list, not absent, when nothing is detected", async () => {
+      const session = { isInitialized: true, page: { evaluate: async () => [] } };
+      expect(await resolveAdaptersUsed(session, "<div></div>")).toEqual([]);
     });
   });
 
@@ -2745,6 +3124,32 @@ describe("shouldRetryViaPinnedFallback (widen the self-verify retry to generic c
         isEncoderInterrupted: true,
         deWorkerInversion: "inverted",
         deParallelRouter: undefined,
+      }),
+    ).toBe(false);
+  });
+
+  // --low-memory-mode is single-worker with no drawElement, so nothing ever
+  // pins a count and that mode had no whole-render fallback at all.
+  it("retries a transient capture-call refusal even with no pinned routing", () => {
+    expect(
+      shouldRetryViaPinnedFallback({
+        isVerifyError: false,
+        isCancellation: false,
+        deWorkerInversion: undefined,
+        deParallelRouter: undefined,
+        isTransientCaptureError: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("never retries a transient capture-call refusal after cancellation", () => {
+    expect(
+      shouldRetryViaPinnedFallback({
+        isVerifyError: false,
+        isCancellation: true,
+        deWorkerInversion: undefined,
+        deParallelRouter: undefined,
+        isTransientCaptureError: true,
       }),
     ).toBe(false);
   });
