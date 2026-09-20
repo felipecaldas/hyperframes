@@ -85,6 +85,16 @@ function projectKey(projectDir: string): string {
   return createHash("sha256").update(resolve(projectDir)).digest("hex").slice(0, 24);
 }
 
+/**
+ * A prompt's fingerprint, for the durable usage row (TAB-1193).
+ *
+ * The prompt itself never leaves the session sandbox. This is enough to spot
+ * the same request being replayed against a ceiling and nothing more.
+ */
+function hashPrompt(prompt: string): string {
+  return createHash("sha256").update(prompt).digest("hex").slice(0, 32);
+}
+
 function readJsonObject(path: string): Record<string, unknown> | null {
   try {
     const value: unknown = JSON.parse(readFileSync(path, "utf-8"));
@@ -400,6 +410,10 @@ export class AgentRuntime {
     let failure: string | null = null;
     let assistantText = "";
     const timeouts = this.createTimeouts(job);
+    // Counted here rather than in the model loop: `onTool` is already the one
+    // callback every tool call passes through, and the loop has no reason to
+    // carry a tally it never reads.
+    const tools: Record<string, number> = {};
 
     try {
       createAgentStagingProject(job.project.dir, stagingDir);
@@ -411,10 +425,14 @@ export class AgentRuntime {
         kind: job.request.kind,
         transcript: thread.transcript,
         signal: job.controller.signal,
+        principal: projectKey(job.project.dir),
         onAssistant: (text) => {
           assistantText = text;
         },
-        onTool: (message) => this.emit(job, { type: "tool", message }),
+        onTool: (message) => {
+          tools[message] = (tools[message] ?? 0) + 1;
+          this.emit(job, { type: "tool", message });
+        },
         onActivity: timeouts.touch,
         onToolResult: (entry) => {
           (ledger.transcript ??= []).push(entry);
@@ -422,6 +440,25 @@ export class AgentRuntime {
       });
       assistantText ||= result.assistantText;
       if (result.verification) ledger.verification = result.verification;
+      // Emitted before the apply gate runs, and unconditionally. The money was
+      // spent whether or not the change lands, so a run that is about to be
+      // refused still has to report what it cost — a meter that only fires on
+      // success is exactly the blind spot that lets a failing loop bill.
+      ledger.meter = {
+        model: result.model,
+        promptTokens: result.meter.promptTokens,
+        completionTokens: result.meter.completionTokens,
+        totalTokens: result.meter.totalTokens,
+        costUsd: result.meter.costUsd,
+        costSource: result.meter.costSource,
+        costConfidence: result.meter.costConfidence,
+        costEnforceable: result.meter.costEnforceable,
+        rounds: result.meter.rounds,
+        tools,
+        stopReason: result.stopReason,
+        promptHash: hashPrompt(job.request.prompt),
+      };
+      this.emit(job, { type: "metered", meter: ledger.meter });
       if (!job.cancelled && !timeouts.reason()) {
         failure = await this.validateAndApply(job, before, ledger, stagingDir);
       }

@@ -17,6 +17,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import type {
   AgentChangedFile,
   AgentMeasurementReceipt,
+  AgentRunMeter,
   AgentToolTranscriptEntry,
 } from "./types.js";
 
@@ -73,6 +74,11 @@ export interface AgentRunLedger {
   transcript?: AgentToolTranscriptEntry[];
   /** What the probe said after the last renderable write, when there was one. */
   verification?: AgentMeasurementReceipt;
+  /**
+   * What the run spent (TAB-1193). Kept here as well as emitted, so a ledger
+   * read after the fact answers "what did this cost" without the SSE stream.
+   */
+  meter?: AgentRunMeter;
 }
 
 function normalizedRelative(projectDir: string, path: string): string | null {

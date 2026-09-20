@@ -2388,3 +2388,170 @@ describe("Tabario AI provider", () => {
     expect(demand.content).toContain("widest line 381.7px in a 557px content box");
   });
 });
+
+/**
+ * TAB-1193. Until this epic, `requestCompletion` sent no `max_tokens` and
+ * `completionMessage` discarded the OpenRouter `usage` block, so a run could
+ * issue 24 completions over a growing message array and nothing in Tabario
+ * knew what it had cost.
+ */
+describe("Tabario AI guardrails: meter and ceilings", () => {
+  const oldKey = process.env.OPENROUTER_API_KEY;
+  const BUDGET_KEYS = [
+    "TABARIO_STUDIO_MAX_OUTPUT_TOKENS",
+    "TABARIO_STUDIO_RUN_TOKEN_BUDGET",
+    "TABARIO_STUDIO_RUN_COST_BUDGET_USD",
+  ] as const;
+
+  beforeEach(() => {
+    process.env.OPENROUTER_API_KEY = "test-key";
+  });
+
+  afterEach(() => {
+    if (oldKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = oldKey;
+    for (const key of BUDGET_KEYS) delete process.env[key];
+    vi.restoreAllMocks();
+  });
+
+  /** A completion that also reports what it cost. */
+  function metered(content: string, cost: number, toolCalls: unknown[] = []): Response {
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content, tool_calls: toolCalls } }],
+        usage: { prompt_tokens: 1000, completion_tokens: 200, total_tokens: 1200, cost },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  function run(fetchImpl: typeof fetch, root: string, extra: Record<string, unknown> = {}) {
+    return runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "tweak the title", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      fetchImpl,
+      ...extra,
+    });
+  }
+
+  function project(): string {
+    const root = mkdtempSync(join(tmpdir(), "tabario-budget-"));
+    writeFileSync(join(root, "index.html"), HTML);
+    return root;
+  }
+
+  it("bounds the request and asks the provider for its cost", async () => {
+    process.env.TABARIO_STUDIO_MAX_OUTPUT_TOKENS = "1234";
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readIndexFirst())
+      .mockResolvedValue(metered("Done.", 0.001));
+
+    await run(fetchImpl, project(), { principal: "abc123" });
+
+    const body = JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body));
+    expect(body.max_tokens).toBe(1234);
+    // Without this the provider reports no cost and every run is `unpriced`,
+    // which makes the cost ceiling permanently inert.
+    expect(body.usage).toEqual({ include: true });
+    expect(body.provider).toEqual({ data_collection: "deny" });
+    // Opaque, and never an identity: the sandbox knows no Supabase user.
+    expect(body.user).toBe("abc123");
+  });
+
+  it("omits the user field rather than sending a placeholder when there is no principal", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readIndexFirst())
+      .mockResolvedValue(metered("Done.", 0.001));
+    await run(fetchImpl, project());
+    expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))).not.toHaveProperty("user");
+  });
+
+  it("reports the run's tokens and cost, summed across rounds", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(metered("", 0.002, [call("r0", "read_file", { path: "index.html" })]))
+      .mockResolvedValue(metered("Done.", 0.003));
+
+    const result = await run(fetchImpl, project());
+
+    expect(result.stopReason).toBe("complete");
+    expect(result.meter).toMatchObject({
+      totalTokens: 2400,
+      costSource: "provider",
+      costConfidence: "actual",
+      costEnforceable: true,
+      rounds: 2,
+    });
+    expect(result.meter.costUsd).toBeCloseTo(0.005, 6);
+  });
+
+  /**
+   * The behaviour this epic cares about most. Round exhaustion used to throw,
+   * `AgentRuntime.execute` caught it, and the whole staging directory was
+   * discarded — a run that did nine-tenths of the work lost all of it and the
+   * user was told only that it failed. A ceiling ends the turn; it does not
+   * annihilate it.
+   */
+  it("stops on the cost ceiling without throwing, and says why", async () => {
+    process.env.TABARIO_STUDIO_RUN_COST_BUDGET_USD = "0.01";
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        metered("Working on it.", 0.5, [call("w", "read_file", { path: "index.html" })]),
+      );
+
+    const replies: string[] = [];
+    const result = await run(fetchImpl, project(), {
+      onAssistant: (text: string) => replies.push(text),
+    });
+
+    expect(result.stopReason).toBe("cost");
+    expect(result.assistantText).toContain("Working on it.");
+    expect(result.assistantText).toContain("cost budget");
+    // One request: the ceiling is checked the moment the run has spent
+    // something and before it commits to spending more.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(replies).toHaveLength(1);
+  });
+
+  it("stops on the token ceiling and keeps the model's own words", async () => {
+    process.env.TABARIO_STUDIO_RUN_TOKEN_BUDGET = "1000";
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        metered("Half done.", 0.0001, [call("w", "read_file", { path: "index.html" })]),
+      );
+
+    const result = await run(fetchImpl, project());
+
+    expect(result.stopReason).toBe("tokens");
+    expect(result.assistantText).toContain("Half done.");
+    expect(result.assistantText).toContain("token budget");
+  });
+
+  it("stops rather than throws when the run exhausts its tool rounds", async () => {
+    // 24 rounds of tool calls that never finish. Before TAB-1193 this threw and
+    // the caller discarded every staged change.
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () =>
+        completion("", [call("loop", "read_file", { path: "index.html" })]),
+      );
+
+    const result = await run(fetchImpl, project());
+
+    expect(result.stopReason).toBe("rounds");
+    expect(result.assistantText).toContain("24 tool rounds");
+    expect(result.meter.rounds).toBe(24);
+    // Nothing priced it, so the cost ceiling could not have bound this run.
+    expect(result.meter.costEnforceable).toBe(false);
+  });
+});

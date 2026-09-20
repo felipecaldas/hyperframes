@@ -52,9 +52,44 @@ export type AgentEventType =
   | "changed-files"
   | "lint"
   | "measurement"
+  | "metered"
   | "complete"
   | "cancelled"
   | "failure";
+
+/**
+ * What a run spent, emitted once per run and carried out of the sandbox
+ * (TAB-1193).
+ *
+ * The sandbox holds the OpenRouter key and, deliberately, no Supabase key —
+ * `STUDIO_CHILD_ENV_PASSTHROUGH` in video-compositor withholds every one of
+ * them, and its env-boundary test asserts that list by name in both
+ * directions. So the agent cannot write its own usage row and must not be
+ * given the means to: that would hand every session a database writer. This
+ * event is the way out. The compositor already proxies the run's SSE stream
+ * and already holds the service client, so it does the writing.
+ *
+ * `promptHash` and not the prompt. Nothing a customer wrote leaves here.
+ */
+export interface AgentRunMeter {
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  costUsd: number | null;
+  costSource: "provider" | "rate_table" | "unpriced";
+  costConfidence: "actual" | "estimated" | "unknown";
+  /**
+   * False when nothing in the run could be priced, so the per-run cost ceiling
+   * could not bind. Recorded rather than inferred: an inert ceiling that looks
+   * like a held one is the failure this epic is about.
+   */
+  costEnforceable: boolean;
+  rounds: number;
+  tools: Record<string, number>;
+  stopReason: "complete" | "tokens" | "cost" | "rounds";
+  promptHash: string;
+}
 
 export interface AgentRunEvent {
   id: number;
@@ -70,6 +105,7 @@ export interface AgentRunEvent {
     fixHint?: string;
   }>;
   measurement?: AgentMeasurementReceipt;
+  meter?: AgentRunMeter;
   critical?: boolean;
 }
 

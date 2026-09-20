@@ -17,6 +17,15 @@ import {
   type LayoutMeasurement,
 } from "../helpers/layoutProbe.js";
 import { isSupportedAgentSource, snapshotAgentFiles } from "./files.js";
+import {
+  budgetStopMessage,
+  parseUsage,
+  resolveBudget,
+  RunMeter,
+  type BudgetStop,
+  type CompletionUsage,
+  type RunMeterSnapshot,
+} from "./guardrails/budget.js";
 import type {
   AgentMeasurementReceipt,
   AgentProviderCapability,
@@ -55,6 +64,15 @@ export interface TabarioModelOptions {
   onActivity: () => void;
   /** Every tool call and its result, for the run ledger (TAB-1061). */
   onToolResult?: (entry: AgentToolTranscriptEntry) => void;
+  /**
+   * An opaque, stable id for whoever this run is for, sent to OpenRouter as
+   * `user` so abuse attribution is possible provider-side (TAB-1193).
+   *
+   * Opaque on purpose: the sandbox knows no Supabase identity, and nothing
+   * identifying should leave it. The project key is a sha256 digest and is
+   * enough to tell two abusers apart.
+   */
+  principal?: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -66,6 +84,15 @@ export interface TabarioModelResult {
    * and there is nothing for a measurement to be about.
    */
   verification: AgentMeasurementReceipt | null;
+  /** What the run spent. Always present, even when nothing could be priced. */
+  meter: RunMeterSnapshot;
+  /**
+   * Why the round loop ended: the model stopped on its own (`complete`), or a
+   * ceiling ended it. A ceiling stop is not a failure — staged work still goes
+   * through the apply gate — but it must be said rather than inferred from a
+   * reply that happens to read as finished.
+   */
+  stopReason: "complete" | "tokens" | "cost" | "rounds";
 }
 
 export function detectProvider(): AgentProviderCapability {
@@ -856,7 +883,13 @@ async function executeTool(call: ToolCall, options: TabarioModelOptions): Promis
   return handler(parseArguments(call), options);
 }
 
-function completionMessage(payload: unknown): { content: string; toolCalls: ToolCall[] } {
+interface Completion {
+  content: string;
+  toolCalls: ToolCall[];
+  usage: CompletionUsage;
+}
+
+function completionMessage(payload: unknown, model: string): Completion {
   const body = record(payload);
   const choices = Array.isArray(body.choices) ? body.choices : [];
   const first = record(choices[0]);
@@ -865,16 +898,32 @@ function completionMessage(payload: unknown): { content: string; toolCalls: Tool
   const toolCalls = Array.isArray(message.tool_calls)
     ? message.tool_calls.map((value) => record(value) as unknown as ToolCall)
     : [];
-  return { content, toolCalls };
+  // TAB-1193: this block used to be dropped on the floor, which is why nothing
+  // in Tabario had ever counted a token or a dollar for an agent run.
+  return { content, toolCalls, usage: parseUsage(payload, model) };
 }
 
+/**
+ * The one place every model call goes through, and therefore the only place
+ * the request's own limits have to be set (TAB-1193).
+ *
+ * - `max_tokens` bounds a single reply; without it one completion may run to
+ *   the model's whole context window.
+ * - `usage: { include: true }` is what makes OpenRouter report the charge, and
+ *   is the difference between a real cost and a guess from a rate table.
+ * - `provider: { data_collection: "deny" }` keeps the customer's composition
+ *   out of provider training corpora. The prompt carries their brief.
+ * - `user` is an opaque project digest, never an identity, so provider-side
+ *   abuse attribution is possible without exporting who anyone is.
+ */
 async function requestCompletion(
   fetchImpl: typeof fetch,
   apiKey: string,
   model: string,
   messages: ChatMessage[],
   signal: AbortSignal,
-): Promise<{ content: string; toolCalls: ToolCall[] }> {
+  options: { maxOutputTokens: number; principal?: string },
+): Promise<Completion> {
   const response = await fetchImpl(OPENROUTER_URL, {
     method: "POST",
     headers: {
@@ -883,14 +932,24 @@ async function requestCompletion(
       "HTTP-Referer": "https://studio.tabario.com",
       "X-Title": "Tabario Studio",
     },
-    body: JSON.stringify({ model, messages, tools, tool_choice: "auto", temperature: 0.1 }),
+    body: JSON.stringify({
+      model,
+      messages,
+      tools,
+      tool_choice: "auto",
+      temperature: 0.1,
+      max_tokens: options.maxOutputTokens,
+      usage: { include: true },
+      provider: { data_collection: "deny" },
+      ...(options.principal ? { user: options.principal } : {}),
+    }),
     signal,
   });
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 800);
     throw new Error(`Tabario AI request failed (${response.status})${detail ? `: ${detail}` : ""}`);
   }
-  return completionMessage(await response.json());
+  return completionMessage(await response.json(), model);
 }
 
 /** What a round of tools did, for the gate that runs when the model tries to finish. */
@@ -1394,66 +1453,120 @@ interface FinishDemands {
   reconcile: boolean;
 }
 
-export async function runTabarioModel(options: TabarioModelOptions): Promise<TabarioModelResult> {
-  const apiKey = requireApiKey();
-  const model = modelName();
-  const messages = initialMessages(options);
-  const fetchImpl = options.fetchImpl ?? fetch;
-  let assistantText = "";
-  const state: ToolRunState = {
+function newRunState(): ToolRunState {
+  return {
     readFrameMd: false,
     refusedFrameMdWrite: false,
     calledAnyTool: false,
     changedRenderable: false,
     measuredSinceWrite: null,
   };
-  const asked: FinishDemands = {
-    inspect: false,
-    frame: false,
-    defer: false,
-    measure: false,
-    reconcile: false,
+}
+
+function newFinishDemands(): FinishDemands {
+  return { inspect: false, frame: false, defer: false, measure: false, reconcile: false };
+}
+
+/** Everything a round needs that is not the round's own completion. */
+interface RunLoopState {
+  messages: ChatMessage[];
+  state: ToolRunState;
+  asked: FinishDemands;
+  meter: RunMeter;
+  model: string;
+}
+
+/**
+ * The model tried to end the turn. Either it may — and this is the result — or
+ * it owes the run something first, in which case the demand is appended and
+ * null says to go round again.
+ *
+ * The gate, not the instruction (TAB-791). The prompt already tells the model
+ * to measure after a layout change, and in a live run against the reported
+ * project it changed the caption's pinned box and then answered "it should now
+ * display correctly" without ever measuring — the same unchecked claim TAB-805
+ * exists to stop, one cause later. Asked at the only moment that matters.
+ *
+ * And never finishing silently: a model that answers with tool calls alone and
+ * then stops leaves the drawer showing changed files and no word about them,
+ * which is what two live TAB-805 runs did. TAB-795 decided an empty bubble is
+ * not acceptable; `finishTurn` applies that to the turn as a whole.
+ */
+function resolveFinish(
+  loop: RunLoopState,
+  assistantText: string,
+  options: TabarioModelOptions,
+): TabarioModelResult | null {
+  const demand = demandBeforeFinishing(loop.state, loop.asked, assistantText);
+  if (demand) {
+    loop.messages.push({ role: "user", content: demand });
+    return null;
+  }
+  return finishTurn(assistantText, loop.model, loop.meter, loop.state, options);
+}
+
+export async function runTabarioModel(options: TabarioModelOptions): Promise<TabarioModelResult> {
+  const apiKey = requireApiKey();
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const budget = resolveBudget();
+  const loop: RunLoopState = {
+    messages: initialMessages(options),
+    state: newRunState(),
+    asked: newFinishDemands(),
+    meter: new RunMeter(budget),
+    model: modelName(),
   };
+  let assistantText = "";
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     if (options.signal.aborted) throw new DOMException("Tabario AI run cancelled.", "AbortError");
     options.onActivity();
-    const completion = await requestCompletion(fetchImpl, apiKey, model, messages, options.signal);
-    messages.push({
+    const completion = await requestCompletion(
+      fetchImpl,
+      apiKey,
+      loop.model,
+      loop.messages,
+      options.signal,
+      {
+        maxOutputTokens: budget.maxOutputTokens,
+        ...(options.principal ? { principal: options.principal } : {}),
+      },
+    );
+    loop.meter.record(completion.usage);
+    loop.messages.push({
       role: "assistant",
       content: completion.content || null,
       tool_calls: completion.toolCalls,
     });
     if (completion.content) assistantText = presentableAssistantText(completion.content);
-    if (completion.toolCalls.length === 0) {
-      // The gate, not the instruction (TAB-791). The prompt already tells the
-      // model to measure after a layout change, and in a live run against the
-      // reported project it changed the caption's pinned box and then answered
-      // "it should now display correctly" without ever measuring — which is the
-      // same unchecked claim TAB-805 exists to stop, one cause later. Asked
-      // at the only moment that matters: when it tries to finish.
-      const demand = demandBeforeFinishing(state, asked, assistantText);
-      if (demand) {
-        messages.push({ role: "user", content: demand });
-        continue;
-      }
-      // Never finish silently. `assistantText` is only ever set from a
-      // completion that carried content, and a model that answers with tool
-      // calls alone and then stops leaves the drawer showing changed files and
-      // no word about them — which is what two live TAB-805 runs did. TAB-795
-      // already decided an empty bubble is not acceptable; this is the same
-      // rule applied to the turn as a whole rather than to one stripped reply.
-      return finishTurn(assistantText, model, state, options);
+
+    // Checked here, beside the cancel check, because this is the point at which
+    // the run has spent something and has not yet committed to spending more.
+    // A ceiling ends the turn; it does not annihilate it — see `stoppedTurn`.
+    const stop = loop.meter.stop();
+    if (stop) return stoppedTurn(stop, assistantText, loop, options);
+
+    if (completion.toolCalls.length > 0) {
+      await executeToolCalls(completion.toolCalls, loop.messages, options, loop.state);
+      continue;
     }
-    await executeToolCalls(completion.toolCalls, messages, options, state);
+    const finished = resolveFinish(loop, assistantText, options);
+    if (finished) return finished;
   }
-  throw new Error(`Tabario AI exceeded ${MAX_TOOL_ROUNDS} tool rounds.`);
+  // Round exhaustion used to throw, and that throw is caught in
+  // `AgentRuntime.execute`, which then discards the entire staging directory.
+  // A run that did nine-tenths of the work and hit the wall lost all of it, and
+  // the user was told only that the run failed. Exhaustion is a stop like any
+  // other ceiling now: staged work still faces the apply gate, and the reply
+  // says the limit was reached rather than implying the work is finished.
+  return stoppedTurn({ reason: "rounds", limit: MAX_TOOL_ROUNDS }, assistantText, loop, options);
 }
 
 /** The turn's reply, said out loud, with the probe's account beside it. */
 function finishTurn(
   assistantText: string,
   model: string,
+  meter: RunMeter,
   state: ToolRunState,
   options: TabarioModelOptions,
 ): TabarioModelResult {
@@ -1463,5 +1576,38 @@ function finishTurn(
     assistantText: reply,
     model,
     verification: state.changedRenderable ? { measurement: state.measuredSinceWrite } : null,
+    meter: meter.snapshot(),
+    stopReason: "complete",
+  };
+}
+
+/**
+ * A turn a ceiling ended.
+ *
+ * The reply is the model's own words where it had any, with the limit stated
+ * after them — a run stopped mid-task may have written a sentence that reads as
+ * complete, and letting that stand alone is the silence-as-success failure this
+ * epic exists to remove.
+ */
+function stoppedTurn(
+  stop: BudgetStop | { reason: "rounds"; limit: number },
+  assistantText: string,
+  loop: RunLoopState,
+  options: TabarioModelOptions,
+): TabarioModelResult {
+  const limit =
+    stop.reason === "rounds"
+      ? `Tabario AI reached its limit of ${stop.limit} tool rounds and stopped here.`
+      : budgetStopMessage(stop);
+  const reply = assistantText ? `${assistantText}\n\n${limit}` : limit;
+  options.onAssistant(reply);
+  return {
+    assistantText: reply,
+    model: loop.model,
+    verification: loop.state.changedRenderable
+      ? { measurement: loop.state.measuredSinceWrite }
+      : null,
+    meter: loop.meter.snapshot(),
+    stopReason: stop.reason,
   };
 }
