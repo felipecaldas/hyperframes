@@ -17,6 +17,7 @@ import {
   type LayoutMeasurement,
 } from "../helpers/layoutProbe.js";
 import { isSupportedAgentSource, snapshotAgentFiles } from "./files.js";
+import { assertNoCaptionStructureEdit } from "./guardrails/captionStructure.js";
 import {
   budgetStopMessage,
   parseUsage,
@@ -716,6 +717,7 @@ function editFile(args: JsonRecord, options: TabarioModelOptions): unknown {
   if (Buffer.byteLength(after, "utf-8") > MAX_FILE_BYTES) throw new Error("file is too large");
   assertMediaSrcsResolve(options.stagingDir, file.relative, after);
   assertNoNewDuplicateHfIds(before, after, file.relative);
+  assertNoCaptionStructureEdit(before, after, file.relative);
   writeFileSync(file.absolute, after, "utf-8");
   return { path: file.relative, hash: hashFile(file.absolute) };
 }
@@ -743,6 +745,7 @@ function writeFile(args: JsonRecord, options: TabarioModelOptions): unknown {
     throw new Error(`hash conflict for ${file.relative}; current hash is null`);
   assertMediaSrcsResolve(options.stagingDir, file.relative, args.content);
   assertNoNewDuplicateHfIds("", args.content, file.relative);
+  assertNoCaptionStructureEdit("", args.content, file.relative);
   mkdirSync(dirname(file.absolute), { recursive: true });
   writeFileSync(file.absolute, args.content, "utf-8");
   return { path: file.relative, hash: hashFile(file.absolute) };

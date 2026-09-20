@@ -92,10 +92,41 @@ function buildTree(ctx: LintContext): TagNode | null {
   return root;
 }
 
+/**
+ * TAB-1202. A caption row break, in either of the two forms that exist.
+ *
+ * It is a `div` and not a `span` on purpose — both runtimes select
+ * `:scope > span` for karaoke words, so a span break would be counted as a word
+ * (TAB-826/827) — and it holds nothing: `flex-basis: 100%; height: 0` ends a
+ * flex line and does nothing else. Counting it as nested structure made two
+ * separate things impossible, because under the studio host this rule is an
+ * error and the agent's apply gate refuses on introduced errors:
+ *
+ * - the compositor's own wrapped output (`class="hf-caption-break"`, emitted by
+ *   `video-compositor/src/hyperframes/captions.ts`) was an error in its own
+ *   right; and
+ * - the inline form (`style="flex-basis:100%;height:0"`) that the Studio agent's
+ *   system prompt instructs it to write was refused on every attempt — which is
+ *   the whole of TAB-1202. The agent was following its instructions correctly
+ *   and the lint stopped it, so a user asking for a two-line caption could not
+ *   be given one by any route.
+ *
+ * Both forms are recognised because they are not interchangeable: the class form
+ * only draws in a project the compositor already compiled for wrapping, so an
+ * edit adding a break to a single-line project must use the inline one.
+ */
+const isCaptionBreak = (node: TagNode) => {
+  if (node.tag !== "div") return false;
+  if ((node.attrs.class ?? "").split(/\s+/).includes("hf-caption-break")) return true;
+  const style = readDecodedAttr(node.open.raw, "style") ?? "";
+  return /flex-basis\s*:\s*100%/i.test(style);
+};
+
 function hasNestedStructure(node: TagNode): TagNode | null {
   if (OPAQUE_TAGS.has(node.tag)) return null;
   for (const child of node.children) {
     if (NON_LAYOUT_TAGS.has(child.tag)) continue;
+    if (isCaptionBreak(child)) continue;
     if (!INLINE_TEXT_TAGS.has(child.tag)) return child;
     const deeper = hasNestedStructure(child);
     if (deeper) return deeper;

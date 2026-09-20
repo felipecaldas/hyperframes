@@ -55,6 +55,50 @@ describe("nested_structure_needs_subcomposition", () => {
   });
 });
 
+/**
+ * TAB-1202. A user asked Tabario AI on studio.tabario.com for a two-line
+ * caption and could not be given one by any route. The agent was following its
+ * system prompt exactly — add `flex-wrap: wrap` and write a literal break
+ * element — and this rule refused the break element every time. Under the studio
+ * host the rule is an error, and the agent's apply gate refuses on introduced
+ * errors, so the turn died after the model had already spent its budget.
+ */
+describe("a caption row break is not nested structure", () => {
+  const caption = (inner: string) =>
+    `<div id="caption-0" class="clip hf-captions" data-start="0" data-duration="3" data-hf-atomic>${inner}</div>`;
+  const word = (i: number, text: string) =>
+    `<span id="caption-0-w${i}" class="hf-caption-word">${text}</span>`;
+
+  it("allows the inline break the agent is instructed to write", async () => {
+    // The prompt mandates the inline form rather than the class form, because a
+    // project compiled for one line carries no rule for a break class.
+    const found = await codes(
+      caption(word(0, "what") + '<div style="flex-basis:100%;height:0"></div>' + word(1, "if")),
+      { host: "studio" },
+    );
+    expect(has(found, "nested_structure_needs_subcomposition")).toBe(false);
+  });
+
+  it("allows the class break the compositor itself emits", async () => {
+    // `video-compositor/src/hyperframes/captions.ts` emits exactly this for a
+    // wrapped project, so refusing it made the compiler's own output an error.
+    const found = await codes(
+      caption(word(0, "what") + '<div class="hf-caption-break"></div>' + word(1, "if")),
+      { host: "studio" },
+    );
+    expect(has(found, "nested_structure_needs_subcomposition")).toBe(false);
+  });
+
+  it("still refuses a div that is actually structure", async () => {
+    // The exemption is for an empty line-ending token, not a licence to nest
+    // layout inside a caption — without this the fix would be a blanket allow.
+    const found = await codes(caption(word(0, "what") + '<div class="panel"><b>x</b></div>'), {
+      host: "studio",
+    });
+    expect(has(found, "nested_structure_needs_subcomposition")).toBe(true);
+  });
+});
+
 describe("severity follows the host", () => {
   const body = '<div class="clip" data-start="0" data-duration="3"><div>inner</div></div>';
   it("is a warning for the CLI and an error for Studio", async () => {
