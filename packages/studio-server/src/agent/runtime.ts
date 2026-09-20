@@ -24,7 +24,7 @@ import {
   type AgentFileSnapshot,
   type AgentRunLedger,
 } from "./files.js";
-import { detectProvider, runTabarioModel } from "./providers.js";
+import { detectProvider, runTabarioModel, type TabarioModelResult } from "./providers.js";
 import { describeSelectedElement } from "./selection.js";
 import type {
   AgentChangedFile,
@@ -211,6 +211,57 @@ function isEditRequest(job: AgentRunJob): boolean {
   return job.request.kind !== "chat";
 }
 
+/**
+ * The reply for a turn whose changes never reached the project (TAB-1201).
+ *
+ * The model cannot know it was refused. The apply gate runs after its last
+ * completion, so its closing text describes what it *staged* and reads as a
+ * report of what it did — "I have updated Caption 11", when `index.html` was
+ * never touched. Delivered unchanged that text simply *is* the answer, and the
+ * refusal lands underneath it as one more Activity line, which is how a user
+ * came to be told twice that a caption had been fixed that never was.
+ *
+ * Two things follow from that, and the second is the expensive one:
+ *
+ *  - The correction has to **lead**. Appended to the end of a confident
+ *    paragraph it reads as a caveat to a success rather than a contradiction of
+ *    one. The drawer renders plain text in a `whitespace-pre-wrap` bubble, so
+ *    there is no emphasis to lean on — order is the whole of the signal.
+ *  - It has to go into the transcript, not only onto the stream, because
+ *    `execute` feeds `thread.transcript` back to the model. Left alone, the
+ *    false claim becomes the next turn's premise: the follow-up run opened by
+ *    asserting it had already fixed both captions and spent 260k tokens
+ *    building on that.
+ *
+ * A turn that applied cleanly has no reason, and is returned untouched.
+ */
+/**
+ * Remove a run's staging clone, and never let that decide whether the run gets
+ * to report itself.
+ *
+ * A throw here would skip `recordAssistant` and `finishRun` both, so the user
+ * would see changed files, no reply and no completion, while the ledger sat on
+ * "running" for ever. That is exactly what a TAB-805 measurement caused: its
+ * static server inherited the project's `autoProxy`, so the browser triggered
+ * transcodes that wrote into this directory while it was being removed, and
+ * `rmSync` raised on the moving target.
+ */
+function discardStagingDir(stagingDir: string): void {
+  try {
+    rmSync(stagingDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.warn(`[Studio] could not remove agent staging dir: ${errorMessage(error)}`);
+  }
+}
+
+export function unappliedReply(assistantText: string, reason: string | null): string {
+  if (!reason) return assistantText;
+  const lead = `Nothing in your project changed.\n\nWhy: ${reason}`;
+  if (!assistantText) return lead;
+  return `${lead}\n\nWhat Tabario AI said about the turn follows. It describes what was attempted, not what was changed:\n\n${assistantText}`;
+}
+
 export class AgentRuntime {
   readonly nonce = randomBytes(24).toString("base64url");
   private readonly jobs = new Map<string, AgentRunJob>();
@@ -344,6 +395,11 @@ export class AgentRuntime {
 
   private recordAssistant(job: AgentRunJob, thread: PersistedThread, text: string): void {
     if (!text) return;
+    // `text` has already been through `unappliedReply`, so a refused turn
+    // carries its own refusal into the transcript as well as onto the stream.
+    // Both halves matter and the second one is the quiet half: `execute` feeds
+    // `thread.transcript` straight back to the model, so a claim recorded here
+    // is a claim the next turn reasons from.
     this.emit(job, { type: "assistant", text });
     thread.transcript.push({ role: "assistant", text, at: new Date().toISOString() });
     thread.updatedAt = new Date().toISOString();
@@ -440,25 +496,7 @@ export class AgentRuntime {
       });
       assistantText ||= result.assistantText;
       if (result.verification) ledger.verification = result.verification;
-      // Emitted before the apply gate runs, and unconditionally. The money was
-      // spent whether or not the change lands, so a run that is about to be
-      // refused still has to report what it cost — a meter that only fires on
-      // success is exactly the blind spot that lets a failing loop bill.
-      ledger.meter = {
-        model: result.model,
-        promptTokens: result.meter.promptTokens,
-        completionTokens: result.meter.completionTokens,
-        totalTokens: result.meter.totalTokens,
-        costUsd: result.meter.costUsd,
-        costSource: result.meter.costSource,
-        costConfidence: result.meter.costConfidence,
-        costEnforceable: result.meter.costEnforceable,
-        rounds: result.meter.rounds,
-        tools,
-        stopReason: result.stopReason,
-        promptHash: hashPrompt(job.request.prompt),
-      };
-      this.emit(job, { type: "metered", meter: ledger.meter });
+      this.recordMeter(job, ledger, result, tools);
       if (!job.cancelled && !timeouts.reason()) {
         failure = await this.validateAndApply(job, before, ledger, stagingDir);
       }
@@ -466,24 +504,48 @@ export class AgentRuntime {
       if (!job.cancelled) failure = timeouts.reason() ?? errorMessage(error);
     } finally {
       timeouts.clear();
-      // Cleanup must never decide whether the run gets to report itself.
-      //
-      // A throw here skips `recordAssistant` and `finishRun` both, so the user
-      // sees changed files, no reply, and no completion, while the ledger sits
-      // on "running" for ever. That is exactly what a TAB-805 measurement
-      // caused: its static server inherited the project's `autoProxy`, so the
-      // browser triggered transcodes that wrote into this directory while it
-      // was being removed, and `rmSync` raised on the moving target.
-      try {
-        rmSync(stagingDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
-      } catch (error) {
-        // eslint-disable-next-line no-console
-        console.warn(`[Studio] could not remove agent staging dir: ${errorMessage(error)}`);
-      }
+      discardStagingDir(stagingDir);
     }
 
-    this.recordAssistant(job, thread, assistantText);
+    // Same precedence `finishRun` uses below, so the sentence the user reads
+    // and the event that closes the run cannot name different reasons. A
+    // cancelled run passes null on both counts — `stop()` and the catch each
+    // decline to set a reason once `job.cancelled` is true — and its own
+    // terminal event already says no staged changes were applied.
+    const stopped = timeouts.reason() ?? failure;
+    this.recordAssistant(job, thread, unappliedReply(assistantText, stopped));
     this.finishRun(job, ledger, failure, timeouts.reason());
+  }
+
+  /**
+   * What the run spent, recorded before the apply gate runs and unconditionally.
+   *
+   * The money was spent whether or not the change lands, so a run that is about
+   * to be refused still has to report what it cost — a meter that only fires on
+   * success is exactly the blind spot that lets a failing loop bill. Both live
+   * runs behind TAB-1201 were refused, and between them they cost $0.14.
+   */
+  private recordMeter(
+    job: AgentRunJob,
+    ledger: AgentRunLedger,
+    result: TabarioModelResult,
+    tools: Record<string, number>,
+  ): void {
+    ledger.meter = {
+      model: result.model,
+      promptTokens: result.meter.promptTokens,
+      completionTokens: result.meter.completionTokens,
+      totalTokens: result.meter.totalTokens,
+      costUsd: result.meter.costUsd,
+      costSource: result.meter.costSource,
+      costConfidence: result.meter.costConfidence,
+      costEnforceable: result.meter.costEnforceable,
+      rounds: result.meter.rounds,
+      tools,
+      stopReason: result.stopReason,
+      promptHash: hashPrompt(job.request.prompt),
+    };
+    this.emit(job, { type: "metered", meter: ledger.meter });
   }
 
   private async validateAndApply(

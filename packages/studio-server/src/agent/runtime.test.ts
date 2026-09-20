@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { AGENT_IDLE_TIMEOUT_MS, agentStateRoot } from "./runtime.js";
+import { AGENT_IDLE_TIMEOUT_MS, agentStateRoot, unappliedReply } from "./runtime.js";
 
 const source = readFileSync(new URL("./runtime.ts", import.meta.url).pathname, "utf8");
 
@@ -38,5 +38,59 @@ describe("the agent run's budget and its state root", () => {
     process.env.HYPERFRAMES_STATE_DIR = "/tmp/hf-state-probe";
 
     expect(agentStateRoot()).toBe(join("/tmp/hf-state-probe", "studio-agent"));
+  });
+});
+
+/**
+ * TAB-1201. Caught on studio.tabario.com, not by a test: the gate refused two
+ * caption edits for introducing nested `<div>`s, and the drawer told the user
+ * both captions had been fixed. The refusal was present the whole time — as an
+ * Activity line under the reply, and as `verdict = 'failed'` in `agent_runs`.
+ * The ledger was right and the sentence the user read was wrong.
+ */
+describe("a turn that was refused does not get to claim it succeeded", () => {
+  const REFUSAL =
+    "Staged changes introduced lint errors and were not applied — " +
+    'index.html: <div id="caption-11"> is a timeline element that contains nested <div>.';
+  const CLAIM = 'I have updated "Caption 11" to display on two lines.';
+
+  it("leads with the correction rather than appending it", () => {
+    const reply = unappliedReply(CLAIM, REFUSAL);
+
+    // Order is the entire signal — the drawer renders plain text, so a note
+    // placed after the claim reads as a caveat to a success.
+    expect(reply.indexOf("Nothing in your project changed")).toBe(0);
+    expect(reply.indexOf(REFUSAL)).toBeLessThan(reply.indexOf(CLAIM));
+  });
+
+  it("keeps the model's account, marked as attempted rather than dropped", () => {
+    const reply = unappliedReply(CLAIM, REFUSAL);
+
+    // Discarding it would hide what the model tried, which is the one thing
+    // that makes the refusal actionable.
+    expect(reply).toContain(CLAIM);
+    expect(reply).toContain("attempted, not what was changed");
+  });
+
+  it("still speaks when the model said nothing at all", () => {
+    // Before this the run emitted no assistant bubble whatsoever and the only
+    // account of the turn was an Activity line.
+    expect(unappliedReply("", REFUSAL)).toContain(REFUSAL);
+  });
+
+  it("leaves an applied turn exactly as the model wrote it", () => {
+    expect(unappliedReply(CLAIM, null)).toBe(CLAIM);
+    expect(unappliedReply("", null)).toBe("");
+  });
+
+  it("is wired into the reply the run records, not merely exported", () => {
+    // The transcript is fed back to the model by `execute`, so routing the
+    // reply through this is what stops a refused claim becoming the next
+    // turn's premise. Exported and unwired, every assertion above is green
+    // against nothing.
+    expect(source).toContain(
+      "this.recordAssistant(job, thread, unappliedReply(assistantText, stopped))",
+    );
+    expect(source).toContain("const stopped = timeouts.reason() ?? failure;");
   });
 });
