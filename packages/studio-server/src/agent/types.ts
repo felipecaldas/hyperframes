@@ -47,6 +47,12 @@ export interface AgentSelectedElement {
 
 export type AgentEventType =
   | "status"
+  /**
+   * What the model was told alongside the user's words, sent as the run starts
+   * (TAB-1194). The drawer shows it under the message, so nothing reaches the
+   * model about the user's turn that the user cannot read.
+   */
+  | "context"
   | "assistant"
   | "tool"
   | "changed-files"
@@ -217,9 +223,11 @@ export interface AgentThreadSummary {
     at: string;
     kind?: AgentRequestKind;
     /**
-     * What the model is told alongside a user turn and the user is not shown:
-     * the selected element, in a sentence (TAB-1063). Kept apart from `text`
-     * so the drawer's history shows what the user typed and nothing else.
+     * What the model is told alongside a user turn: the selected element, in a
+     * sentence (TAB-1063). Kept apart from `text` because the user did not
+     * type it, and shown under the turn, collapsed, because the model read it
+     * (TAB-1194). It reaches the model framed as data and never in the user's
+     * role.
      */
     context?: string;
   }>;

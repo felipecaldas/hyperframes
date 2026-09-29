@@ -23,7 +23,11 @@ describe("agent selection (TAB-1063)", () => {
     expect(text).toContain('"Caption 0"');
     expect(text).toContain('id "caption-0" in index.html');
     expect(text).toContain("from 0.0s to 3.3s");
-    expect(text).toContain("Read it before answering");
+    // TAB-1194: facts only. The sentence used to end by telling the model what
+    // to do, around a label that comes out of a project file. The instruction
+    // now lives in the system prompt, where no file can reach it.
+    expect(text).not.toContain("Read it before answering");
+    expect(text.endsWith("to 3.3s.")).toBe(true);
     expect(describeSelectedElement({ ...selection, sourceFile: "compositions/a.html" })).toContain(
       "in compositions/a.html",
     );

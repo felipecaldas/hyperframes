@@ -30,18 +30,24 @@ export function isAgentSelectedElement(value: unknown): value is AgentSelectedEl
 }
 
 /**
- * The selection as one sentence the model reads before the user's words.
+ * The selection as one sentence of fact, recorded beside the user's turn.
  *
  * Names the element the way the user does and the way the file does, because
  * the two differ: the timeline says "Caption 0", the file says `id="caption-0"`.
  * The model still has to read the element to know what it says.
+ *
+ * Facts only, since TAB-1194. The sentence used to end by telling the model
+ * what to do with the selection, and the label in the middle of it is a
+ * `data-hf-label` out of a project file. An instruction and a customer's text
+ * in one string cannot be told apart by whoever reads it, so the instruction
+ * moved to the system prompt and this became something that can be framed as
+ * data whole.
  */
 export function describeSelectedElement(selection: AgentSelectedElement): string {
   const file = selection.sourceFile ?? "index.html";
   const end = selection.start + selection.duration;
   return (
     `Selected on the timeline: "${selection.label}", the element with id "${selection.id}" in ` +
-    `${file}, on screen from ${selection.start.toFixed(1)}s to ${end.toFixed(1)}s. ` +
-    'When the request says "this" or names that element, it means this one. Read it before answering.'
+    `${file}, on screen from ${selection.start.toFixed(1)}s to ${end.toFixed(1)}s.`
   );
 }

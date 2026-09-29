@@ -491,11 +491,16 @@ describe("Tabario AI API", () => {
 
   /**
    * TAB-1063. A chat request may carry the element selected on the timeline.
-   * The model reads it ahead of the user's words; the thread keeps the two
-   * apart so the drawer's history shows only what was typed. A malformed
-   * selection is a bad request, not a silently dropped field.
+   * A malformed selection is a bad request, not a silently dropped field.
+   *
+   * Amended on purpose by TAB-1194. This asserted the selection was in the
+   * user's message, ahead of the user's words, and named itself "... and keeps
+   * it out of the user's bubble". Both halves were the defect: the model read
+   * it as the user speaking, and the user could not see it. It now reaches the
+   * model framed, in the system message, and reaches the drawer on the stream
+   * and on the thread.
    */
-  it("carries the timeline selection to the model and keeps it out of the user's bubble", async () => {
+  it("carries the timeline selection to the model as data, and to the drawer in full", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(readIndexFirst())
@@ -506,20 +511,38 @@ describe("Tabario AI API", () => {
     const jobId = await start(app, token, "make this two lines", {
       selection: { id: "caption-0", label: "Caption 0", start: 0, duration: 3.2 },
     });
-    expect(await events(app, jobId)).toContain("event: complete");
+    const stream = await events(app, jobId);
+    expect(stream).toContain("event: complete");
 
+    const told =
+      'Selected on the timeline: "Caption 0", the element with id "caption-0" in index.html, ' +
+      "on screen from 0.0s to 3.2s.";
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
-    const user = body.messages.find((message: { role: string }) => message.role === "user");
-    expect(user.content).toContain('Selected on the timeline: "Caption 0"');
-    expect(user.content).toContain('id "caption-0" in index.html');
-    expect(user.content.endsWith("\n\nmake this two lines")).toBe(true);
+    const roles = body.messages.map((message: { role: string }) => message.role);
+    expect(roles).toEqual(["system", "user"]);
+    expect(body.messages[1].content).toBe("make this two lines");
+    expect(body.messages[0].content).toMatch(
+      /<<TABARIO-DATA-[0-9a-f]{24} source="selection">>\nWith the user's latest message: Selected on the timeline: "Caption 0"/,
+    );
+
+    // What the model was told is what the drawer is given: once on the stream,
+    // so it can be shown while the run is still going, and once on the thread.
+    const context = stream
+      .split("\n")
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice("data: ".length)) as { type: string; message?: string })
+      .filter((event) => event.type === "context");
+    expect(context.map((event) => event.message)).toEqual([told]);
 
     const threads = (await (
       await app.request("http://localhost/projects/demo/agent/threads", { headers: headers() })
-    ).json()) as { threads: Array<{ transcript: Array<{ role: string; text: string }> }> };
+    ).json()) as {
+      threads: Array<{ transcript: Array<{ role: string; text: string; context?: string }> }>;
+    };
     expect(threads.threads[0].transcript[0]).toMatchObject({
       role: "user",
       text: "make this two lines",
+      context: told,
     });
 
     const rejected = await app.request("http://localhost/projects/demo/agent/runs", {

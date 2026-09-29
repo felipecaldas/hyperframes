@@ -431,15 +431,21 @@ export class AgentRuntime {
   private prepareThread(job: AgentRunJob): PersistedThread {
     let thread = readThread(this.threadPath(job.project.dir));
     if (job.request.newThread) thread = this.resetThread(job.project) as PersistedThread;
+    const context = job.request.selection ? describeSelectedElement(job.request.selection) : null;
     thread.transcript.push({
       role: "user",
       text: job.request.prompt,
       at: new Date().toISOString(),
       kind: job.request.kind,
-      ...(job.request.selection ? { context: describeSelectedElement(job.request.selection) } : {}),
+      ...(context ? { context } : {}),
     });
     thread.updatedAt = new Date().toISOString();
     this.writeThread(job.project.dir, thread);
+    // Said on the stream as well as kept on the thread (TAB-1194). The thread
+    // is only re-read when the run ends, and a run is minutes long, so without
+    // this the drawer could not show what the model was told until it no longer
+    // mattered.
+    if (context) this.emit(job, { type: "context", message: context });
     return thread;
   }
 

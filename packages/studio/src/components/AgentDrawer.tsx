@@ -15,6 +15,7 @@ import {
   type StudioAgentRequest,
 } from "../utils/agentBridge";
 import { toolLabel, useAgentRun } from "../hooks/useAgentRun";
+import { AgentContextNote } from "./AgentContextNote";
 import { AgentVerdictPanel } from "./AgentVerdictPanel";
 
 interface Capabilities {
@@ -104,24 +105,37 @@ function PendingReply({ status, elapsedMs }: { status: string | null; elapsedMs:
   );
 }
 
-/** Persisted thread turns followed by this run's live assistant output. */
+/**
+ * Persisted thread turns followed by this run's live assistant output.
+ *
+ * A turn sent with an element selected carries what the model was told about
+ * that element, under the words the user typed (TAB-1194).
+ */
 function AgentTranscript({
   thread,
   events,
   pendingPrompt,
+  pendingContext,
 }: {
   thread: AgentThreadSummary | undefined;
   events: AgentRunEvent[];
   pendingPrompt: string | null;
+  pendingContext: string | null;
 }) {
   return (
     <>
       {thread?.transcript.map((entry, index) => (
         <Bubble key={`${entry.at}-${index}`} role={entry.role}>
           {entry.text}
+          <AgentContextNote context={entry.context} />
         </Bubble>
       ))}
-      {pendingPrompt !== null && <Bubble role="user">{pendingPrompt}</Bubble>}
+      {pendingPrompt !== null && (
+        <Bubble role="user">
+          {pendingPrompt}
+          <AgentContextNote context={pendingContext} />
+        </Bubble>
+      )}
       {events
         .filter((event) => event.type === "assistant")
         .map((event) => (
@@ -385,6 +399,7 @@ export function AgentDrawer({ projectId, beforeRun, onRefresh }: AgentDrawerProp
     latestStatus,
     mutateRun,
     newChat,
+    pendingContext,
     pendingPrompt,
     receipt,
     setError,
@@ -449,7 +464,12 @@ export function AgentDrawer({ projectId, beforeRun, onRefresh }: AgentDrawerProp
       </header>
       <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-3">
         <AgentNotices capabilities={capabilities} provider={provider} available={available} />
-        <AgentTranscript thread={thread} events={events} pendingPrompt={pendingPrompt} />
+        <AgentTranscript
+          thread={thread}
+          events={events}
+          pendingPrompt={pendingPrompt}
+          pendingContext={pendingContext}
+        />
         {busy && <PendingReply status={latestStatus} elapsedMs={elapsedMs} />}
         <AgentActivityPanel activity={activity} busy={busy} />
         <AgentChangedFilesPanel changedFiles={changedFiles} />

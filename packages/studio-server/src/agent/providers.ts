@@ -24,6 +24,7 @@ import {
   egressRefusal,
   introducedOnly,
 } from "./guardrails/egress.js";
+import { createContextFrame, framingRules, type ContextFrame } from "./guardrails/framing.js";
 import { GuardrailRefusal } from "./guardrails/refusal.js";
 import {
   budgetStopMessage,
@@ -220,9 +221,11 @@ function registerRules(hasFrameMd: boolean): string {
  * who is editing a video, not a stylesheet. The prompt constrained the reply's
  * content and never its register.
  */
-function systemPrompt(kind: AgentRequestKind, hasFrameMd: boolean): string {
+function systemPrompt(kind: AgentRequestKind, hasFrameMd: boolean, frame: ContextFrame): string {
   return `You are Tabario AI inside Tabario Studio. You are editing one isolated HyperFrames project.
 The user's request kind is ${kind}. Inspect the project before changing it. Use only the provided tools.
+
+${framingRules(frame)}
 
 A HyperFrames project's timeline IS its HTML — reading the files is how you inspect the video:
 - \`index.html\` is the host timeline. Every timed element carries \`data-start\` and \`data-duration\` in seconds, plus \`data-track-index\` for its layer.
@@ -1232,10 +1235,10 @@ function assertFrameRead(call: ToolCall, options: TabarioModelOptions, state: To
 
 async function executeToolCalls(
   calls: ToolCall[],
-  messages: ChatMessage[],
+  loop: Pick<RunLoopState, "messages" | "state" | "frame">,
   options: TabarioModelOptions,
-  state: ToolRunState,
 ): Promise<void> {
+  const { messages, state, frame } = loop;
   for (const call of calls) {
     // Cancelling stops the batch here rather than at the next round. A round's
     // tool calls can be several, and one of them can be `validate_project` — a
@@ -1261,8 +1264,15 @@ async function executeToolCalls(
       result = { error: error instanceof Error ? error.message : String(error) };
     }
     const content = JSON.stringify(result);
+    // The ledger keeps the result as the tool returned it. The model gets it
+    // framed (TAB-1194). This is the one place a tool result becomes a message,
+    // so it is the one place the frame has to be applied.
     options.onToolResult?.(transcriptEntry(call, content));
-    messages.push({ role: "tool", tool_call_id: call.id, content });
+    messages.push({
+      role: "tool",
+      tool_call_id: call.id,
+      content: frame.wrap(`tool:${call.function.name}`, content),
+    });
   }
 }
 
@@ -1458,10 +1468,14 @@ function describeMeasurement(measurement: LayoutMeasurement): string {
  * nothing here can parse "two lines" — it is the last thing the model reads
  * before it writes the reply. The receipt shown to the user is the gate.
  */
-function reconcileWithMeasurement(measurement: LayoutMeasurement): string {
+function reconcileWithMeasurement(measurement: LayoutMeasurement, frame: ContextFrame): string {
   return (
     "Before you reply, this is what your own measurement after the last change reports:\n" +
-    `${describeMeasurement(measurement)}\n` +
+    // Framed like the tool result it is a digest of (TAB-1194). A selector is
+    // the model's own words and a reason is the probe's, but the rule is that
+    // nothing a tool produced is handed over unmarked, and a rule with an
+    // exception for the harmless cases is a rule someone has to re-judge.
+    `${frame.wrap("measurement", describeMeasurement(measurement))}\n` +
     "Reply from these numbers, in the same plain language as always: say what you changed and " +
     "what the measurement shows. If the numbers do not match what was asked — for example the " +
     "line count is not the one requested — either change what the measurement points at, or " +
@@ -1521,24 +1535,63 @@ function requireApiKey(): string {
 }
 
 /**
- * A transcript entry as the model reads it. A user turn sent with an element
- * selected carries that element's description ahead of the words, so "this
- * caption" resolves before the model has to guess (TAB-1063). The drawer shows
- * `text` alone; only the model sees the join.
+ * A transcript entry as the model reads it: the words, and nothing joined to
+ * them.
+ *
+ * Until TAB-1194 a user turn sent with an element selected carried that
+ * element's description ahead of the words, in the same message. The
+ * description holds a `data-hf-label`, which is text out of a project file, so
+ * a crafted label arrived as something the user had said, and the drawer showed
+ * the user's words alone. The description now travels in `selectionRecord`.
  */
 function chatMessage(entry: TabarioModelOptions["transcript"][number]): ChatMessage {
-  const content = entry.context ? `${entry.context}\n\n${entry.text}` : entry.text;
-  return { role: entry.role, content };
+  return { role: entry.role, content: entry.text };
 }
 
-function initialMessages(options: TabarioModelOptions): ChatMessage[] {
+type Transcript = TabarioModelOptions["transcript"];
+
+/** Which of the user's messages a selection was recorded with, in words. */
+function turnName(index: number, total: number): string {
+  return index === total - 1
+    ? "With the user's latest message"
+    : `With the user's message ${index + 1} of ${total}`;
+}
+
+/**
+ * What was selected on the timeline when each message was sent, or an empty
+ * string when nothing was (TAB-1063, moved here by TAB-1194).
+ *
+ * The rule for using it is outside the frame and the record is inside, because
+ * the two have different authors: the rule is ours, and the element's name is
+ * whatever the project file says it is.
+ */
+function selectionRecord(transcript: Transcript, frame: ContextFrame): string {
+  const turns = transcript.filter((entry) => entry.role === "user");
+  const lines = turns.flatMap((entry, index) =>
+    entry.context ? [`${turnName(index, turns.length)}: ${entry.context}`] : [],
+  );
+  if (lines.length === 0) return "";
+  return (
+    "\n\nStudio recorded which element was selected on the timeline when a message was sent. " +
+    'When that message says "this", or names that element, it means the one recorded with it. ' +
+    "Read the element before answering. The record is framed because an element's name comes " +
+    "from the project:\n" +
+    frame.wrap("selection", lines.join("\n"))
+  );
+}
+
+function initialMessages(options: TabarioModelOptions, frame: ContextFrame): ChatMessage[] {
   // The staging dir is a full copy of the project: `createAgentStagingProject`
   // walks every file and `.md` is a supported source, so a compiled project's
   // FRAME.md is there and the agent can read it with the tools it already has.
   const hasFrameMd = existsSync(join(options.stagingDir, "FRAME.md"));
+  const transcript = options.transcript.slice(-24);
   return [
-    { role: "system", content: systemPrompt(options.kind, hasFrameMd) },
-    ...options.transcript.slice(-24).map(chatMessage),
+    {
+      role: "system",
+      content: systemPrompt(options.kind, hasFrameMd, frame) + selectionRecord(transcript, frame),
+    },
+    ...transcript.map(chatMessage),
   ];
 }
 
@@ -1582,6 +1635,7 @@ function demandBeforeFinishing(
   state: ToolRunState,
   asked: FinishDemands,
   reply: string,
+  frame: ContextFrame,
 ): string | null {
   if (!state.calledAnyTool) {
     return claimDemand(asked, "inspect", INSPECT_BEFORE_ANSWERING);
@@ -1604,7 +1658,7 @@ function demandBeforeFinishing(
   if (!state.measuredSinceWrite) {
     return claimDemand(asked, "measure", MEASURE_BEFORE_ANSWERING);
   }
-  return claimDemand(asked, "reconcile", reconcileWithMeasurement(state.measuredSinceWrite));
+  return claimDemand(asked, "reconcile", reconcileWithMeasurement(state.measuredSinceWrite, frame));
 }
 
 interface FinishDemands {
@@ -1638,6 +1692,8 @@ interface RunLoopState {
   model: string;
   /** The run's retries, shared by every completion it asks for (TAB-1196). */
   retry: { policy: RetryPolicy; allowance: RetryAllowance };
+  /** The run's frame, carried by everything the model reads as data (TAB-1194). */
+  frame: ContextFrame;
 }
 
 function newRetryState(): RunLoopState["retry"] {
@@ -1666,7 +1722,7 @@ function resolveFinish(
   assistantText: string,
   options: TabarioModelOptions,
 ): TabarioModelResult | null {
-  const demand = demandBeforeFinishing(loop.state, loop.asked, assistantText);
+  const demand = demandBeforeFinishing(loop.state, loop.asked, assistantText, loop.frame);
   if (demand) {
     loop.messages.push({ role: "user", content: demand });
     return null;
@@ -1678,8 +1734,10 @@ export async function runTabarioModel(options: TabarioModelOptions): Promise<Tab
   const apiKey = requireApiKey();
   const fetchImpl = options.fetchImpl ?? fetch;
   const budget = resolveBudget();
+  const frame = createContextFrame();
   const loop: RunLoopState = {
-    messages: initialMessages(options),
+    frame,
+    messages: initialMessages(options, frame),
     state: newRunState(),
     asked: newFinishDemands(),
     meter: new RunMeter(budget),
@@ -1719,7 +1777,7 @@ export async function runTabarioModel(options: TabarioModelOptions): Promise<Tab
     if (stop) return stoppedTurn(stop, assistantText, loop, options);
 
     if (completion.toolCalls.length > 0) {
-      await executeToolCalls(completion.toolCalls, loop.messages, options, loop.state);
+      await executeToolCalls(completion.toolCalls, loop, options);
       continue;
     }
     const finished = resolveFinish(loop, assistantText, options);

@@ -13,6 +13,7 @@ import { openEventStream, type EventStreamHandle } from "../utils/eventStream";
 
 const EVENT_TYPES = [
   "status",
+  "context",
   "assistant",
   "tool",
   "changed-files",
@@ -164,6 +165,15 @@ export function useAgentRun(options: UseAgentRunOptions) {
    * like it had swallowed it.
    */
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
+  /**
+   * What the server sent the model alongside the pending turn (TAB-1194).
+   *
+   * Held as its own state and not read out of `events`: the last run's events
+   * stay on screen until the next run is accepted, and the pending turn is
+   * shown before that, so for the length of a save a new message would have
+   * worn the previous message's selection.
+   */
+  const [pendingContext, setPendingContext] = useState<string | null>(null);
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [elapsedMs, setElapsedMs] = useState(0);
   const streamRef = useRef<EventStreamHandle | null>(null);
@@ -193,6 +203,8 @@ export function useAgentRun(options: UseAgentRunOptions) {
       events.filter(
         (event) =>
           event.type !== "assistant" &&
+          // Shown under the message it was sent with, not as something the run did.
+          event.type !== "context" &&
           event.type !== "changed-files" &&
           event.type !== "measurement",
       ),
@@ -210,6 +222,7 @@ export function useAgentRun(options: UseAgentRunOptions) {
     // Only now, once the persisted thread is in hand — clearing any earlier
     // would blink the message out again, and clearing never would show it twice.
     setPendingPrompt(null);
+    setPendingContext(null);
     setStartedAt(null);
     setEvents((current) => current.filter((event) => event.type !== "assistant"));
     await onRefresh();
@@ -230,6 +243,7 @@ export function useAgentRun(options: UseAgentRunOptions) {
         setEvents((current) => [...current, event]);
         if (event.files) setChangedFiles(event.files);
         if (event.measurement) setReceipt(event.measurement);
+        if (event.type === "context") setPendingContext(event.message ?? null);
         if (!TERMINAL_EVENTS.has(event.type)) return;
         setVerdict(verdictOf(event));
         if (event.type === "failure") setError(event.message ?? "Agent run failed.");
@@ -287,6 +301,7 @@ export function useAgentRun(options: UseAgentRunOptions) {
     // what made a chat message vanish for the length of a run (TAB-797).
     const prompt = generatedPrompt;
     setPendingPrompt(prompt);
+    setPendingContext(null);
     setStartedAt(Date.now());
     onPromptConsumed();
     const returnPrompt = () => {
@@ -367,6 +382,7 @@ export function useAgentRun(options: UseAgentRunOptions) {
     setVerdict(null);
     setJobId(null);
     setPendingPrompt(null);
+    setPendingContext(null);
     setStartedAt(null);
     await loadThreads();
   }, [busy, capabilities, loadThreads, nonceHeaders, onThreadReset, projectId, provider]);
@@ -383,6 +399,7 @@ export function useAgentRun(options: UseAgentRunOptions) {
     latestStatus,
     mutateRun,
     newChat,
+    pendingContext,
     pendingPrompt,
     receipt,
     setError,

@@ -538,4 +538,105 @@ describe("AgentDrawer", () => {
     expect(host.textContent).toContain(message);
     act(() => root.unmount());
   });
+
+  /**
+   * TAB-1194. A message sent with an element selected reaches the model with a
+   * description of that element, built from a `data-hf-label` out of a project
+   * file. The drawer used to show the typed words alone, so whatever the label
+   * said was read by the model and by nobody else.
+   */
+  describe("what the model was told alongside a message (TAB-1194)", () => {
+    const message = "make this two lines";
+    const told =
+      'Selected on the timeline: "Caption 0", the element with id "caption-0" in index.html, ' +
+      "on screen from 0.0s to 3.2s.";
+
+    const notes = (host: HTMLElement) => [...host.querySelectorAll("[data-agent-context]")];
+
+    async function send(host: HTMLElement, text: string) {
+      const textarea = composer(host);
+      await act(async () => typeInto(textarea, text));
+      await act(async () => pressEnter(textarea));
+      await settle();
+    }
+
+    function sourceOf(index: number): FakeEventSource {
+      const source = FakeEventSource.instances[index];
+      if (!source) throw new Error("event source missing");
+      return source;
+    }
+
+    it("shows it under the message while the run is going, folded away", async () => {
+      const { fetchMock } = runFixture([]);
+      const { host, root } = await mountDrawer(fetchMock);
+      await send(host, message);
+      expect(notes(host)).toHaveLength(0);
+
+      await act(async () => {
+        sourceOf(0).emit("context", { id: 1, type: "context", at: "now", message: told });
+      });
+
+      const [note] = notes(host);
+      expect(notes(host)).toHaveLength(1);
+      expect(note).toBeInstanceOf(HTMLDetailsElement);
+      expect((note as HTMLDetailsElement).open).toBe(false);
+      expect(note?.textContent).toContain(told);
+      // Under the user's words, in the user's bubble, and said once: it is not
+      // something the run did, so the Activity panel does not list it.
+      expect(note?.parentElement?.textContent).toContain(message);
+      expect(occurrences(host.textContent ?? "", told)).toBe(1);
+      act(() => root.unmount());
+    });
+
+    it("shows it on the persisted turn, once, and on no turn that had none", async () => {
+      const { fetchMock, complete } = runFixture([
+        { role: "user", text: message, at: "2026-09-29T00:00:00.000Z", context: told },
+        { role: "assistant", text: "Done.", at: "2026-09-29T00:01:00.000Z" },
+        { role: "user", text: "thanks", at: "2026-09-29T00:02:00.000Z" },
+      ]);
+      const { host, root } = await mountDrawer(fetchMock);
+      await send(host, message);
+      await act(async () => {
+        sourceOf(0).emit("context", { id: 1, type: "context", at: "now", message: told });
+      });
+
+      complete();
+      await act(async () => {
+        sourceOf(0).emit("complete", { id: 2, type: "complete", at: "now", message: "done" });
+        await Promise.resolve();
+      });
+      await settle();
+
+      expect(notes(host)).toHaveLength(1);
+      expect(occurrences(host.textContent ?? "", told)).toBe(1);
+      expect(notes(host)[0]?.parentElement?.textContent).toContain(message);
+      act(() => root.unmount());
+    });
+
+    /**
+     * The path where nothing else clears it. A stream that dies leaves the
+     * pending turn standing on purpose (TAB-797), and what was sent with it
+     * stands too. The next message is a different message.
+     */
+    it("does not put the last message's selection under the next message", async () => {
+      const { fetchMock } = runFixture([]);
+      const { host, root } = await mountDrawer(fetchMock);
+      await send(host, message);
+      await act(async () => {
+        sourceOf(0).emit("context", { id: 1, type: "context", at: "now", message: told });
+        sourceOf(0).readyState = 2;
+        sourceOf(0).emit("error", {});
+        await Promise.resolve();
+      });
+      expect(notes(host)).toHaveLength(1);
+
+      // Sent with nothing selected, so the server sends no context event.
+      await send(host, "and make the title bigger");
+
+      expect(host.textContent).toContain("and make the title bigger");
+      expect(notes(host)).toHaveLength(0);
+      expect(host.textContent).not.toContain(told);
+      act(() => root.unmount());
+    });
+  });
 });
