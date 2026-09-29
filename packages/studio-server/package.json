@@ -158,6 +158,7 @@
     "build": "tsup",
     "test": "vitest run",
     "test:acorn-writer": "bun scripts/run-acorn-writer-tests.ts",
+    "eval:review": "bun scripts/review-eval.ts",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "report:gsap-writers": "bun src/routes/gsapMutationCapabilities.report.ts",

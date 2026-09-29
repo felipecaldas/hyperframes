@@ -107,8 +107,20 @@ export interface AgentVerdictReceipt {
  * - `unsupported-change`: the run staged a change to a file it may not edit.
  * - `conflict`: the live project moved while the run was working.
  * - `egress`: the change made a project file reach the network (TAB-1195).
+ * - `unasked-change`: the change held something the user's messages did not
+ *   ask for (TAB-1222).
+ * - `unchecked-change`: the change could not be checked against the user's
+ *   messages, so it was not applied (TAB-1222). Kept apart from
+ *   `unasked-change` because it says nothing about the change: the check was
+ *   unreachable, unreadable, or shown more than it takes.
  */
-export type AgentRefusalGate = "lint" | "unsupported-change" | "conflict" | "egress";
+export type AgentRefusalGate =
+  | "lint"
+  | "unsupported-change"
+  | "conflict"
+  | "egress"
+  | "unasked-change"
+  | "unchecked-change";
 
 /**
  * One refusal, kept on the ledger and sent down the stream (TAB-1196).
@@ -158,6 +170,35 @@ export interface AgentRunMeter {
   tools: Record<string, number>;
   stopReason: "complete" | "tokens" | "cost" | "rounds";
   promptHash: string;
+  /**
+   * What the check at apply spent, when it ran (TAB-1222). The totals above
+   * include it, so a run costs what it cost. It is kept apart here as well so
+   * the price of the gate can be read per run rather than argued about.
+   */
+  review?: AgentReviewMeter;
+}
+
+/**
+ * The check at apply, in numbers (TAB-1222).
+ *
+ * `outcome` is the check's, not the run's:
+ *
+ * - `asked`: every hunk was ruled to be what the user asked for.
+ * - `unasked`: at least one was not, and the change was refused.
+ * - `unreadable`: no answer ruled on every hunk. Refused.
+ * - `unavailable`: the check could not be reached. Refused.
+ * - `too-large`: the change is more than the check is shown. Refused unread.
+ */
+export interface AgentReviewMeter {
+  model: string;
+  outcome: "asked" | "unasked" | "unreadable" | "unavailable" | "too-large";
+  hunks: number;
+  calls: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  costUsd: number | null;
+  durationMs: number;
 }
 
 export interface AgentRunEvent {

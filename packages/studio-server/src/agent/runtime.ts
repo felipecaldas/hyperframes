@@ -15,6 +15,7 @@ import type { ResolvedProject, StudioApiAdapter } from "../types.js";
 import { lintProject } from "../helpers/projectLint.js";
 import {
   applyStagedAgentFiles,
+  compareAgentSnapshots,
   createAgentStagingProject,
   diffAgentFiles,
   readLedger,
@@ -26,6 +27,7 @@ import {
 } from "./files.js";
 import { assertNoIntroducedEgress } from "./guardrails/egress.js";
 import { GuardrailRefusal } from "./guardrails/refusal.js";
+import { reviewChange, spentWithReview, type ReviewResult } from "./guardrails/review.js";
 import { decideVerdict } from "./guardrails/verdict.js";
 import { detectProvider, runTabarioModel, type TabarioModelResult } from "./providers.js";
 import { describeSelectedElement } from "./selection.js";
@@ -64,6 +66,28 @@ const PROVIDER: AgentProvider = "tabario";
 
 interface PersistedThread extends AgentThreadSummary {
   updatedAt: string;
+}
+
+/** The trees a run is judged against, and where it staged its work. */
+interface RunTrees {
+  /** The project as it was when the run started. */
+  before: AgentFileSnapshot;
+  /** The tree the model started in: the project, plus a catalog item when one was asked for. */
+  baseline: AgentFileSnapshot;
+  stagingDir: string;
+}
+
+/**
+ * The staged tree, read once, and what the check made of it (TAB-1222).
+ *
+ * `diff` is null when the tree was not read: the run was cancelled, or reading
+ * it failed and `error` says how. Nothing is applied from a tree that was not
+ * read, so a null here can never become a change that skipped the check.
+ */
+interface StagedChange {
+  diff: ReturnType<typeof diffAgentFiles> | null;
+  review: ReviewResult | null;
+  error: string | null;
 }
 
 interface AgentRunJob {
@@ -332,6 +356,19 @@ function discardStagingDir(stagingDir: string): void {
   }
 }
 
+/** A tree that was not read was not checked, and is not applied. */
+function stagedOrThrow(change: StagedChange): ReturnType<typeof diffAgentFiles> {
+  if (!change.diff) throw new Error(change.error ?? "The staged changes could not be read.");
+  return change.diff;
+}
+
+/** What a run that staged nothing is told: an edit is told so, a question is not. */
+function nothingChanged(job: AgentRunJob): string | null {
+  return isEditRequest(job)
+    ? `Tabario AI finished without changing project files for this ${job.request.kind} request.`
+    : null;
+}
+
 export function unappliedReply(assistantText: string, reason: string | null): string {
   if (!reason) return assistantText;
   const lead = `Nothing in your project changed.\n\nWhy: ${reason}`;
@@ -598,9 +635,11 @@ export class AgentRuntime {
       });
       assistantText ||= result.assistantText;
       if (result.verification) ledger.verification = result.verification;
-      this.recordMeter(job, ledger, result, tools);
+      const trees: RunTrees = { before, baseline, stagingDir };
+      const staged = await this.checkStaged(job, thread, trees, timeouts.touch);
+      this.recordMeter(job, ledger, result, tools, staged.review);
       if (!job.cancelled && !timeouts.reason()) {
-        failure = await this.validateAndApply(job, before, ledger, stagingDir, baseline);
+        failure = await this.validateAndApply(job, ledger, trees, staged);
       }
     } catch (error) {
       if (!job.cancelled) failure = timeouts.reason() ?? errorMessage(error);
@@ -620,6 +659,69 @@ export class AgentRuntime {
   }
 
   /**
+   * Reads the staged tree once and has the change checked against what the
+   * user asked for (TAB-1222).
+   *
+   * Ahead of the meter, so a run reports what the check cost whether or not the
+   * change lands. And never throwing, for the same reason: a throw from here
+   * would skip the meter, and the money was spent.
+   */
+  private async checkStaged(
+    job: AgentRunJob,
+    thread: PersistedThread,
+    trees: RunTrees,
+    touch: () => void,
+  ): Promise<StagedChange> {
+    if (job.cancelled || job.controller.signal.aborted)
+      return { diff: null, review: null, error: null };
+    try {
+      const diff = diffAgentFiles(trees.stagingDir, trees.before);
+      const review = await this.reviewStaged(job, thread, trees.baseline, diff, touch);
+      return { diff, review, error: null };
+    } catch (error) {
+      return { diff: null, review: null, error: errorMessage(error) };
+    }
+  }
+
+  /**
+   * The check's ruling on what the model changed, or null when the model
+   * changed nothing that reaches it.
+   *
+   * Measured from `baseline` and not from the project. A catalog item's own
+   * files were put there by Studio because the user picked the item, and they
+   * are not something the model did.
+   */
+  private async reviewStaged(
+    job: AgentRunJob,
+    thread: PersistedThread,
+    baseline: AgentFileSnapshot,
+    diff: ReturnType<typeof diffAgentFiles>,
+    touch: () => void,
+  ): Promise<ReviewResult | null> {
+    // An unsupported change is refused at apply for being one. There is
+    // nothing to gain from paying to read it first.
+    if (!diff.undoCovered) return null;
+    const changedFiles = compareAgentSnapshots(baseline, diff.after);
+    if (changedFiles.length === 0) return null;
+    this.emit(job, {
+      type: "status",
+      message: "Checking the change against what you asked for…",
+    });
+    touch();
+    return reviewChange({
+      kind: job.request.kind,
+      ...(job.request.registryItem ? { registryItem: job.request.registryItem } : {}),
+      transcript: thread.transcript,
+      changedFiles,
+      baseline,
+      staged: diff.after,
+      signal: job.controller.signal,
+      onActivity: touch,
+      principal: projectKey(job.project.dir),
+    });
+  }
+
+  /**
    * What the run spent, recorded before the apply gate runs and unconditionally.
    *
    * The money was spent whether or not the change lands, so a run that is about
@@ -632,13 +734,15 @@ export class AgentRuntime {
     ledger: AgentRunLedger,
     result: TabarioModelResult,
     tools: Record<string, number>,
+    review: ReviewResult | null,
   ): void {
+    const spent = spentWithReview(result.meter, review?.meter);
     ledger.meter = {
       model: result.model,
-      promptTokens: result.meter.promptTokens,
-      completionTokens: result.meter.completionTokens,
-      totalTokens: result.meter.totalTokens,
-      costUsd: result.meter.costUsd,
+      promptTokens: spent.promptTokens,
+      completionTokens: spent.completionTokens,
+      totalTokens: spent.totalTokens,
+      costUsd: spent.costUsd,
       costSource: result.meter.costSource,
       costConfidence: result.meter.costConfidence,
       costEnforceable: result.meter.costEnforceable,
@@ -646,6 +750,7 @@ export class AgentRuntime {
       tools,
       stopReason: result.stopReason,
       promptHash: hashPrompt(requestText(job.request)),
+      ...(review ? { review: review.meter } : {}),
     };
     this.emit(job, { type: "metered", meter: ledger.meter });
   }
@@ -666,12 +771,12 @@ export class AgentRuntime {
 
   private async validateAndApply(
     job: AgentRunJob,
-    before: AgentFileSnapshot,
     ledger: AgentRunLedger,
-    stagingDir: string,
-    baseline: AgentFileSnapshot,
+    trees: RunTrees,
+    change: StagedChange,
   ): Promise<string | null> {
-    const staged = diffAgentFiles(stagingDir, before);
+    const { baseline, stagingDir } = trees;
+    const staged = stagedOrThrow(change);
     if (!staged.undoCovered)
       return this.refuse(job, ledger, {
         gate: "unsupported-change",
@@ -682,21 +787,31 @@ export class AgentRuntime {
     // A question stages nothing, and falling through from here used to report
     // "Staged changes failed lint" about changes that did not exist, next to an
     // answer that had changed nothing. There is also nothing to lint.
-    if (staged.changedFiles.length === 0) {
-      return isEditRequest(job)
-        ? `Tabario AI finished without changing project files for this ${job.request.kind} request.`
-        : null;
-    }
-    const refusal = await this.stagedRefusal(job, staged.changedFiles, baseline, stagingDir);
+    if (staged.changedFiles.length === 0) return nothingChanged(job);
+    // The check's ruling first. It was made before the meter was recorded, and
+    // a change that was not asked for is recorded as that, whatever the lint
+    // would have gone on to say about it.
+    const refusal =
+      change.review?.refusal ??
+      (await this.stagedRefusal(job, staged.changedFiles, baseline, stagingDir));
     if (refusal) return this.refuse(job, ledger, refusal);
     if (job.cancelled || job.controller.signal.aborted) return null;
-    if (staged.changedFiles.length === 0) return null;
+    return this.applyChecked(job, ledger, trees, staged.changedFiles);
+  }
+
+  /** Lands a change every gate has passed, as one transaction. */
+  private applyChecked(
+    job: AgentRunJob,
+    ledger: AgentRunLedger,
+    trees: RunTrees,
+    changedFiles: AgentChangedFile[],
+  ): string | null {
     this.emit(job, { type: "status", message: "Applying the validated timeline transaction…" });
     const conflicts = applyStagedAgentFiles(
       job.project.dir,
-      stagingDir,
-      before,
-      staged.changedFiles,
+      trees.stagingDir,
+      trees.before,
+      changedFiles,
     );
     if (conflicts.length > 0)
       return this.refuse(job, ledger, {
@@ -704,9 +819,9 @@ export class AgentRuntime {
         stage: "apply",
         message: `Project changed while Tabario AI was working: ${conflicts.join(", ")}`,
       });
-    ledger.changedFiles = staged.changedFiles;
+    ledger.changedFiles = changedFiles;
     ledger.completedAt = new Date().toISOString();
-    this.emitApplied(job, ledger, staged.changedFiles);
+    this.emitApplied(job, ledger, changedFiles);
     return null;
   }
 

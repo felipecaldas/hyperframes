@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   applyStagedAgentFiles,
+  compareAgentSnapshots,
   createAgentStagingProject,
   diffAgentFiles,
   snapshotAgentFiles,
@@ -107,6 +108,45 @@ describe("agent source transactions", () => {
     writeFileSync(join(staging, "media.bin"), Buffer.from([9, 9, 9]));
 
     expect(readFileSync(join(projectDir, "media.bin"))).toEqual(Buffer.from([1, 2, 3]));
+  });
+
+  it("tells what a run changed apart from what was put there before it started", () => {
+    const projectDir = mkdtempSync(join(tmpdir(), "hf-agent-files-"));
+    const staging = mkdtempSync(join(tmpdir(), "hf-agent-stage-"));
+    writeFileSync(join(projectDir, "index.html"), "before\n");
+    const before = snapshotAgentFiles(projectDir);
+    createAgentStagingProject(projectDir, staging);
+
+    // Studio installs what the user picked, and only then does the run begin.
+    mkdirSync(join(staging, "compositions"));
+    writeFileSync(join(staging, "compositions/accent.html"), "<html></html>\n");
+    const baseline = snapshotAgentFiles(staging);
+    writeFileSync(join(staging, "index.html"), "after\n");
+    const after = snapshotAgentFiles(staging);
+
+    expect(compareAgentSnapshots(baseline, after).map((file) => file.path)).toEqual(["index.html"]);
+    expect(compareAgentSnapshots(before, after).map((file) => file.path)).toEqual([
+      "compositions/accent.html",
+      "index.html",
+    ]);
+    expect(compareAgentSnapshots(after, after)).toEqual([]);
+  });
+
+  it("does not apply a staged file that changed after it was read", () => {
+    const projectDir = mkdtempSync(join(tmpdir(), "hf-agent-files-"));
+    const staging = mkdtempSync(join(tmpdir(), "hf-agent-stage-"));
+    writeFileSync(join(projectDir, "index.html"), "before\n");
+    const before = snapshotAgentFiles(projectDir);
+    createAgentStagingProject(projectDir, staging);
+    writeFileSync(join(staging, "index.html"), "checked\n");
+    const diff = diffAgentFiles(staging, before);
+
+    writeFileSync(join(staging, "index.html"), "swapped\n");
+
+    expect(() => applyStagedAgentFiles(projectDir, staging, before, diff.changedFiles)).toThrow(
+      "staged file changed after it was checked: index.html",
+    );
+    expect(readFileSync(join(projectDir, "index.html"), "utf-8")).toBe("before\n");
   });
 
   it("refuses to apply staged source through a live symlink ancestor", () => {

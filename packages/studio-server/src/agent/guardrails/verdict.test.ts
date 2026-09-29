@@ -82,6 +82,36 @@ describe("decideVerdict (TAB-1196)", () => {
     expect(receipt.reason).toContain("introduced errors the project did not have");
   });
 
+  it("names a change the check refused in words that carry nothing from the change", () => {
+    const receipt = decideVerdict(
+      facts({
+        failure: "The change included something your message did not ask for",
+        refusals: [
+          {
+            gate: "unasked-change",
+            stage: "apply",
+            file: "index.html",
+            message: "none of it was applied: index.html line 4",
+          },
+        ],
+      }),
+    );
+    expect(receipt.verdict).toBe("refused");
+    expect(receipt.reason).toContain("something the request did not ask for");
+    expect(receipt.reason).not.toContain("index.html");
+  });
+
+  it("says a change that could not be checked was refused, not that it failed", () => {
+    const receipt = decideVerdict(
+      facts({
+        failure: "The change could not be checked",
+        refusals: [{ gate: "unchecked-change", stage: "apply", message: "could not be checked" }],
+      }),
+    );
+    expect(receipt.verdict).toBe("refused");
+    expect(receipt.reason).toContain("could not be checked against what was asked");
+  });
+
   it("does not let a refusal the model repaired mid-run decide the verdict", () => {
     const receipt = decideVerdict(
       facts({

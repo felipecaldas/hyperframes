@@ -157,11 +157,19 @@ export function createAgentStagingProject(projectDir: string, stagingDir: string
   }
 }
 
-export function diffAgentFiles(
-  projectDir: string,
+/**
+ * What differs between two snapshots, without reading the disk again
+ * (TAB-1222).
+ *
+ * The check at apply asks what the run changed from the tree the model started
+ * in, and the apply stage asks what changed from the project. Both are answered
+ * from one reading of the staged tree, so the two cannot be looking at
+ * different files.
+ */
+export function compareAgentSnapshots(
   before: AgentFileSnapshot,
-): { after: AgentFileSnapshot; changedFiles: AgentChangedFile[]; undoCovered: boolean } {
-  const after = snapshotAgentFiles(projectDir);
+  after: AgentFileSnapshot,
+): AgentChangedFile[] {
   const paths = new Set([...Object.keys(before.files), ...Object.keys(after.files)]);
   const changedFiles: AgentChangedFile[] = [];
   for (const path of [...paths].sort()) {
@@ -176,6 +184,15 @@ export function diffAgentFiles(
       supported: oldFile?.supported ?? newFile?.supported ?? false,
     });
   }
+  return changedFiles;
+}
+
+export function diffAgentFiles(
+  projectDir: string,
+  before: AgentFileSnapshot,
+): { after: AgentFileSnapshot; changedFiles: AgentChangedFile[]; undoCovered: boolean } {
+  const after = snapshotAgentFiles(projectDir);
+  const changedFiles = compareAgentSnapshots(before, after);
   return {
     after,
     changedFiles,
@@ -243,7 +260,7 @@ export function applyStagedAgentFiles(
         if (existsSync(destination)) unlinkSync(destination);
       } else {
         mkdirSync(dirname(destination), { recursive: true });
-        replaceFileAtomically(destination, readFileSync(join(stagingDir, file.path)));
+        replaceFileAtomically(destination, stagedContent(stagingDir, file));
       }
       applied.push(file);
     }
@@ -252,6 +269,20 @@ export function applyStagedAgentFiles(
     throw error;
   }
   return [];
+}
+
+/**
+ * The staged file, held to the hash it had when the gates read it (TAB-1222).
+ *
+ * The gates rule on a snapshot and the apply copies from the disk, some seconds
+ * later. Anything that wrote to the staging tree in between would be applied
+ * without having been checked, so a file that no longer matches is not applied.
+ */
+function stagedContent(stagingDir: string, file: AgentChangedFile): Buffer {
+  const content = readFileSync(join(stagingDir, file.path));
+  if (hashBuffer(content) !== file.afterHash)
+    throw new Error(`staged file changed after it was checked: ${file.path}`);
+  return content;
 }
 
 function hasSymlinkAncestor(projectDir: string, relativePath: string): boolean {

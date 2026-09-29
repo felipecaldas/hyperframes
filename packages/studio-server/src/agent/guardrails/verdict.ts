@@ -50,6 +50,8 @@ const GATE_LABELS: Record<AgentRefusalGate, string> = {
   "unsupported-change": "the change touched a file Tabario AI is not allowed to edit",
   conflict: "the project was changed by something else while Tabario AI was working",
   egress: "the change would have made the project load from or send to another host",
+  "unasked-change": "the change included something the request did not ask for",
+  "unchecked-change": "the change could not be checked against what was asked",
 };
 
 /** The refusal that stopped the apply, when one did. */

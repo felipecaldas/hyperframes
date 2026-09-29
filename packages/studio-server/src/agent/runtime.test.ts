@@ -94,3 +94,31 @@ describe("a turn that was refused does not get to claim it succeeded", () => {
     expect(source).toContain("const stopped = timeouts.reason() ?? failure;");
   });
 });
+
+describe("the check at apply is in the path of every change (TAB-1222)", () => {
+  it("runs before the meter is recorded, so a refused run still says what the check cost", () => {
+    const checked = source.indexOf("await this.checkStaged(job, thread, trees, timeouts.touch)");
+    const metered = source.indexOf("this.recordMeter(job, ledger, result, tools, staged.review)");
+    const applied = source.indexOf("await this.validateAndApply(job, ledger, trees, staged)");
+    expect(checked).toBeGreaterThan(-1);
+    expect(metered).toBeGreaterThan(checked);
+    expect(applied).toBeGreaterThan(metered);
+  });
+
+  it("puts the check's ruling ahead of every other gate at apply", () => {
+    const ruling = source.indexOf("change.review?.refusal ??");
+    expect(ruling).toBeGreaterThan(-1);
+    expect(source.indexOf("await this.stagedRefusal(", ruling)).toBeGreaterThan(ruling);
+  });
+
+  it("measures the model's change from the baseline, and hands the check no material", () => {
+    expect(source).toContain("compareAgentSnapshots(baseline, diff.after)");
+    // The check is given the transcript and picks the user's words out of it.
+    // It is never given the request, which is where a panel's material lives.
+    const call = source.slice(source.indexOf("return reviewChange({"));
+    const given = call.slice(0, call.indexOf("});"));
+    expect(given).toContain("transcript: thread.transcript");
+    expect(given).not.toContain("material");
+    expect(given).not.toContain("context");
+  });
+});
