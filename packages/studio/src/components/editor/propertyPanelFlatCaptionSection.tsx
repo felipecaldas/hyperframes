@@ -25,6 +25,9 @@ import { useStudioShellContextOptional } from "../../contexts/StudioContext";
 /** The data attributes (without the `data-` prefix) the inspector owns. */
 const CAPTION_STYLE_ATTRS = ["active-color", "rest-color", "active-scale"] as const;
 
+/** A caption's colour when its file sets none. Composition data, not Studio chrome. */
+const DEFAULT_CAPTION_COLOR = "#ffffff";
+
 export function isCaptionSelection(selection: DomEditSelection): boolean {
   return (
     selection.element.hasAttribute("data-hf-atomic") &&
@@ -102,8 +105,8 @@ export function FlatCaptionSection({
   const [appliedCount, setAppliedCount] = useState<number | null>(null);
 
   const el = element.element;
-  const activeColor = el.getAttribute("data-active-color") ?? "#ffffff";
-  const restColor = el.getAttribute("data-rest-color") ?? "#ffffff";
+  const activeColor = el.getAttribute("data-active-color") ?? DEFAULT_CAPTION_COLOR;
+  const restColor = el.getAttribute("data-rest-color") ?? DEFAULT_CAPTION_COLOR;
   const activeScale = el.getAttribute("data-active-scale") ?? "1";
 
   const applyToAll = async () => {

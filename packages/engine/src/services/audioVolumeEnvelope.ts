@@ -53,7 +53,6 @@ interface WavFmt {
 /** The `fmt ` chunk, or null for a format this cannot safely edit in place. */
 function readFmtChunk(buffer: Buffer, body: number, size: number): WavFmt | null {
   const format = wavFormatTag(buffer, body, size);
-  if (format === null) return null;
   const bits = buffer.readUInt16LE(body + 14);
   const float = format === FLOAT_FORMAT;
   if (!float && format !== PCM_FORMAT) return null;

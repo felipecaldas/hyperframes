@@ -1,22 +1,14 @@
-export interface StoredPreviewZoomState {
-  zoomPercent: number;
-  panX: number;
-  panY: number;
-}
+import type { SerializedDockview } from "dockview-react";
+import { parseDockLayout } from "../components/dock/dockLayoutSchema";
 
 export type TimelineTimeDisplayMode = "time" | "frame";
 
 export interface StudioUiPreferences {
-  leftCollapsed?: boolean;
-  leftWidth?: number;
-  rightWidth?: number;
   timelineVisible?: boolean;
-  timelineHeight?: number;
   playbackRate?: number;
   audioMuted?: boolean;
   audioVolume?: number;
   thumbnailMode?: "adaptive" | "hidden";
-  previewZoom?: StoredPreviewZoomState;
   recentBlocks?: string[];
   snapEnabled?: boolean;
   gridVisible?: boolean;
@@ -26,6 +18,8 @@ export interface StudioUiPreferences {
   snapToGrid?: boolean;
   /** Timeline magnet: snap clip drags/trims/drops to playhead, clip edges, and beats. */
   timelineSnapEnabled?: boolean;
+  /** Audio level meters at the timeline's right edge; hidden unless enabled here. */
+  audioMetersVisible?: boolean;
   /** Keeps the main track gapless: deleting a clip closes the gap. Distinct
    *  from `timelineSnapEnabled` ("Magnet", drag/trim snapping). */
   rippleEditEnabled?: boolean;
@@ -47,6 +41,8 @@ export interface StudioUiPreferences {
    * intentionally scoped to one mount.
    */
   agentToolsEnabled?: boolean;
+  /** The dock's serialized panel tree; parsed by `parseDockLayout` on read. */
+  dockLayout?: SerializedDockview;
 }
 
 const STUDIO_UI_PREFERENCES_KEY = "hf-studio-ui-preferences";
@@ -78,20 +74,8 @@ function readStorage(storage: Storage | null, key: string): StudioUiPreferences 
     if (!isRecord(parsed)) return {};
 
     const preferences: StudioUiPreferences = {};
-    if (typeof parsed.leftCollapsed === "boolean") {
-      preferences.leftCollapsed = parsed.leftCollapsed;
-    }
-    if (typeof parsed.leftWidth === "number" && Number.isFinite(parsed.leftWidth)) {
-      preferences.leftWidth = parsed.leftWidth;
-    }
-    if (typeof parsed.rightWidth === "number" && Number.isFinite(parsed.rightWidth)) {
-      preferences.rightWidth = parsed.rightWidth;
-    }
     if (typeof parsed.timelineVisible === "boolean") {
       preferences.timelineVisible = parsed.timelineVisible;
-    }
-    if (typeof parsed.timelineHeight === "number" && Number.isFinite(parsed.timelineHeight)) {
-      preferences.timelineHeight = parsed.timelineHeight;
     }
     if (typeof parsed.playbackRate === "number" && Number.isFinite(parsed.playbackRate)) {
       preferences.playbackRate = parsed.playbackRate;
@@ -111,19 +95,6 @@ function readStorage(storage: Storage | null, key: string): StudioUiPreferences 
       preferences.thumbnailMode = parsed.thumbnailMode;
     } else if (typeof parsed.thumbnailsEnabled === "boolean") {
       preferences.thumbnailMode = parsed.thumbnailsEnabled ? "adaptive" : "hidden";
-    }
-    if (isRecord(parsed.previewZoom)) {
-      const { zoomPercent, panX, panY } = parsed.previewZoom;
-      if (
-        typeof zoomPercent === "number" &&
-        Number.isFinite(zoomPercent) &&
-        typeof panX === "number" &&
-        Number.isFinite(panX) &&
-        typeof panY === "number" &&
-        Number.isFinite(panY)
-      ) {
-        preferences.previewZoom = { zoomPercent, panX, panY };
-      }
     }
     if (Array.isArray(parsed.recentBlocks)) {
       preferences.recentBlocks = parsed.recentBlocks.filter(
@@ -151,6 +122,9 @@ function readStorage(storage: Storage | null, key: string): StudioUiPreferences 
     if (typeof parsed.timelineSnapEnabled === "boolean") {
       preferences.timelineSnapEnabled = parsed.timelineSnapEnabled;
     }
+    if (typeof parsed.audioMetersVisible === "boolean") {
+      preferences.audioMetersVisible = parsed.audioMetersVisible;
+    }
     if (typeof parsed.rippleEditEnabled === "boolean") {
       preferences.rippleEditEnabled = parsed.rippleEditEnabled;
     }
@@ -169,6 +143,8 @@ function readStorage(storage: Storage | null, key: string): StudioUiPreferences 
     if (typeof parsed.agentToolsEnabled === "boolean") {
       preferences.agentToolsEnabled = parsed.agentToolsEnabled;
     }
+    const dockLayout = parseDockLayout(parsed.dockLayout);
+    if (dockLayout) preferences.dockLayout = dockLayout;
     return preferences;
   } catch {
     return {};

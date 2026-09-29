@@ -12,6 +12,7 @@ import type { ClipManifestClip } from "../lib/playbackTypes";
 export interface TimelineElement {
   id: string;
   label?: string;
+  transitionLabel?: string;
   key?: string;
   kind?: ClipManifestClip["kind"];
   tag: string;
@@ -54,6 +55,12 @@ export interface TimelineElement {
   playbackRate?: number;
   sourceDuration?: number;
   volume?: number;
+  /** A video with sound to mix (`data-has-audio`, or unmuted without it); `muted` silences it. */
+  hasAudio?: boolean;
+  muted?: boolean;
+  /** Clip-edge fades from `data-fade-in` / `data-fade-out`, seconds; absent means none. */
+  fadeIn?: number;
+  fadeOut?: number;
   /** Verbatim `data-fx-chain` / `data-automation`; see automationLaneData. */
   fxChain?: string;
   automation?: string;
@@ -77,10 +84,8 @@ export interface TimelineElement {
   audioGroupFxChain?: string;
   audioGroupAutomation?: string;
   /**
-   * Set by useTimelineRowElements on an inline-expanded sub-composition
-   * child: the absolute master-timeline start of the sub-comp host the child
-   * lives in. Presence marks the element as expanded; edits subtract it to get
-   * the child's local (sourceFile-relative) time. Works at any nesting depth.
+   * Legacy source-coordinate marker for an inline sub-composition child. The
+   * current timeline keeps sub-compositions as single rows.
    */
   expandedParentStart?: number;
   expandedHostKey?: string;

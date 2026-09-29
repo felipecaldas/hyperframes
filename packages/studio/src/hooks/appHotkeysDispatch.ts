@@ -2,12 +2,13 @@ import { automationOwnsKey } from "./useAutomationSelectionKeyboard";
 import { usePlayerStore } from "../player";
 import type { TimelineElement } from "../player";
 import type { DomEditSelection } from "../components/editor/domEditing";
-import type { LeftSidebarHandle } from "../components/sidebar/LeftSidebar";
+import { useDockLayoutStore } from "../components/dock/dockLayoutStore";
 import { isTypingTarget } from "../utils/typingTarget";
 import { isEditableTarget } from "../utils/timelineDiscovery";
 import { shouldIgnoreHistoryShortcut } from "../utils/studioHelpers";
 import { canSplitElement } from "../utils/timelineElementSplit";
 import { trackStudioEvent } from "../utils/studioTelemetry";
+import { STUDIO_PLAIN_KEYS } from "../player/components/studioShortcuts";
 
 // Extracted from useAppHotkeys.ts to keep it under the studio 600-line cap,
 // following useTimelineDeleteOps's precedent. Pure functions, no hooks — the
@@ -52,9 +53,13 @@ export interface HotkeyCallbacks {
   onToggleRecording?: () => void;
   onGroupSelection?: () => void;
   onUngroupSelection?: () => void;
-  leftSidebarRef: React.RefObject<LeftSidebarHandle | null>;
   domEditSelectionRef: React.MutableRefObject<DomEditSelection | null>;
   showToast: (message: string, tone?: "error" | "info") => void;
+  readOnlyPreview: boolean;
+}
+
+function timelineOwnsKey(event: KeyboardEvent): boolean {
+  return event.target instanceof Element && event.target.closest("[data-studio-timeline]") !== null;
 }
 
 /** Exported for tests, like dispatchPlainKey below: lets the Cmd+C/Cmd+V
@@ -84,18 +89,19 @@ export function dispatchModifierKey(
   if (event.key === "1") {
     event.preventDefault();
     trackStudioEvent("keyboard_shortcut", { action: "tab_compositions" });
-    cb.leftSidebarRef.current?.selectTab("compositions");
+    useDockLayoutStore.getState().activatePanel("compositions");
     return true;
   }
   if (event.key === "2") {
     event.preventDefault();
     trackStudioEvent("keyboard_shortcut", { action: "tab_assets" });
-    cb.leftSidebarRef.current?.selectTab("assets");
+    useDockLayoutStore.getState().activatePanel("assets");
     return true;
   }
 
   if (key === "g" && !event.altKey && !isTypingTarget(event.target)) {
     event.preventDefault();
+    if (cb.readOnlyPreview) return true;
     if (event.shiftKey) cb.onUngroupSelection?.();
     else cb.onGroupSelection?.();
     return true;
@@ -112,6 +118,12 @@ export function dispatchModifierKey(
         event.preventDefault();
         trackStudioEvent("keyboard_shortcut", { action: "copy" });
       }
+      return true;
+    }
+    const previewOwnsMutation =
+      cb.readOnlyPreview && cb.domEditSelectionRef.current !== null && !timelineOwnsKey(event);
+    if (previewOwnsMutation && ["v", "x", "d"].includes(key)) {
+      event.preventDefault();
       return true;
     }
     if (key === "v") {
@@ -147,7 +159,7 @@ export function dispatchModifierKey(
  *  Delete arbitration between keyframes, an automation range and the clip can
  *  be asserted without standing up the whole hook. */
 export function dispatchPlainKey(event: KeyboardEvent, key: string, cb: HotkeyCallbacks): void {
-  if (key === "f" && !event.shiftKey && !event.altKey) {
+  if (key === STUDIO_PLAIN_KEYS.fullscreen && !event.shiftKey && !event.altKey) {
     event.preventDefault();
     if (document.fullscreenElement) void document.exitFullscreen();
     else
@@ -155,10 +167,11 @@ export function dispatchPlainKey(event: KeyboardEvent, key: string, cb: HotkeyCa
     return;
   }
 
-  if (event.key === "s" && !event.altKey) {
+  if (event.key === STUDIO_PLAIN_KEYS.split && !event.altKey) {
     // Reserve bare `s` for Split even when the current selection cannot split,
     // so secondary listeners do not reinterpret the same key as Snap toggle.
     event.preventDefault();
+    if (cb.readOnlyPreview) return;
     const { selectedElementId, elements, currentTime } = usePlayerStore.getState();
     if (selectedElementId) {
       const el = elements.find((e) => (e.key ?? e.id) === selectedElementId);
@@ -191,6 +204,14 @@ export function dispatchPlainKey(event: KeyboardEvent, key: string, cb: HotkeyCa
   if (key === "v" && !event.shiftKey && !event.altKey) {
     event.preventDefault();
     usePlayerStore.getState().setActiveTool("select");
+    return;
+  }
+
+  if ((key === "[" || key === "]") && !event.shiftKey && !event.altKey) {
+    event.preventDefault();
+    const store = usePlayerStore.getState();
+    if (key === "[") store.selectLeftward();
+    else store.selectRightward();
     return;
   }
 
@@ -241,8 +262,10 @@ export function dispatchPlainKey(event: KeyboardEvent, key: string, cb: HotkeyCa
     // the timeline left other selected elements behind. Timeline stays as the
     // fallback for rows with no canvas node (audio, an inactive comp).
     const domSel = cb.domEditSelectionRef.current;
-    if (domSel) {
+    const timelineOwnsDelete = timelineOwnsKey(event);
+    if (domSel && !timelineOwnsDelete) {
       event.preventDefault();
+      if (cb.readOnlyPreview) return;
       // The whole marquee group, not just the primary the ref holds.
       void cb.handleDomEditElementDelete(domSel, { expandGroup: true });
       return;
@@ -260,7 +283,12 @@ export function dispatchPlainKey(event: KeyboardEvent, key: string, cb: HotkeyCa
     return;
   }
 
-  if (event.key === "r" && !event.shiftKey && !event.altKey && cb.onToggleRecording) {
+  if (
+    event.key === STUDIO_PLAIN_KEYS.record &&
+    !event.shiftKey &&
+    !event.altKey &&
+    cb.onToggleRecording
+  ) {
     event.preventDefault();
     cb.onToggleRecording();
   }

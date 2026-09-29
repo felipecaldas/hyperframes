@@ -3,6 +3,7 @@ import { buildProjectApiPath } from "../utils/projectRouting";
 import { useState, useCallback, useRef, useEffect } from "react";
 import { readTagSnippetByTarget } from "../utils/sourcePatcher";
 import { toProjectAbsolutePath, type AgentModalAnchorPoint } from "../utils/studioHelpers";
+import { liveMarkupWithoutPreviewMarks } from "../utils/authoredSource";
 import { buildElementAgentPrompt, type DomEditSelection } from "../components/editor/domEditing";
 import { usePlayerStore } from "../player";
 import { openAgentBridge } from "../utils/agentBridge";
@@ -88,7 +89,8 @@ export function useAskAgentModal({
       if (!domEditSelection) return;
 
       const targetPath = domEditSelection.sourceFile || activeCompPath || "index.html";
-      const tagSnippet = agentPromptTagSnippet ?? domEditSelection.element.outerHTML;
+      const tagSnippet =
+        agentPromptTagSnippet ?? liveMarkupWithoutPreviewMarks(domEditSelection.element);
       const prompt = buildElementAgentPrompt({
         selection: domEditSelection,
         currentTime: usePlayerStore.getState().currentTime,

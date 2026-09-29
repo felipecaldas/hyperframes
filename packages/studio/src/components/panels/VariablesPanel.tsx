@@ -5,7 +5,6 @@ import type {
   VariableUsageReport,
   VariableValidationIssue,
 } from "@hyperframes/sdk";
-import type { EditHistoryKind } from "../../utils/editHistory";
 import type { PublishSdkSession } from "../../utils/sdkCutover";
 import { useStudioPlaybackContext, useStudioShellContext } from "../../contexts/StudioContext";
 import { useDomEditContext } from "../../contexts/DomEditContext";
@@ -37,7 +36,6 @@ export interface StudioEditPersistenceProps {
   reloadPreview: () => void;
   recordEdit: (entry: {
     label: string;
-    kind: EditHistoryKind;
     files: Record<string, { before: string; after: string }>;
   }) => Promise<void>;
 }
@@ -96,12 +94,12 @@ function VariableRow({
     <div className="space-y-1.5 rounded-lg border border-neutral-800/70 p-2">
       <div className="flex items-center gap-1.5">
         <span className="truncate text-[10px] font-medium text-neutral-300">{decl.label}</span>
-        <span className="rounded bg-neutral-800 px-1 py-px font-mono text-[8px] text-neutral-500">
+        <span className="rounded-sm bg-neutral-800 px-1 py-px font-mono text-[8px] text-neutral-500">
           {decl.type}
         </span>
         {unused && (
           <span
-            className="rounded bg-amber-900/40 px-1 py-px text-[8px] text-amber-400"
+            className="rounded-sm bg-amber-900/40 px-1 py-px text-[8px] text-amber-400"
             title="No script reads this variable"
           >
             unused
@@ -189,7 +187,7 @@ function PreviewModeHeader({
         <button
           type="button"
           onClick={onReset}
-          className="h-6 rounded px-2 text-[10px] text-neutral-400 hover:text-neutral-200"
+          className="h-6 rounded-sm px-2 text-[10px] text-neutral-400 hover:text-neutral-200"
         >
           Reset
         </button>
@@ -246,7 +244,7 @@ const EMPTY_STATE = (
   </p>
 );
 
-// Panel orchestrator — JSX conditionals per section, same shape as StudioRightPanel.
+// Panel orchestrator — JSX conditionals per section, same shape as StudioRightPanels.
 // fallow-ignore-next-line complexity
 export const VariablesPanel = memo(function VariablesPanel({
   sdkSession,
@@ -256,7 +254,7 @@ export const VariablesPanel = memo(function VariablesPanel({
 }: VariablesPanelProps) {
   const { activeCompPath, showToast } = useStudioShellContext();
   const { refreshKey } = useStudioPlaybackContext();
-  const { readProjectFile, writeProjectFile, fileTree, compositions } = useFileManagerContext();
+  const { readProjectFile, writeProjectFile, compositions } = useFileManagerContext();
   const { domEditSelection } = useDomEditContext();
   // Master view (no activeCompPath) targets the real main composition, not a
   // hardcoded index.html — used for both the persist write target and the
@@ -539,8 +537,8 @@ export const VariablesPanel = memo(function VariablesPanel({
           </button>
         )}
         <VariablesOtherCompositions
-          fileTree={fileTree}
-          excludePath={activeCompPath ?? "index.html"}
+          compositionPaths={compositions}
+          excludePath={effectiveCompPath}
           refreshKey={`${refreshKey}:${revision}`}
           readProjectFile={readProjectFile}
           writeProjectFile={writeProjectFile}

@@ -58,7 +58,7 @@ function readWavChunks(buf: Buffer): {
   for (const { id, body, size } of riffChunks(buf)) {
     if (id === "fmt ") {
       const format = wavFormatTag(buf, body, size);
-      if (format === null) throw new AudioFxRenderError("Invalid or unsupported WAV fmt chunk");
+      if (format === null) throw new AudioFxRenderError("Invalid or unsupported WAV format header");
       head.format = format;
       head.channels = buf.readUInt16LE(body + 2);
       head.sampleRate = buf.readUInt32LE(body + 4);

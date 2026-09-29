@@ -5,7 +5,6 @@ import type { TimelineElement } from "../player";
 import type { ImportedFontAsset } from "../components/editor/fontAssets";
 import type { RightPanelTab } from "../utils/studioHelpers";
 import type { PatchTarget } from "../utils/sourcePatcher";
-import type { SidebarTab } from "../components/sidebar/LeftSidebar";
 import type { Composition } from "@hyperframes/sdk";
 import { sdkCutoverPersist, sdkDeletePersist, type PublishSdkSession } from "../utils/sdkCutover";
 import { runResolverShadow, recordResolverParity } from "../utils/sdkResolverShadow";
@@ -20,6 +19,7 @@ import { useDomEditWiring } from "./useDomEditWiring";
 import { useGsapAwareEditing } from "./useGsapAwareEditing";
 import { useStudioSelectionPublisher } from "./useStudioSelectionPublisher";
 import { useKeyframeEaseCommits } from "./useKeyframeEaseCommits";
+import { useCommitPreflightCapabilities } from "./useCommitPreflightCapabilities";
 import type { DomEditSelection } from "../components/editor/domEditingTypes";
 import { membersForDelete, timelineElementsForDelete } from "./domEditDeleteMembers";
 import type { RecordEditInput } from "./domEditDeleteMembers";
@@ -53,14 +53,13 @@ export interface UseDomEditSessionParams extends DomEditTimelineParams {
   reloadPreview: () => void;
   setRefreshKey: React.Dispatch<React.SetStateAction<number>>;
   openSourceForSelection?: (sourceFile: string, target: PatchTarget) => void;
-  selectSidebarTab?: (tab: SidebarTab) => void;
-  getSidebarTab?: () => SidebarTab;
   sdkSession?: Composition | null;
   publishSdkSession?: PublishSdkSession;
   forceReloadSdkSession?: () => void;
   /** The timeline context menu's delete op — a canvas selection that IS a
    *  timeline row hands off here instead of the REST remove-elements path. */
   handleTimelineElementsDelete: (elements: TimelineElement[]) => Promise<void>;
+  readOnlyPreview: boolean;
 }
 
 export function useDomEditSession({
@@ -97,14 +96,14 @@ export function useDomEditSession({
   reloadPreview,
   setRefreshKey: _setRefreshKey,
   openSourceForSelection,
-  selectSidebarTab,
-  getSidebarTab,
   sdkSession,
   publishSdkSession,
   forceReloadSdkSession,
   handleTimelineElementsDelete,
+  readOnlyPreview,
 }: UseDomEditSessionParams) {
   const isMasterView = !activeCompPath || activeCompPath === "index.html";
+  const previewCaptionEditMode = captionEditMode && !readOnlyPreview;
   void _setRefreshKey;
   const {
     domEditSelection,
@@ -130,7 +129,7 @@ export function useDomEditSession({
     activeCompPath,
     isMasterView,
     compIdToSrc,
-    captionEditMode,
+    captionEditMode: previewCaptionEditMode,
     previewIframeRef,
     timelineElements,
     getTimelineSelectionSet,
@@ -252,6 +251,7 @@ export function useDomEditSession({
     refreshDomEditSelectionFromPreview,
     buildDomSelectionFromTarget,
     forceReloadSdkSession,
+    readOnlyPreview,
     onTrySdkPersist: sdkSession
       ? (selection, operations, originalContent, targetPath, options) => {
           // Decoupled tripwire, runs regardless of the cutover flag. originalContent lets
@@ -410,7 +410,6 @@ export function useDomEditSession({
     handleGsapRemoveAllKeyframes,
     handleResetSelectedElementKeyframes,
   } = useDomEditWiring({
-    // fallow-ignore-next-line code-duplication
     projectId,
     activeCompPath,
     domEditSelection,
@@ -419,7 +418,7 @@ export function useDomEditSession({
     refreshDomEditGroupSelectionsFromPreview,
     previewIframeRef,
     previewIframe,
-    captionEditMode,
+    captionEditMode: previewCaptionEditMode,
     refreshKey,
     gsapCacheVersion,
     bumpGsapCache,
@@ -430,8 +429,6 @@ export function useDomEditSession({
     applyDomSelection,
     buildDomSelectionFromTarget,
     openSourceForSelection,
-    selectSidebarTab,
-    getSidebarTab,
     updateGsapProperty,
     updateGsapMeta,
     deleteGsapAnimation,
@@ -458,7 +455,7 @@ export function useDomEditSession({
     handleBlockedDomMove,
     handleDomManualDragStart,
   } = usePreviewInteraction({
-    captionEditMode,
+    captionEditMode: previewCaptionEditMode,
     compositionLoading,
     previewIframeRef,
     showToast,
@@ -498,9 +495,17 @@ export function useDomEditSession({
   });
   const { handleUpdateSegmentEase, handleUpdateKeyframeEase, handleSetAllKeyframeEases } =
     useKeyframeEaseCommits({ gsapCommitMutation, domEditSelectionRef });
+  const committable = useCommitPreflightCapabilities({
+    projectId,
+    enabled: gsapCommitMutation !== null,
+    selection: domEditSelection,
+    groupSelections: domEditGroupSelections,
+    previewIframeRef,
+    version: gsapCacheVersion,
+  });
   return {
-    domEditSelection,
-    domEditGroupSelections,
+    domEditSelection: committable.selection,
+    domEditGroupSelections: committable.groupSelections,
     domEditHoverSelection,
     activeGroupElement,
     agentModalOpen,
@@ -515,6 +520,7 @@ export function useDomEditSession({
     handlePreviewCanvasPointerLeave,
     applyDomSelection,
     clearDomSelection,
+    refreshDomEditSelectionFromPreview,
     handleDomStyleCommit,
     handleDomStyleCommitForSelection,
     handleDomAttributeCommit,

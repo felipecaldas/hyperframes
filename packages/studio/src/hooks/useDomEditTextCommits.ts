@@ -1,9 +1,5 @@
 import { useCallback, useRef } from "react";
-import {
-  isImageBackgroundValue,
-  isManualGeometryStyleProperty,
-  normalizeDomEditStyleValue,
-} from "../utils/studioHelpers";
+import { normalizeDomEditStyleValue } from "../utils/studioHelpers";
 import {
   injectPreviewGoogleFont,
   injectPreviewImportedFont,
@@ -20,6 +16,12 @@ import {
 } from "../components/editor/domEditing";
 import type { ImportedFontAsset } from "../components/editor/fontAssets";
 import type { PersistDomEditOperations } from "./domEditCommitTypes";
+import { canEditElementTextInline } from "../components/editor/domEditInlineText";
+import {
+  buildCaptionWordSpans,
+  buildNextDomTextFields,
+  planDomTextCommit,
+} from "./domEditTextCommitPlan";
 import { reportDomEditPersistFailure } from "./domEditPersistFailure";
 import {
   bumpDomEditCommitMapVersion,
@@ -28,19 +30,9 @@ import {
   runReportedDomEditCommit,
   type DomEditCommitOutcome,
 } from "./domEditCommitRunner";
-import {
-  buildCaptionWordSpans,
-  buildNextDomTextFields,
-  planDomTextCommit,
-} from "./domEditTextCommitPlan";
+import { commitDomStyles } from "./domStyleCommit";
 import { useDomEditAttributeCommits } from "./useDomEditAttributeCommits";
 import type { InlineTextEditCommit } from "./useInlineTextEdit";
-import {
-  buildDomStyleCommitOperations,
-  canCommitInlineTextSelection,
-  ownsCurrentPreviewElement,
-  resyncDomTextSelectionFromPreview,
-} from "./domEditCommitHelpers";
 
 // ── Types ──
 
@@ -60,6 +52,36 @@ export interface UseDomEditTextCommitsParams {
   ) => Promise<DomEditSelection | null>;
   persistDomEditOperations: PersistDomEditOperations;
   resolveImportedFontAsset: (fontFamilyValue: string) => ImportedFontAsset | null;
+  readOnlyPreview: boolean;
+}
+
+function canCommitInlineTextSelection(selection: DomEditSelection, element: HTMLElement): boolean {
+  if (selection.isCompositionHost || selection.isInsideLockedComposition) return false;
+  return canEditElementTextInline(element);
+}
+
+function ownsCurrentPreviewElement(
+  selection: DomEditSelection,
+  element: HTMLElement,
+  document: Document | null | undefined,
+): document is Document {
+  if (!document || !element.isConnected) return false;
+  return element === selection.element && element.ownerDocument === document;
+}
+
+async function resyncDomTextSelectionFromPreview(
+  doc: Document | null | undefined,
+  selection: DomEditSelection,
+  activeCompPath: string | null,
+  buildDomSelectionFromTarget: UseDomEditTextCommitsParams["buildDomSelectionFromTarget"],
+  applyDomSelection: UseDomEditTextCommitsParams["applyDomSelection"],
+): Promise<void> {
+  if (!doc) return;
+  const refreshed = findElementForSelection(doc, selection, activeCompPath);
+  if (!refreshed) return;
+  const nextSelection = await buildDomSelectionFromTarget(refreshed);
+  if (!nextSelection) return;
+  applyDomSelection(nextSelection, { revealPanel: false, preserveGroup: true });
 }
 
 // ── Hook ──
@@ -74,7 +96,10 @@ export function useDomEditTextCommits({
   buildDomSelectionFromTarget,
   persistDomEditOperations,
   resolveImportedFontAsset,
+  readOnlyPreview,
 }: UseDomEditTextCommitsParams) {
+  const latestReadOnlyPreviewRef = useRef(readOnlyPreview);
+  latestReadOnlyPreviewRef.current = readOnlyPreview;
   const domTextCommitVersionRef = useRef(new Map<string, symbol>());
   const domStyleCommitVersionRef = useRef(new Map<string, symbol>());
 
@@ -94,81 +119,20 @@ export function useDomEditTextCommits({
   });
 
   const handleDomStyleCommitForSelection = useCallback(
-    async (
-      selection: DomEditSelection,
-      property: string,
-      value: string,
-    ): Promise<DomEditCommitOutcome> => {
-      if (isManualGeometryStyleProperty(property))
-        return domEditCommitDeclined("geometry-property");
-      if (!selection.capabilities.canEditStyles) {
-        return domEditCommitDeclined("styles-not-editable");
-      }
-      const styleCommitKey = `${getDomEditTargetKey(selection)}:${property}`;
-      const isLatestStyleCommit = bumpDomEditCommitMapVersion(
-        domStyleCommitVersionRef.current,
-        styleCommitKey,
-      );
-      const importedFont = property === "font-family" ? resolveImportedFontAsset(value) : null;
-      const iframe = previewIframeRef.current;
-      const doc = iframe?.contentDocument;
-      const normalizedValue = normalizeDomEditStyleValue(property, value);
-      const isImageBackgroundCommit =
-        property === "background-image" && isImageBackgroundValue(value);
-      let editedElement: HTMLElement | null = null;
-      let previousInlineValue: string | null = null;
-      const operations = buildDomStyleCommitOperations(property, value, isImageBackgroundCommit);
-      // Inline-style commits never full-reload the preview (that blanks the iframe
-      // until it re-renders): the live element was already mutated optimistically in
-      // apply(). z-index is no exception — setting `element.style.zIndex` restacks the
-      // element in-browser immediately, so a reload would only cost a black blink.
-      const skipRefresh = true;
-
-      return runReportedDomEditCommit({
-        capture: () => {
-          if (!doc) return;
-          const el = findElementForSelection(doc, selection, activeCompPath);
-          if (!el) return;
-          editedElement = el;
-          previousInlineValue = el.style.getPropertyValue(property);
+    (selection: DomEditSelection, property: string, value: string): Promise<DomEditCommitOutcome> =>
+      commitDomStyles(
+        {
+          activeCompPath,
+          previewIframeRef,
+          persistDomEditOperations,
+          showToast,
+          versions: domStyleCommitVersionRef.current,
+          resolveImportedFontAsset,
+          resync: refreshDomEditSelectionFromPreview,
         },
-        apply: () => {
-          if (!editedElement) return;
-          editedElement.style.setProperty(property, normalizedValue);
-          if (property === "font-family" && doc) {
-            injectPreviewGoogleFont(doc, value);
-            if (importedFont) injectPreviewImportedFont(doc, importedFont);
-          }
-          if (isImageBackgroundCommit) {
-            editedElement.style.setProperty("background-position", "center");
-            editedElement.style.setProperty("background-repeat", "no-repeat");
-            editedElement.style.setProperty("background-size", "contain");
-          }
-        },
-        persist: () =>
-          persistDomEditOperations(selection, operations, {
-            label: "Edit layer style",
-            skipRefresh,
-            prepareContent: importedFont
-              ? (html, sourceFile) => ensureImportedFontFace(html, importedFont, sourceFile)
-              : undefined,
-          }),
-        shouldRevert: () => isLatestStyleCommit(),
-        revert: () => {
-          if (!editedElement || previousInlineValue === null) return;
-          // ponytail: background-image side-effect styles are not reverted here.
-          if (previousInlineValue === "") {
-            editedElement.style.removeProperty(property);
-          } else {
-            editedElement.style.setProperty(property, previousInlineValue);
-          }
-        },
-        onError: (error) => reportDomEditPersistFailure(selection, operations, error, showToast),
-        shouldResync: isLatestStyleCommit,
-        resync: () => refreshDomEditSelectionFromPreview(selection),
-        onFinally: isLatestStyleCommit.release,
-      });
-    },
+        selection,
+        { [property]: value },
+      ),
     [
       activeCompPath,
       persistDomEditOperations,
@@ -307,6 +271,10 @@ export function useDomEditTextCommits({
   const handleDomRichTextCommit = useCallback(
     async ({ element, html, previousHtml }: InlineTextEditCommit) => {
       if (!domEditSelection) return;
+      if (latestReadOnlyPreviewRef.current) {
+        if (element.isConnected && element.innerHTML === html) element.innerHTML = previousHtml;
+        return;
+      }
       // The same gate that let the edit open, not the design panel's.
       //
       // The panel's rule is about its text fields, and it has none for an

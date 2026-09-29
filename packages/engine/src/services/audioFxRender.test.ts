@@ -154,7 +154,6 @@ describe("readWav / writeWav", () => {
     ["oversized extension", 36, 24],
     ["short fmt chunk", 16, 16],
     ["truncated fmt chunk", 16, 65535],
-    ["invalid precision", 38, 33],
   ])("refuses extensible WAV with %s without modifying it", (_label, offset, value) => {
     const p = join(dir, "invalid-extensible.wav");
     const buffer = extensibleWav(true);

@@ -25,7 +25,7 @@ function LintFindingRow({
       <div className="flex items-start gap-2">
         <WarningIcon
           size={14}
-          className={`${isError ? "text-red-400" : "text-amber-400"} flex-shrink-0 mt-0.5`}
+          className={`${isError ? "text-red-400" : "text-amber-400"} shrink-0 mt-0.5`}
           {...(isError ? { weight: "fill" as const } : {})}
         />
         <div className="min-w-0">
@@ -37,7 +37,7 @@ function LintFindingRow({
           )}
           {finding.fixHint && (
             <div className="flex items-start gap-1 mt-1.5">
-              <CaretRightIcon size={10} className="text-studio-accent flex-shrink-0 mt-0.5" />
+              <CaretRightIcon size={10} className="text-studio-accent shrink-0 mt-0.5" />
               <p className="text-xs text-studio-accent">{finding.fixHint}</p>
             </div>
           )}
@@ -103,7 +103,7 @@ export function LintModal({
 
   return (
     <div
-      className="hf-backdrop-in fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      className="hf-backdrop-in fixed inset-0 z-100 flex items-center justify-center bg-black/60 backdrop-blur-xs"
       onClick={requestClose}
     >
       <div
@@ -112,7 +112,7 @@ export function LintModal({
         aria-modal="true"
         aria-label={title}
         tabIndex={-1}
-        className="bg-neutral-950 border border-neutral-800 rounded-xl shadow-2xl w-full max-w-xl max-h-[80vh] flex flex-col overflow-hidden outline-none"
+        className="bg-neutral-950 border border-neutral-800 rounded-xl shadow-2xl w-full max-w-xl max-h-[80vh] flex flex-col overflow-hidden outline-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
