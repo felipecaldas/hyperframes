@@ -19,14 +19,18 @@ afterEach(() => {
 });
 
 describe("Studio Agent Bridge event state", () => {
-  it("passes generated context and user additions through unchanged", () => {
+  // Amended by TAB-1221: the two used to travel as one string, and now travel
+  // apart. What this pins is unchanged, that the bridge rewrites neither.
+  it("passes the user's words and what was gathered through unchanged, and apart", () => {
     const listener = vi.fn();
     const unsubscribe = subscribeAgentRequests(listener);
-    const prompt = "generated context\n\nUser request: keep this exact → text";
-    openAgentBridge({ kind: "selection", prompt, title: "Hero", registryItem: "neon" });
+    const prompt = "keep this exact → text";
+    const material = "generated context\n\nText: keep this exact too";
+    openAgentBridge({ kind: "selection", prompt, material, title: "Hero", registryItem: "neon" });
     expect(listener).toHaveBeenCalledWith({
       kind: "selection",
       prompt,
+      material,
       title: "Hero",
       registryItem: "neon",
     });

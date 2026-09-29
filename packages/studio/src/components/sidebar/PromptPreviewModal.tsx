@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useDialogBehavior } from "../ui/useDialogBehavior";
 import { openAgentBridge } from "../../utils/agentBridge";
+import { catalogRequestParts } from "../../utils/agentRequestParts";
 
 export function PromptPreviewModal({
   title,
@@ -52,9 +53,14 @@ export function PromptPreviewModal({
   // `requestClose`: the dirty-draft veto exists to stop a stray backdrop click
   // discarding edits, and sending is the opposite of discarding them.
   const handleSend = useCallback(() => {
-    openAgentBridge({ kind: "catalog", prompt: valueRef.current, title, registryItem });
+    openAgentBridge({
+      kind: "catalog",
+      ...catalogRequestParts(prompt, valueRef.current),
+      title,
+      registryItem,
+    });
     onClose();
-  }, [onClose, registryItem, title]);
+  }, [onClose, prompt, registryItem, title]);
 
   return (
     <div

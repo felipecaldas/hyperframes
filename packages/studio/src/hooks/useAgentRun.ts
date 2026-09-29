@@ -78,7 +78,8 @@ export interface AgentRunCapabilities {
  * The body of a run request. The selection is read at send time, not render
  * time: the element the user had selected while typing is the one "this"
  * refers to (TAB-1063). Only a typed chat message carries it; the explicit
- * kinds already name their elements in the prompt they build.
+ * kinds name their elements in the material their panel gathered, which is
+ * sent beside the prompt and never inside it (TAB-1221).
  */
 function runRequestBody(
   provider: AgentProvider,
@@ -94,6 +95,7 @@ function runRequestBody(
     kind,
     prompt,
     ...(request?.registryItem ? { registryItem: request.registryItem } : {}),
+    ...(request?.material ? { material: request.material } : {}),
     ...(selection ? { selection } : {}),
   };
 }
@@ -290,6 +292,11 @@ export function useAgentRun(options: UseAgentRunOptions) {
     [nonceHeaders, projectId, provider, request],
   );
 
+  // What goes with the pending turn, known before the server says so when a
+  // panel gathered it (TAB-1221). A typed message has none, and its selection
+  // arrives on the stream.
+  const requestMaterial = request?.material ?? null;
+
   const startRun = useCallback(async () => {
     if (!generatedPrompt || busy) return;
     if (!available || !capabilities?.nonce) {
@@ -301,7 +308,7 @@ export function useAgentRun(options: UseAgentRunOptions) {
     // what made a chat message vanish for the length of a run (TAB-797).
     const prompt = generatedPrompt;
     setPendingPrompt(prompt);
-    setPendingContext(null);
+    setPendingContext(requestMaterial);
     setStartedAt(Date.now());
     onPromptConsumed();
     const returnPrompt = () => {
@@ -343,6 +350,7 @@ export function useAgentRun(options: UseAgentRunOptions) {
     generatedPrompt,
     onPromptConsumed,
     onPromptReturned,
+    requestMaterial,
     submitRun,
     subscribeToRun,
   ]);

@@ -3,6 +3,7 @@ import { XIcon, WarningIcon, CheckCircleIcon, CaretRightIcon } from "@phosphor-i
 import { copyTextToClipboard } from "../utils/clipboard";
 import { useDialogBehavior } from "./ui/useDialogBehavior";
 import { openAgentBridge } from "../utils/agentBridge";
+import { findingsRequestParts } from "../utils/agentRequestParts";
 
 export interface LintFinding {
   severity: "error" | "warning";
@@ -73,7 +74,8 @@ export function LintModal({
   const containerRef = useRef<HTMLDivElement>(null);
   const { requestClose } = useDialogBehavior({ open: true, onClose, containerRef });
 
-  const buildPrompt = () => {
+  /** The findings as text. It quotes the project, so it is never the user's words (TAB-1221). */
+  const describeFindings = () => {
     const lines = findings.map((f) => {
       let line = `[${f.severity}] ${f.message}`;
       if (f.file) line += `\n  File: ${f.file}`;
@@ -81,8 +83,10 @@ export function LintModal({
       return line;
     });
     const pathLine = projectDir ? `Project path: ${projectDir}\n\n` : "";
-    return `${promptIntro} for project "${projectId}":\n\n${pathLine}${lines.join("\n\n")}`;
+    return `${pathLine}${lines.join("\n\n")}`;
   };
+
+  const buildPrompt = () => `${promptIntro} for project "${projectId}":\n\n${describeFindings()}`;
 
   const handleCopyToAgent = async () => {
     const copiedText = await copyTextToClipboard(buildPrompt());
@@ -97,7 +101,11 @@ export function LintModal({
   };
 
   const handleSendToAgent = () => {
-    openAgentBridge({ kind: "lint", prompt: buildPrompt(), title });
+    openAgentBridge({
+      kind: "lint",
+      ...findingsRequestParts(promptIntro, describeFindings()),
+      title,
+    });
     onClose();
   };
 

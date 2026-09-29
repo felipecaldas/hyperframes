@@ -2,7 +2,14 @@ import type { AgentRequestKind } from "@hyperframes/studio-server";
 
 export interface StudioAgentRequest {
   kind: AgentRequestKind;
+  /** What the user typed or chose. It is sent as their turn, so nothing else goes in it. */
   prompt: string;
+  /**
+   * What the panel gathered for the request: an element's details, a range, a
+   * checker's findings (TAB-1221). Sent apart from `prompt` because it quotes
+   * the project, and the model reads it framed as data.
+   */
+  material?: string;
   title?: string;
   registryItem?: string;
 }

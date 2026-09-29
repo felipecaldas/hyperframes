@@ -5,6 +5,7 @@ import { formatTime } from "../lib/time";
 import { buildPromptCopyText, buildTimelineAgentPrompt } from "./timelineEditing";
 import { copyTextToClipboard } from "../../utils/clipboard";
 import { openAgentBridge } from "../../utils/agentBridge";
+import { timelineRequestParts } from "../../utils/agentRequestParts";
 
 interface EditPopoverProps {
   rangeStart: number;
@@ -96,7 +97,7 @@ export function EditPopover({ rangeStart, rangeEnd, anchorX, anchorY, onClose }:
     // window event, not an async clipboard write that the browser can refuse.
     openAgentBridge({
       kind: "timeline",
-      prompt: buildClipboardText(),
+      ...timelineRequestParts(buildClipboardText(), prompt),
       title: `${formatTime(start)} — ${formatTime(end)}`,
     });
     // The draft has been handed off, so it is spent — cleared for the same
@@ -108,7 +109,7 @@ export function EditPopover({ rangeStart, rangeEnd, anchorX, anchorY, onClose }:
       setCopiedAgentPrompt(false);
       onClose();
     }, 800);
-  }, [buildClipboardText, end, onClose, start, storageKey]);
+  }, [buildClipboardText, end, onClose, prompt, start, storageKey]);
 
   const handleCopyPrompt = useCallback(async () => {
     const promptText = buildPromptCopyText(prompt);

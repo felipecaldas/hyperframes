@@ -7,6 +7,7 @@ import { liveMarkupWithoutPreviewMarks } from "../utils/authoredSource";
 import { buildElementAgentPrompt, type DomEditSelection } from "../components/editor/domEditing";
 import { usePlayerStore } from "../player";
 import { openAgentBridge } from "../utils/agentBridge";
+import { elementRequestParts } from "../utils/agentRequestParts";
 
 // ── Types ──
 
@@ -91,7 +92,7 @@ export function useAskAgentModal({
       const targetPath = domEditSelection.sourceFile || activeCompPath || "index.html";
       const tagSnippet =
         agentPromptTagSnippet ?? liveMarkupWithoutPreviewMarks(domEditSelection.element);
-      const prompt = buildElementAgentPrompt({
+      const generated = buildElementAgentPrompt({
         selection: domEditSelection,
         currentTime: usePlayerStore.getState().currentTime,
         timeline: formatTimelineBlock(usePlayerStore.getState().elements),
@@ -101,7 +102,11 @@ export function useAskAgentModal({
         sourceFilePath: toProjectAbsolutePath(projectDir, targetPath),
       });
 
-      openAgentBridge({ kind: "selection", prompt, title: domEditSelection.label });
+      openAgentBridge({
+        kind: "selection",
+        ...elementRequestParts(generated, userInstruction),
+        title: domEditSelection.label,
+      });
 
       setAgentModalOpen(false);
       setAgentPromptSelectionContext(undefined);

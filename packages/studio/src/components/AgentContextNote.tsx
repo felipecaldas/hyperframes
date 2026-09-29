@@ -1,3 +1,5 @@
+import type { StudioAgentRequest } from "../utils/agentBridge";
+
 /**
  * What Tabario AI was told alongside a message, shown under that message
  * (TAB-1194).
@@ -21,9 +23,31 @@ export function AgentContextNote({ context }: { context: string | null | undefin
       <summary className="cursor-pointer text-[10px] text-neutral-500">
         Also sent to Tabario AI
       </summary>
-      <div className="mt-1 whitespace-pre-wrap break-words text-[10px] text-neutral-400">
+      <div className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap break-words text-[10px] text-neutral-400">
         {context}
       </div>
     </details>
+  );
+}
+
+/**
+ * A request a Studio panel handed over, shown before it is sent (TAB-1221).
+ *
+ * It used to be one block under "Generated context", because it was one block:
+ * the user's words and what the panel gathered, joined, and sent as the user's
+ * turn. They are sent apart now, so they are shown apart: the message as the
+ * user will be heard saying it, and under it what goes with it.
+ */
+export function AgentRequestPreview({ request }: { request: StudioAgentRequest }) {
+  return (
+    <div data-agent-request className="rounded border border-neutral-800 p-2">
+      <div className="text-[10px] uppercase text-neutral-500">
+        Ready to send · {request.title ?? request.kind}
+      </div>
+      <div className="mt-1 whitespace-pre-wrap break-words text-xs text-neutral-300">
+        {request.prompt}
+      </div>
+      <AgentContextNote context={request.material} />
+    </div>
   );
 }

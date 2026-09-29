@@ -15,7 +15,7 @@ import {
   type StudioAgentRequest,
 } from "../utils/agentBridge";
 import { toolLabel, useAgentRun } from "../hooks/useAgentRun";
-import { AgentContextNote } from "./AgentContextNote";
+import { AgentContextNote, AgentRequestPreview } from "./AgentContextNote";
 import { AgentVerdictPanel } from "./AgentVerdictPanel";
 
 interface Capabilities {
@@ -475,16 +475,7 @@ export function AgentDrawer({ projectId, beforeRun, onRefresh }: AgentDrawerProp
         <AgentChangedFilesPanel changedFiles={changedFiles} />
         <AgentMeasurementPanel receipt={receipt} />
         <AgentVerdictPanel verdict={busy ? null : verdict} />
-        {request && (
-          <details className="rounded border border-neutral-800 p-2">
-            <summary className="cursor-pointer text-[10px] uppercase text-neutral-500">
-              Generated context · {request.title ?? request.kind}
-            </summary>
-            <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words text-[10px] text-neutral-500">
-              {request.prompt}
-            </pre>
-          </details>
-        )}
+        {request && !busy && <AgentRequestPreview request={request} />}
         {error && (
           <div className="rounded border border-red-900/60 bg-red-950/30 p-2 text-xs text-red-300">
             {error}

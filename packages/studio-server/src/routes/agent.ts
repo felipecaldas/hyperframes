@@ -12,6 +12,7 @@ import {
 } from "../agent/types.js";
 
 const MAX_PROMPT_BYTES = 128 * 1024;
+const MAX_MATERIAL_BYTES = 128 * 1024;
 const NONCE_HEADER = "x-hyperframes-agent-nonce";
 
 function requestHostname(c: Context): string {
@@ -82,7 +83,8 @@ function hasValidRunOptions(body: RequestRecord): boolean {
   const registryItemOk = body.registryItem === undefined || typeof body.registryItem === "string";
   const newThreadOk = body.newThread === undefined || typeof body.newThread === "boolean";
   const selectionOk = body.selection === undefined || isAgentSelectedElement(body.selection);
-  return registryItemOk && newThreadOk && selectionOk;
+  const materialOk = body.material === undefined || typeof body.material === "string";
+  return registryItemOk && newThreadOk && selectionOk && materialOk;
 }
 
 function parseRunRequest(value: unknown): AgentRunRequest | null {
@@ -95,7 +97,28 @@ function parseRunRequest(value: unknown): AgentRunRequest | null {
     ...(typeof body.registryItem === "string" ? { registryItem: body.registryItem } : {}),
     ...(typeof body.newThread === "boolean" ? { newThread: body.newThread } : {}),
     ...(isAgentSelectedElement(body.selection) ? { selection: body.selection } : {}),
+    ...(typeof body.material === "string" && body.material.trim()
+      ? { material: body.material }
+      : {}),
   };
+}
+
+/**
+ * Why a run request is too large to accept, or null when it is not.
+ *
+ * The material has its own limit and is not counted against the prompt's
+ * (TAB-1221). Before the two were sent apart they shared one string, so the
+ * limit is the same number: a request that fitted still fits.
+ */
+function sizeRefusal(request: AgentRunRequest): string | null {
+  const promptBytes = Buffer.byteLength(request.prompt, "utf-8");
+  if (promptBytes === 0 || promptBytes > MAX_PROMPT_BYTES) {
+    return `Prompt must be between 1 byte and ${MAX_PROMPT_BYTES} bytes.`;
+  }
+  if (Buffer.byteLength(request.material ?? "", "utf-8") > MAX_MATERIAL_BYTES) {
+    return `What Studio sends with a prompt must be at most ${MAX_MATERIAL_BYTES} bytes.`;
+  }
+  return null;
 }
 
 type GuardedMutation =
@@ -158,10 +181,8 @@ export function registerAgentRoutes(
     if (!guarded.ok) return guarded.response;
     const request = parseRunRequest(guarded.body);
     if (!request) return c.json({ error: "Invalid agent run request" }, 400);
-    const promptBytes = Buffer.byteLength(request.prompt, "utf-8");
-    if (promptBytes === 0 || promptBytes > MAX_PROMPT_BYTES) {
-      return c.json({ error: `Prompt must be between 1 byte and ${MAX_PROMPT_BYTES} bytes.` }, 413);
-    }
+    const tooLarge = sizeRefusal(request);
+    if (tooLarge) return c.json({ error: tooLarge }, 413);
     const capabilities = await runtime.capabilities();
     if (!capabilities[request.provider].available) {
       return c.json(

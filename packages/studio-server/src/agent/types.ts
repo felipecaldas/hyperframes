@@ -20,6 +20,16 @@ export interface AgentRunRequest {
   newThread?: boolean;
   /** The element selected on the timeline when the message was sent, if any. */
   selection?: AgentSelectedElement;
+  /**
+   * What a Studio panel gathered for the request: an element's details, a
+   * range of the timeline, a checker's findings, a catalog item (TAB-1221).
+   *
+   * Kept apart from `prompt` because the user did not type it. Until it was,
+   * the panel joined the two in the browser and sent the result as `prompt`,
+   * and the server could not tell which part the user had written, so text out
+   * of a project file reached the model as the user speaking.
+   */
+  material?: string;
 }
 
 /**
@@ -224,10 +234,10 @@ export interface AgentThreadSummary {
     kind?: AgentRequestKind;
     /**
      * What the model is told alongside a user turn: the selected element, in a
-     * sentence (TAB-1063). Kept apart from `text` because the user did not
-     * type it, and shown under the turn, collapsed, because the model read it
-     * (TAB-1194). It reaches the model framed as data and never in the user's
-     * role.
+     * sentence (TAB-1063), or what a Studio panel gathered for the request
+     * (TAB-1221). Kept apart from `text` because the user did not type it, and
+     * shown under the turn, collapsed, because the model read it (TAB-1194).
+     * It reaches the model framed as data and never in the user's role.
      */
     context?: string;
   }>;

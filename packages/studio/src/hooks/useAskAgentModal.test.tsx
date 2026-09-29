@@ -6,10 +6,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DomEditSelection } from "../components/editor/domEditing";
 import { useAskAgentModal } from "./useAskAgentModal";
 
-// Tabario fork: the prompt goes to the agent bridge, not the clipboard.
+// Tabario fork: the request goes to the agent bridge, not the clipboard. The
+// element is in what was gathered, and the user's words are on their own
+// (TAB-1221).
 const copied = vi.hoisted(() => [] as string[]);
+const said = vi.hoisted(() => [] as string[]);
 vi.mock("../utils/agentBridge", () => ({
-  openAgentBridge: ({ prompt }: { prompt: string }) => copied.push(prompt),
+  openAgentBridge: (request: { prompt: string; material?: string }) => {
+    said.push(request.prompt);
+    copied.push(request.material ?? "");
+  },
 }));
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -17,6 +23,7 @@ vi.mock("../utils/agentBridge", () => ({
 afterEach(() => {
   document.body.innerHTML = "";
   copied.length = 0;
+  said.length = 0;
   vi.unstubAllGlobals();
 });
 
@@ -75,5 +82,8 @@ describe("useAskAgentModal", () => {
     expect(copied[0]).toContain('<img src="plate.png"><img src="own.png" loading="eager">');
     expect(copied[0]).not.toContain("data-hf-preview-lazy");
     expect(copied[0]).not.toContain("data-hf-upcoming");
+    expect(said).toEqual(["Make it bigger"]);
+    expect(copied[0]).not.toContain("Make it bigger");
+    expect(copied[0]).not.toContain("Guardrails:");
   });
 });

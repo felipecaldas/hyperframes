@@ -109,6 +109,33 @@ function hashPrompt(prompt: string): string {
   return createHash("sha256").update(prompt).digest("hex").slice(0, 32);
 }
 
+/**
+ * Everything a request said, for the fingerprint (TAB-1221).
+ *
+ * A request from a Studio panel now has few words of its own, and they are the
+ * same words for every element, so the prompt alone would give every such
+ * request one fingerprint. A request with no material hashes as it always did.
+ */
+function requestText(request: AgentRunRequest): string {
+  return request.material ? `${request.prompt}\n\n${request.material}` : request.prompt;
+}
+
+/**
+ * What the model is told alongside the user's words, or null when nothing is
+ * (TAB-1194, TAB-1221).
+ *
+ * A typed message carries the element selected on the timeline. A request
+ * built by a Studio panel carries what the panel gathered. Neither is
+ * something the user typed, so both are kept off the turn's text.
+ */
+function turnContext(request: AgentRunRequest): string | null {
+  const parts = [
+    request.selection ? describeSelectedElement(request.selection) : "",
+    request.material?.trim() ?? "",
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join("\n\n") : null;
+}
+
 function readJsonObject(path: string): Record<string, unknown> | null {
   try {
     const value: unknown = JSON.parse(readFileSync(path, "utf-8"));
@@ -431,7 +458,7 @@ export class AgentRuntime {
   private prepareThread(job: AgentRunJob): PersistedThread {
     let thread = readThread(this.threadPath(job.project.dir));
     if (job.request.newThread) thread = this.resetThread(job.project) as PersistedThread;
-    const context = job.request.selection ? describeSelectedElement(job.request.selection) : null;
+    const context = turnContext(job.request);
     thread.transcript.push({
       role: "user",
       text: job.request.prompt,
@@ -618,7 +645,7 @@ export class AgentRuntime {
       rounds: result.meter.rounds,
       tools,
       stopReason: result.stopReason,
-      promptHash: hashPrompt(job.request.prompt),
+      promptHash: hashPrompt(requestText(job.request)),
     };
     this.emit(job, { type: "metered", meter: ledger.meter });
   }
