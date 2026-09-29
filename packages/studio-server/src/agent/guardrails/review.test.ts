@@ -219,6 +219,19 @@ describe("what the check is shown (TAB-1222)", () => {
     expect(content.indexOf("Shall I?")).toBeGreaterThan(framed);
   });
 
+  it("tells the check that loading a library a file already calls is a repair", () => {
+    // Without this the lint button was refused whenever the fix was the
+    // script tag for gsap, 12 times of 12, on a finding every compiled project
+    // can carry.
+    const item = request({ kind: "lint" });
+    const [, user] = reviewMessages(item, hunksOf(item), createContextFrame());
+    expect(user?.content).toContain("vendor/gsap.min.js");
+    expect(user?.content).toContain("A script tag that holds code of its own");
+    const chat = request();
+    const [, typed] = reviewMessages(chat, hunksOf(chat), createContextFrame());
+    expect(typed?.content).not.toContain("vendor/gsap.min.js");
+  });
+
   it("names the catalog item in the characters a name needs and no others", () => {
     const item = request({
       kind: "catalog",
