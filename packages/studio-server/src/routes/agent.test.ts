@@ -23,7 +23,7 @@ vi.mock("node:fs", async (importActual) => {
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createStudioApi } from "../createStudioApi.js";
 import type { StudioApiAdapter } from "../types.js";
 
@@ -593,5 +593,236 @@ describe("Tabario AI API", () => {
       stagingRemoval.shouldFail = false;
     }
     expect(readFileSync(join(setup.projectDir, "index.html"), "utf-8")).toContain("after");
+  });
+
+  /**
+   * TAB-1196. Every finished run carries one verdict, on the event that closes
+   * it and on its ledger, decided from what the run did and never from what the
+   * reply says it did.
+   */
+  describe("verdicts (TAB-1196)", () => {
+    type StreamEvent = {
+      type: string;
+      message?: string;
+      verdict?: string;
+      verdictReason?: string;
+      refusal?: { gate: string; stage: string; message: string };
+    };
+
+    function parseStream(stream: string): StreamEvent[] {
+      return stream
+        .split("\n")
+        .filter((line) => line.startsWith("data: "))
+        .map((line) => JSON.parse(line.slice("data: ".length)) as StreamEvent);
+    }
+
+    function terminal(stream: string): StreamEvent {
+      const last = parseStream(stream).at(-1);
+      if (!last) throw new Error("the stream carried no events");
+      return last;
+    }
+
+    function ledger(projectDir: string, jobId: string) {
+      const key = createHash("sha256").update(resolve(projectDir)).digest("hex").slice(0, 24);
+      const path = join(setup.root, "state", "studio-agent", key, "runs", `${jobId}.json`);
+      return JSON.parse(readFileSync(path, "utf-8")) as {
+        status: string;
+        verdict?: string;
+        verdictReason?: string;
+        refusals?: Array<{ gate: string; stage: string }>;
+      };
+    }
+
+    function editThenReply(newString: string, reply: string) {
+      const hash = createHash("sha256").update(INITIAL_HTML).digest("hex");
+      return vi
+        .fn()
+        .mockResolvedValueOnce(
+          completion("", [
+            toolCall("write", "edit_file", {
+              path: "index.html",
+              old_string: "before",
+              new_string: newString,
+              expected_hash: hash,
+            }),
+          ]),
+        )
+        .mockImplementation(async () => completion(reply));
+    }
+
+    async function runOnce(
+      app: ReturnType<typeof createStudioApi>,
+      prompt: string,
+      kind = "chat",
+    ): Promise<{ jobId: string; stream: string }> {
+      const token = await nonce(app);
+      const jobId = await start(app, token, prompt, { kind });
+      return { jobId, stream: await events(app, jobId) };
+    }
+
+    it("reports a run that wrote and never measured as saved, not verified", async () => {
+      vi.stubGlobal("fetch", editThenReply("after", "It now fits on two lines."));
+      const app = createStudioApi(adapter(setup.projectDir));
+      const { jobId, stream } = await runOnce(app, "Change the opening", "timeline");
+
+      const end = terminal(stream);
+      expect(end.type).toBe("complete");
+      expect(end.verdict).toBe("saved");
+      expect(end.verdictReason).toContain("nothing measured them afterwards");
+      expect(ledger(setup.projectDir, jobId)).toMatchObject({
+        status: "complete",
+        verdict: "saved",
+      });
+    });
+
+    it("reports a run measured after its last change as verified", async () => {
+      const hash = createHash("sha256").update(INITIAL_HTML).digest("hex");
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValueOnce(
+            completion("", [
+              toolCall("write", "edit_file", {
+                path: "index.html",
+                old_string: "before",
+                new_string: "after",
+                expected_hash: hash,
+              }),
+            ]),
+          )
+          .mockResolvedValueOnce(
+            completion("", [toolCall("m", "measure_layout", { selectors: ["body"] })]),
+          )
+          .mockImplementation(async () => completion("It is on one line.")),
+      );
+      const measureLayout = vi.fn().mockResolvedValue({
+        measured: true,
+        seekTime: 0,
+        elements: [{ selector: "body", lines: 1 }],
+      });
+      const app = createStudioApi({ ...adapter(setup.projectDir), measureLayout });
+      const { jobId, stream } = await runOnce(app, "Change the opening", "timeline");
+
+      expect(terminal(stream).verdict).toBe("verified");
+      expect(ledger(setup.projectDir, jobId).verdict).toBe("verified");
+    });
+
+    it("reports a question that changed nothing as dispatched", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValueOnce(readIndexFirst())
+          .mockResolvedValueOnce(completion("The title is on screen for two seconds.")),
+      );
+      const app = createStudioApi(adapter(setup.projectDir));
+      const { jobId, stream } = await runOnce(app, "How long is the title up?");
+
+      const end = terminal(stream);
+      expect(end.type).toBe("complete");
+      expect(end.verdict).toBe("dispatched");
+      expect(ledger(setup.projectDir, jobId).verdict).toBe("dispatched");
+    });
+
+    it("reports a change the lint gate declined as refused, and records the refusal", async () => {
+      vi.stubGlobal("fetch", editThenReply("LINT_ERROR", "I have updated the opening."));
+      const app = createStudioApi(adapter(setup.projectDir));
+      const { jobId, stream } = await runOnce(app, "Break it", "timeline");
+
+      const all = parseStream(stream);
+      const refusal = all.find((event) => event.type === "refusal");
+      expect(refusal?.refusal).toMatchObject({ gate: "lint", stage: "apply" });
+      // Said before the run closes, so a consumer reading in order has the
+      // refusal in hand when the verdict arrives.
+      expect(all.indexOf(refusal as StreamEvent)).toBeLessThan(all.length - 1);
+
+      const end = terminal(stream);
+      expect(end.type).toBe("failure");
+      expect(end.verdict).toBe("refused");
+      const kept = ledger(setup.projectDir, jobId);
+      expect(kept).toMatchObject({ status: "failed", verdict: "refused" });
+      expect(kept.refusals).toEqual([expect.objectContaining({ gate: "lint", stage: "apply" })]);
+      expect(readFileSync(join(setup.projectDir, "index.html"), "utf-8")).toBe(INITIAL_HTML);
+    });
+
+    it("reports a run the provider ended as failed, with no refusal on it", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation(async () => new Response("no", { status: 401 })),
+      );
+      const app = createStudioApi(adapter(setup.projectDir));
+      const { jobId, stream } = await runOnce(app, "Change the opening", "timeline");
+
+      const end = terminal(stream);
+      expect(end.type).toBe("failure");
+      expect(end.verdict).toBe("failed");
+      expect(stream).not.toContain("event: refusal");
+      expect(ledger(setup.projectDir, jobId).refusals).toBeUndefined();
+    });
+
+    it("reports a cancelled run as failed", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation(
+          (_url: string, init: RequestInit) =>
+            new Promise((_resolve, reject) => {
+              init.signal?.addEventListener("abort", () =>
+                reject(new DOMException("aborted", "AbortError")),
+              );
+            }),
+        ),
+      );
+      const app = createStudioApi(adapter(setup.projectDir));
+      const token = await nonce(app);
+      const jobId = await start(app, token, "Take your time", { kind: "timeline" });
+      const cancel = await app.request(`http://localhost/agent/runs/${jobId}/cancel`, {
+        method: "POST",
+        headers: headers(token),
+        body: "{}",
+      });
+      expect(cancel.status).toBe(200);
+
+      const end = terminal(await events(app, jobId));
+      expect(end.type).toBe("cancelled");
+      expect(end.verdict).toBe("failed");
+      expect(end.verdictReason).toContain("cancelled");
+    });
+
+    it("carries exactly one verdict per run, on the event that closes it", async () => {
+      vi.stubGlobal("fetch", editThenReply("after", "Updated."));
+      const app = createStudioApi(adapter(setup.projectDir));
+      const { stream } = await runOnce(app, "Change the opening", "timeline");
+
+      const carrying = parseStream(stream).filter((event) => event.verdict !== undefined);
+      expect(carrying).toHaveLength(1);
+      expect(carrying[0]?.type).toBe("complete");
+    });
+
+    it("forgets the oldest finished runs and keeps the newest twenty", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+          const body = JSON.parse(String(init.body)) as { messages: Array<{ role: string }> };
+          // First round of a run reads the project; the second answers.
+          return body.messages.some((message) => message.role === "tool")
+            ? completion("Two seconds.")
+            : readIndexFirst();
+        }),
+      );
+      const app = createStudioApi(adapter(setup.projectDir));
+      const jobIds: string[] = [];
+      for (let index = 0; index < 23; index += 1) {
+        const { jobId, stream } = await runOnce(app, `Question ${index}`);
+        expect(terminal(stream).type).toBe("complete");
+        jobIds.push(jobId);
+      }
+
+      const status = async (jobId: string) =>
+        (await app.request(`http://localhost/agent/runs/${jobId}/events`, { headers: headers() }))
+          .status;
+      for (const forgotten of jobIds.slice(0, 3)) expect(await status(forgotten)).toBe(404);
+      for (const kept of jobIds.slice(3)) expect(await status(kept)).toBe(200);
+    });
   });
 });

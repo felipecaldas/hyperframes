@@ -4,6 +4,7 @@ import type {
   AgentMeasurementReceipt,
   AgentProvider,
   AgentRunEvent,
+  AgentVerdictReceipt,
 } from "@hyperframes/studio-server";
 import { selectedElementForAgent } from "../components/agentSelection";
 import { usePlayerStore } from "../player";
@@ -17,6 +18,7 @@ const EVENT_TYPES = [
   "changed-files",
   "lint",
   "measurement",
+  "refusal",
   "complete",
   "cancelled",
   "failure",
@@ -42,6 +44,16 @@ const TOOL_LABELS: Record<string, string> = {
   validate_project: "Checking the result…",
   measure_layout: "Measuring how it looks…",
 };
+
+/**
+ * The verdict a terminal event carries, or null when it carries none
+ * (TAB-1196). A Studio server older than the verdict sends terminal events
+ * without one, and the drawer then shows no verdict rather than a guessed one.
+ */
+function verdictOf(event: AgentRunEvent): AgentVerdictReceipt | null {
+  if (!event.verdict) return null;
+  return { verdict: event.verdict, reason: event.verdictReason ?? "" };
+}
 
 /** A tool event as a person would say it; unknown tools degrade, never leak. */
 export function toolLabel(name: string): string {
@@ -134,6 +146,12 @@ export function useAgentRun(options: UseAgentRunOptions) {
    * measured as after its last change, and it is written by code.
    */
   const [receipt, setReceipt] = useState<AgentMeasurementReceipt | null>(null);
+  /**
+   * How far the run got, decided by the server from what the run did
+   * (TAB-1196). Kept apart from `error`: a refused run and a failed run both
+   * end on a `failure` event, and only this says which of the two it was.
+   */
+  const [verdict, setVerdict] = useState<AgentVerdictReceipt | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   /**
@@ -213,6 +231,7 @@ export function useAgentRun(options: UseAgentRunOptions) {
         if (event.files) setChangedFiles(event.files);
         if (event.measurement) setReceipt(event.measurement);
         if (!TERMINAL_EVENTS.has(event.type)) return;
+        setVerdict(verdictOf(event));
         if (event.type === "failure") setError(event.message ?? "Agent run failed.");
         closeStream();
         setBusy(false);
@@ -286,6 +305,7 @@ export function useAgentRun(options: UseAgentRunOptions) {
     setEvents([]);
     setChangedFiles([]);
     setReceipt(null);
+    setVerdict(null);
     setBusy(true);
     setAgentRunActive(true);
 
@@ -344,6 +364,7 @@ export function useAgentRun(options: UseAgentRunOptions) {
     onThreadReset();
     setEvents([]);
     setReceipt(null);
+    setVerdict(null);
     setJobId(null);
     setPendingPrompt(null);
     setStartedAt(null);
@@ -366,5 +387,6 @@ export function useAgentRun(options: UseAgentRunOptions) {
     receipt,
     setError,
     startRun,
+    verdict,
   };
 }

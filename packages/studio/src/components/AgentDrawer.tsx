@@ -15,6 +15,7 @@ import {
   type StudioAgentRequest,
 } from "../utils/agentBridge";
 import { toolLabel, useAgentRun } from "../hooks/useAgentRun";
+import { AgentVerdictPanel } from "./AgentVerdictPanel";
 
 interface Capabilities {
   enabled: boolean;
@@ -388,6 +389,7 @@ export function AgentDrawer({ projectId, beforeRun, onRefresh }: AgentDrawerProp
     receipt,
     setError,
     startRun,
+    verdict,
   } = useAgentRun({
     projectId,
     provider,
@@ -452,6 +454,7 @@ export function AgentDrawer({ projectId, beforeRun, onRefresh }: AgentDrawerProp
         <AgentActivityPanel activity={activity} busy={busy} />
         <AgentChangedFilesPanel changedFiles={changedFiles} />
         <AgentMeasurementPanel receipt={receipt} />
+        <AgentVerdictPanel verdict={busy ? null : verdict} />
         {request && (
           <details className="rounded border border-neutral-800 p-2">
             <summary className="cursor-pointer text-[10px] uppercase text-neutral-500">

@@ -2555,3 +2555,223 @@ describe("Tabario AI guardrails: meter and ceilings", () => {
     expect(result.meter.costEnforceable).toBe(false);
   });
 });
+
+/**
+ * TAB-1196. Four ways a run could end, or grow, for a reason that had nothing
+ * to do with the request. Each was found by reading the loop, not by a user,
+ * which is why each gets a test: nothing else would notice it coming back.
+ */
+describe("Tabario AI guardrails: the four defects (TAB-1196)", () => {
+  const oldKey = process.env.OPENROUTER_API_KEY;
+  const RETRY_KEYS = [
+    "TABARIO_STUDIO_RETRY_ATTEMPTS",
+    "TABARIO_STUDIO_RETRY_BASE_MS",
+    "TABARIO_STUDIO_RETRY_MAX_MS",
+    "TABARIO_STUDIO_RUN_RETRY_BUDGET",
+  ] as const;
+
+  beforeEach(() => {
+    process.env.OPENROUTER_API_KEY = "test-key";
+    // Real waits, one millisecond long: the schedule is `retry.test.ts`'s
+    // business, and this file only needs the loop to come back.
+    process.env.TABARIO_STUDIO_RETRY_BASE_MS = "1";
+    process.env.TABARIO_STUDIO_RETRY_MAX_MS = "2";
+  });
+
+  afterEach(() => {
+    if (oldKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = oldKey;
+    for (const key of RETRY_KEYS) delete process.env[key];
+    vi.restoreAllMocks();
+  });
+
+  type LedgerEntry = { name: string; arguments: unknown; result: string };
+
+  function project(content = HTML): string {
+    const root = mkdtempSync(join(tmpdir(), "tabario-defects-"));
+    writeFileSync(join(root, "index.html"), content);
+    return root;
+  }
+
+  function run(fetchImpl: typeof fetch, root: string, ledger: LedgerEntry[] = []) {
+    return runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "chat",
+      transcript: [{ role: "user", text: "tweak the title", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      onToolResult: (entry) => ledger.push(entry),
+      fetchImpl,
+    });
+  }
+
+  function busy(status: number): Response {
+    return new Response("upstream is busy", { status });
+  }
+
+  /** What the model was handed back for one tool call. */
+  function toolResult(fetchImpl: ReturnType<typeof vi.fn>, round: number, id: string) {
+    const body = JSON.parse(String(fetchImpl.mock.calls[round]?.[1]?.body));
+    const message = body.messages.find(
+      (candidate: { tool_call_id?: string }) => candidate.tool_call_id === id,
+    );
+    return JSON.parse(message.content);
+  }
+
+  it("survives tool arguments that are not JSON, and tells the model they were not", async () => {
+    const malformed = {
+      id: "bad",
+      type: "function",
+      function: { name: "read_file", arguments: '{"path": "index.html"' },
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(completion("", [malformed]))
+      .mockResolvedValueOnce(completion("I could not read it."));
+    const ledger: LedgerEntry[] = [];
+
+    const result = await run(fetchImpl, project(), ledger);
+
+    expect(result.assistantText).toBe("I could not read it.");
+    expect(toolResult(fetchImpl, 1, "bad").error).toContain("invalid JSON arguments");
+    // The ledger keeps what was sent, as text, rather than throwing on it.
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]?.arguments).toEqual({ unparsed: '{"path": "index.html"' });
+  });
+
+  it("survives a tool call that arrives with no function block at all", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(completion("", [{ id: "empty", type: "function" }]))
+      .mockResolvedValueOnce(completion("Nothing to do."));
+    const ledger: LedgerEntry[] = [];
+
+    const result = await run(fetchImpl, project(), ledger);
+
+    expect(result.assistantText).toBe("Nothing to do.");
+    expect(toolResult(fetchImpl, 1, "empty").error).toContain("unknown tool");
+    expect(ledger[0]?.name).toBe("");
+  });
+
+  it("gives a tool call without an id one the reply can be matched to", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [{ type: "function", function: { name: "list_media", arguments: "{}" } }]),
+      )
+      .mockResolvedValueOnce(completion("Done."));
+
+    await run(fetchImpl, project());
+
+    const body = JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body));
+    const asked = body.messages.find((message: { tool_calls?: unknown[] }) => message.tool_calls);
+    const answered = body.messages.find((message: { role: string }) => message.role === "tool");
+    expect(asked.tool_calls[0].id).toBe("call_0");
+    expect(answered.tool_call_id).toBe("call_0");
+  });
+
+  it("reads arguments a provider sent as an object rather than as JSON text", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [
+          {
+            id: "obj",
+            type: "function",
+            function: { name: "read_file", arguments: { path: "index.html" } },
+          },
+        ]),
+      )
+      .mockResolvedValueOnce(completion("Read it."));
+
+    await run(fetchImpl, project());
+
+    expect(toolResult(fetchImpl, 1, "obj").content).toBe(HTML);
+  });
+
+  it("clamps a read_file limit the schema forbade and the model sent anyway", async () => {
+    const big = "x".repeat(60_000);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [call("huge", "read_file", { path: "index.html", limit: 10_000_000 })]),
+      )
+      .mockResolvedValueOnce(completion("Read it."));
+
+    await run(fetchImpl, project(big));
+
+    const result = toolResult(fetchImpl, 1, "huge");
+    expect(result.content).toHaveLength(48_000);
+    expect(result.truncated).toBe(true);
+  });
+
+  it.each([
+    ["a negative offset", { offset: -10 }, "0123456789"],
+    ["a zero limit", { limit: 0 }, "0"],
+    ["a negative limit", { limit: -5 }, "0"],
+    ["a fractional limit", { limit: 3.9 }, "012"],
+    ["a limit that is not a number", { limit: "all" }, "0123456789"],
+    ["an offset past the end", { offset: 999 }, ""],
+  ])("reads from a sane window when given %s", async (_name, window, expected) => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        completion("", [call("w", "read_file", { path: "index.html", ...window })]),
+      )
+      .mockResolvedValueOnce(completion("Read it."));
+
+    await run(fetchImpl, project("0123456789"));
+
+    expect(toolResult(fetchImpl, 1, "w").content).toBe(expected);
+  });
+
+  it("asks again after a 429 and a 503 instead of discarding the run", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readIndexFirst())
+      .mockResolvedValueOnce(busy(429))
+      .mockResolvedValueOnce(busy(503))
+      .mockResolvedValueOnce(completion("Done."));
+
+    const result = await run(fetchImpl, project());
+
+    expect(result.assistantText).toBe("Done.");
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    // The retried request is the same request: nothing is appended between tries.
+    expect(fetchImpl.mock.calls[1]?.[1]?.body).toBe(fetchImpl.mock.calls[3]?.[1]?.body);
+    // A failed attempt is not a round. The meter counts completions.
+    expect(result.meter.rounds).toBe(2);
+  });
+
+  it("gives up after its last attempt and says which status ended it", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => busy(503));
+
+    await expect(run(fetchImpl, project())).rejects.toThrow("Tabario AI request failed (503)");
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not retry a request that would be refused the same way twice", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => busy(401));
+
+    await expect(run(fetchImpl, project())).rejects.toThrow("Tabario AI request failed (401)");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("spends one allowance of retries across the whole run, not one per call", async () => {
+    process.env.TABARIO_STUDIO_RUN_RETRY_BUDGET = "2";
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(busy(503))
+      .mockResolvedValueOnce(busy(503))
+      .mockResolvedValueOnce(readIndexFirst())
+      .mockImplementation(async () => busy(503));
+
+    await expect(run(fetchImpl, project())).rejects.toThrow("Tabario AI request failed (503)");
+    // Two retries on the first call used the allowance, so the second call
+    // got its one attempt and no more.
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+});

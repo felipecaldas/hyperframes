@@ -27,6 +27,13 @@ import {
   type CompletionUsage,
   type RunMeterSnapshot,
 } from "./guardrails/budget.js";
+import {
+  createRetryAllowance,
+  resolveRetryPolicy,
+  sendWithRetry,
+  type RetryAllowance,
+  type RetryPolicy,
+} from "./guardrails/retry.js";
 import type {
   AgentMeasurementReceipt,
   AgentProviderCapability,
@@ -571,12 +578,28 @@ function listMedia(_args: JsonRecord, options: TabarioModelOptions): unknown {
   return { files, count: files.length };
 }
 
+/**
+ * A whole number inside `[min, max]`, or the fallback when the model sent
+ * something that is not a number at all (TAB-1196).
+ *
+ * The tool schema already says `limit` is at most `MAX_READ_CHARS` and
+ * `offset` is at least zero. The schema is a request to the model, and nothing
+ * checked the answer: a `limit` of ten million returned the whole file into a
+ * message array that is re-sent on every later round, and a negative `offset`
+ * made `slice` count from the end of the file. An instruction the model can
+ * decline is not a gate, so the bounds are applied here.
+ */
+function clampWhole(value: unknown, min: number, max: number, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
 function readFile(args: JsonRecord, options: TabarioModelOptions): unknown {
   const file = safeSourcePath(options.stagingDir, args.path);
   if (!existsSync(file.absolute)) throw new Error("file does not exist");
   const content = readFileSync(file.absolute, "utf-8");
-  const offset = typeof args.offset === "number" ? args.offset : 0;
-  const limit = typeof args.limit === "number" ? args.limit : MAX_READ_CHARS;
+  const offset = clampWhole(args.offset, 0, Number.MAX_SAFE_INTEGER, 0);
+  const limit = clampWhole(args.limit, 1, MAX_READ_CHARS, MAX_READ_CHARS);
   return {
     path: file.relative,
     hash: hashFile(file.absolute),
@@ -892,15 +915,43 @@ interface Completion {
   usage: CompletionUsage;
 }
 
+/** The arguments as the string the rest of the loop expects. */
+function argumentsText(value: unknown): string {
+  if (typeof value === "string") return value;
+  // Some providers hand back the parsed object instead of its JSON.
+  return value === undefined || value === null ? "" : JSON.stringify(value);
+}
+
+/**
+ * One tool call in the shape the loop relies on, whatever the provider sent
+ * (TAB-1196).
+ *
+ * This used to be a cast. A call that arrived without a `function` block was
+ * typed as having one, and the first line to read `call.function.name` threw
+ * outside any `try`, which ended the run and discarded the staging directory.
+ * Filling the gaps turns that into an ordinary tool error the model can read:
+ * an empty name is an unknown tool, and empty arguments fail to parse.
+ */
+function toToolCall(value: unknown, index: number): ToolCall {
+  const call = record(value);
+  const fn = record(call.function);
+  return {
+    id: typeof call.id === "string" && call.id ? call.id : `call_${index}`,
+    type: "function",
+    function: {
+      name: typeof fn.name === "string" ? fn.name : "",
+      arguments: argumentsText(fn.arguments),
+    },
+  };
+}
+
 function completionMessage(payload: unknown, model: string): Completion {
   const body = record(payload);
   const choices = Array.isArray(body.choices) ? body.choices : [];
   const first = record(choices[0]);
   const message = record(first.message);
   const content = typeof message.content === "string" ? message.content : "";
-  const toolCalls = Array.isArray(message.tool_calls)
-    ? message.tool_calls.map((value) => record(value) as unknown as ToolCall)
-    : [];
+  const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls.map(toToolCall) : [];
   // TAB-1193: this block used to be dropped on the floor, which is why nothing
   // in Tabario had ever counted a token or a dollar for an agent run.
   return { content, toolCalls, usage: parseUsage(payload, model) };
@@ -918,35 +969,54 @@ function completionMessage(payload: unknown, model: string): Completion {
  *   out of provider training corpora. The prompt carries their brief.
  * - `user` is an opaque project digest, never an identity, so provider-side
  *   abuse attribution is possible without exporting who anyone is.
+ *
+ * And, since TAB-1196, the only place a retry has to live. A 429 or a 5xx is
+ * asked again a bounded number of times before it is allowed to end the run,
+ * because ending the run discards everything staged so far.
  */
+interface CompletionRequest {
+  maxOutputTokens: number;
+  principal?: string;
+  retry: { policy: RetryPolicy; allowance: RetryAllowance };
+  onActivity: () => void;
+}
+
 async function requestCompletion(
   fetchImpl: typeof fetch,
   apiKey: string,
   model: string,
   messages: ChatMessage[],
   signal: AbortSignal,
-  options: { maxOutputTokens: number; principal?: string },
+  options: CompletionRequest,
 ): Promise<Completion> {
-  const response = await fetchImpl(OPENROUTER_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://studio.tabario.com",
-      "X-Title": "Tabario Studio",
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      tools,
-      tool_choice: "auto",
-      temperature: 0.1,
-      max_tokens: options.maxOutputTokens,
-      usage: { include: true },
-      provider: { data_collection: "deny" },
-      ...(options.principal ? { user: options.principal } : {}),
-    }),
+  const body = JSON.stringify({
+    model,
+    messages,
+    tools,
+    tool_choice: "auto",
+    temperature: 0.1,
+    max_tokens: options.maxOutputTokens,
+    usage: { include: true },
+    provider: { data_collection: "deny" },
+    ...(options.principal ? { user: options.principal } : {}),
+  });
+  const send = () =>
+    fetchImpl(OPENROUTER_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://studio.tabario.com",
+        "X-Title": "Tabario Studio",
+      },
+      body,
+      signal,
+    });
+  const response = await sendWithRetry(send, {
+    ...options.retry,
     signal,
+    // A wait is the run being alive, not the run being idle.
+    onRetry: options.onActivity,
   });
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 800);
@@ -1006,12 +1076,34 @@ function isLayoutMeasurement(value: unknown): value is LayoutMeasurement {
 /** Enough of a tool result to audit a run from its ledger; never the whole file. */
 const MAX_TRANSCRIPT_RESULT_CHARS = 4000;
 
+/** As much of unparseable arguments as is worth keeping to see what was sent. */
+const MAX_UNPARSED_ARGUMENT_CHARS = 2000;
+
+/**
+ * The call's arguments for the ledger, which records what happened and must
+ * never be the reason it did not (TAB-1196).
+ *
+ * `parseArguments` throws on malformed JSON, and that is right for running a
+ * tool: `executeTool` calls it inside the `try` and the model is told its
+ * arguments did not parse. The ledger entry was built with the same function
+ * *after* that `try`, so the same malformed call threw a second time with
+ * nothing to catch it and took the whole run with it. What the model sent is
+ * kept as text instead, which is also the more useful record of the two.
+ */
+function ledgerArguments(call: ToolCall): unknown {
+  try {
+    return parseArguments(call);
+  } catch {
+    return { unparsed: call.function.arguments.slice(0, MAX_UNPARSED_ARGUMENT_CHARS) };
+  }
+}
+
 function transcriptEntry(call: ToolCall, content: string): AgentToolTranscriptEntry {
   const over = content.length - MAX_TRANSCRIPT_RESULT_CHARS;
   return {
     at: new Date().toISOString(),
     name: call.function.name,
-    arguments: parseArguments(call),
+    arguments: ledgerArguments(call),
     result:
       over > 0
         ? `${content.slice(0, MAX_TRANSCRIPT_RESULT_CHARS)}…[truncated ${over} chars]`
@@ -1477,6 +1569,13 @@ interface RunLoopState {
   asked: FinishDemands;
   meter: RunMeter;
   model: string;
+  /** The run's retries, shared by every completion it asks for (TAB-1196). */
+  retry: { policy: RetryPolicy; allowance: RetryAllowance };
+}
+
+function newRetryState(): RunLoopState["retry"] {
+  const policy = resolveRetryPolicy();
+  return { policy, allowance: createRetryAllowance(policy.maxRunRetries) };
 }
 
 /**
@@ -1518,6 +1617,7 @@ export async function runTabarioModel(options: TabarioModelOptions): Promise<Tab
     asked: newFinishDemands(),
     meter: new RunMeter(budget),
     model: modelName(),
+    retry: newRetryState(),
   };
   let assistantText = "";
 
@@ -1533,6 +1633,8 @@ export async function runTabarioModel(options: TabarioModelOptions): Promise<Tab
       {
         maxOutputTokens: budget.maxOutputTokens,
         ...(options.principal ? { principal: options.principal } : {}),
+        retry: loop.retry,
+        onActivity: options.onActivity,
       },
     );
     loop.meter.record(completion.usage);

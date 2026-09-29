@@ -53,9 +53,61 @@ export type AgentEventType =
   | "lint"
   | "measurement"
   | "metered"
+  | "refusal"
   | "complete"
   | "cancelled"
   | "failure";
+
+/**
+ * How far a run got, as a proof level rather than a mood (TAB-1196).
+ *
+ * The vocabulary is upstream #3581's, the one its own write receipts use, so a
+ * run and a single write are read the same way:
+ *
+ * - `refused`: a gate declined the turn. Nothing was applied.
+ * - `dispatched`: the run ran and answered, and nothing was saved. A question
+ *   ends here, and that is a complete outcome rather than a pending one.
+ * - `saved`: changes landed and nothing measured them afterwards.
+ * - `verified`: changes landed and a measurement taken after the last of them
+ *   came back with a reading.
+ * - `failed`: the run did not finish: an error, a timeout, a cancel.
+ *
+ * `verified` says a reading exists. It does not say the reading matches what
+ * was asked, which no code here can judge. The receipt beside the reply is
+ * where that comparison is made, by the person reading it.
+ */
+export type AgentRunVerdict = "refused" | "dispatched" | "saved" | "verified" | "failed";
+
+/** The verdict and the sentence that goes with it, written by code. */
+export interface AgentVerdictReceipt {
+  verdict: AgentRunVerdict;
+  reason: string;
+}
+
+/**
+ * Which gate said no.
+ *
+ * - `lint`: the staged tree introduced lint errors the project did not have.
+ * - `unsupported-change`: the run staged a change to a file it may not edit.
+ * - `conflict`: the live project moved while the run was working.
+ */
+export type AgentRefusalGate = "lint" | "unsupported-change" | "conflict";
+
+/**
+ * One refusal, kept on the ledger and sent down the stream (TAB-1196).
+ *
+ * A refusal used to exist only as the text of a failure, so nothing could tell
+ * a gate declining a change from a run falling over. `stage` separates the two
+ * moments a gate can speak: `tool` is mid-run, where the model is told and may
+ * repair it, and `apply` is the end of the turn, where nothing lands.
+ */
+export interface AgentRefusal {
+  gate: AgentRefusalGate;
+  stage: "tool" | "apply";
+  message: string;
+  /** The project file the refusal is about, when it is about one. */
+  file?: string;
+}
 
 /**
  * What a run spent, emitted once per run and carried out of the sandbox
@@ -106,6 +158,11 @@ export interface AgentRunEvent {
   }>;
   measurement?: AgentMeasurementReceipt;
   meter?: AgentRunMeter;
+  /** On a `refusal` event: what was refused, and by which gate. */
+  refusal?: AgentRefusal;
+  /** On a terminal event: the run's one verdict and the reason for it. */
+  verdict?: AgentRunVerdict;
+  verdictReason?: string;
   critical?: boolean;
 }
 

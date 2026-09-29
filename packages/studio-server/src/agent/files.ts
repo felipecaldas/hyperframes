@@ -17,7 +17,9 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import type {
   AgentChangedFile,
   AgentMeasurementReceipt,
+  AgentRefusal,
   AgentRunMeter,
+  AgentRunVerdict,
   AgentToolTranscriptEntry,
 } from "./types.js";
 
@@ -79,6 +81,14 @@ export interface AgentRunLedger {
    * read after the fact answers "what did this cost" without the SSE stream.
    */
   meter?: AgentRunMeter;
+  /**
+   * The run's one verdict and its reason (TAB-1196). `status` says how the
+   * run ended; this says how much of what it claims has anything behind it.
+   */
+  verdict?: AgentRunVerdict;
+  verdictReason?: string;
+  /** Every gate refusal of the run, in order, mid-run and at apply. */
+  refusals?: AgentRefusal[];
 }
 
 function normalizedRelative(projectDir: string, path: string): string | null {

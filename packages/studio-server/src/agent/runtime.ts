@@ -24,18 +24,30 @@ import {
   type AgentFileSnapshot,
   type AgentRunLedger,
 } from "./files.js";
+import { decideVerdict } from "./guardrails/verdict.js";
 import { detectProvider, runTabarioModel, type TabarioModelResult } from "./providers.js";
 import { describeSelectedElement } from "./selection.js";
 import type {
   AgentChangedFile,
   AgentProvider,
   AgentProviderCapability,
+  AgentRefusal,
   AgentRunEvent,
   AgentRunRequest,
   AgentThreadSummary,
 } from "./types.js";
 
 const MAX_RUN_LEDGERS = 20;
+/**
+ * How many finished runs stay in memory (TAB-1196).
+ *
+ * Every run was kept for the life of the process, with every event it ever
+ * emitted, and a Studio session lives for as long as someone keeps editing.
+ * The same number as `MAX_RUN_LEDGERS` on purpose: Undo needs the job and the
+ * ledger both, so keeping a job whose ledger has been pruned holds memory for
+ * something that can no longer be undone.
+ */
+const MAX_FINISHED_JOBS = 20;
 /**
  * How long a run may go without activity before it is abandoned.
  *
@@ -548,6 +560,20 @@ export class AgentRuntime {
     this.emit(job, { type: "metered", meter: ledger.meter });
   }
 
+  /**
+   * A gate said no: keep it, say it, and hand back the sentence (TAB-1196).
+   *
+   * A refusal used to be nothing but the text of a failure, so the ledger
+   * recorded a refused change and a provider outage as the same thing. The
+   * record goes on the ledger and down the stream before the terminal event,
+   * which is what lets the verdict say `refused` rather than `failed`.
+   */
+  private refuse(job: AgentRunJob, ledger: AgentRunLedger, refusal: AgentRefusal): string {
+    (ledger.refusals ??= []).push(refusal);
+    this.emit(job, { type: "refusal", message: refusal.message, refusal });
+    return refusal.message;
+  }
+
   private async validateAndApply(
     job: AgentRunJob,
     before: AgentFileSnapshot,
@@ -556,7 +582,11 @@ export class AgentRuntime {
   ): Promise<string | null> {
     const staged = diffAgentFiles(stagingDir, before);
     if (!staged.undoCovered)
-      return "Tabario AI staged an unsupported file change; nothing was applied.";
+      return this.refuse(job, ledger, {
+        gate: "unsupported-change",
+        stage: "apply",
+        message: "Tabario AI staged an unsupported file change; nothing was applied.",
+      });
     // Ahead of the lint gate, and for every request kind — not only edits.
     // A question stages nothing, and falling through from here used to report
     // "Staged changes failed lint" about changes that did not exist, next to an
@@ -587,7 +617,11 @@ export class AgentRuntime {
       const summary = introduced
         .map((finding) => `${finding.file ?? "project"}: ${finding.message}`)
         .join("; ");
-      return `Staged changes introduced lint errors and were not applied — ${summary}`;
+      return this.refuse(job, ledger, {
+        gate: "lint",
+        stage: "apply",
+        message: `Staged changes introduced lint errors and were not applied — ${summary}`,
+      });
     }
     if (job.cancelled || job.controller.signal.aborted) return null;
     if (staged.changedFiles.length === 0) return null;
@@ -599,7 +633,11 @@ export class AgentRuntime {
       staged.changedFiles,
     );
     if (conflicts.length > 0)
-      return `Project changed while Tabario AI was working: ${conflicts.join(", ")}`;
+      return this.refuse(job, ledger, {
+        gate: "conflict",
+        stage: "apply",
+        message: `Project changed while Tabario AI was working: ${conflicts.join(", ")}`,
+      });
     ledger.changedFiles = staged.changedFiles;
     ledger.completedAt = new Date().toISOString();
     this.emitApplied(job, ledger, staged.changedFiles);
@@ -618,30 +656,82 @@ export class AgentRuntime {
       this.emit(job, { type: "measurement", measurement: ledger.verification });
   }
 
+  /**
+   * The run's one verdict, written to the ledger and carried on the event that
+   * closes the run (TAB-1196).
+   *
+   * On the terminal event and not on `metered`, where the epic's first sketch
+   * of the contract put it. `metered` is emitted before the apply gate so that
+   * a refused run still reports what it cost, and a verdict decided there
+   * would be decided before the one thing that most often changes it.
+   */
+  private recordVerdict(
+    job: AgentRunJob,
+    ledger: AgentRunLedger,
+    failure: string | null,
+    timeout: string | null,
+  ): Pick<AgentRunEvent, "verdict" | "verdictReason"> {
+    const receipt = decideVerdict({
+      cancelled: job.cancelled,
+      timeout,
+      failure,
+      refusals: ledger.refusals ?? [],
+      changedFiles: ledger.changedFiles.length,
+      verification: ledger.verification,
+      stopReason: ledger.meter?.stopReason ?? null,
+    });
+    ledger.verdict = receipt.verdict;
+    ledger.verdictReason = receipt.reason;
+    return { verdict: receipt.verdict, verdictReason: receipt.reason };
+  }
+
   private finishRun(
     job: AgentRunJob,
     ledger: AgentRunLedger,
     failure: string | null,
     timeout: string | null,
   ): void {
+    const verdict = this.recordVerdict(job, ledger, failure, timeout);
     if (job.cancelled) {
       ledger.status = "cancelled";
       this.emit(job, {
         type: "cancelled",
         message: "Tabario AI cancelled. No staged changes were applied.",
+        ...verdict,
       });
     } else if (timeout || failure) {
       ledger.status = "failed";
-      this.emit(job, { type: "failure", message: timeout ?? failure ?? "Tabario AI failed." });
+      this.emit(job, {
+        type: "failure",
+        message: timeout ?? failure ?? "Tabario AI failed.",
+        ...verdict,
+      });
     } else {
       ledger.status = "complete";
-      this.emit(job, { type: "complete", message: "Tabario AI finished." });
+      this.emit(job, { type: "complete", message: "Tabario AI finished.", ...verdict });
     }
     writeLedger(job.ledgerPath, ledger);
     job.terminal = true;
     this.locks.delete(job.project.id);
     for (const listener of job.listeners) listener();
     this.pruneLedgers(job.project.dir);
+    this.pruneJobs();
+  }
+
+  /**
+   * Forget the oldest finished runs once there are more than the limit
+   * (TAB-1196).
+   *
+   * Only finished runs are counted and only finished runs are dropped, so a
+   * run in flight cannot be forgotten however many finish around it. A stream
+   * still reading a dropped run is unaffected: the route holds the job itself,
+   * not its id, and reads it to the end. `Map` iterates in insertion order,
+   * which is the order the runs started in.
+   */
+  private pruneJobs(): void {
+    const finished = [...this.jobs.values()].filter((job) => job.terminal);
+    for (const job of finished.slice(0, Math.max(0, finished.length - MAX_FINISHED_JOBS)))
+      this.jobs.delete(job.id);
   }
 
   private pruneLedgers(projectDir: string): void {

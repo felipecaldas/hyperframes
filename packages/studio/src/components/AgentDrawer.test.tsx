@@ -271,6 +271,85 @@ describe("AgentDrawer", () => {
   });
 
   /**
+   * TAB-1196. The reply reads the same whether the change landed, landed
+   * unmeasured or never landed, so the drawer says which, from the event that
+   * closed the run.
+   */
+  async function startedRun() {
+    const { fetchMock } = runFixture([]);
+    const mounted = await mountDrawer(fetchMock);
+    act(() => openAgentBridge({ kind: "chat", prompt: "make the caption two lines" }));
+    await act(async () => buttonByText(mounted.host, "Send").click());
+    const source = FakeEventSource.instances[0];
+    if (!source) throw new Error("event source missing");
+    return { ...mounted, source };
+  }
+
+  function verdictLine(host: HTMLElement): HTMLElement | null {
+    return host.querySelector("[data-verdict]");
+  }
+
+  it("says a run that wrote and never measured was saved, not verified (TAB-1196)", async () => {
+    const { host, root, source } = await startedRun();
+    expect(verdictLine(host)).toBeNull();
+    await act(async () => {
+      source.emit("complete", {
+        id: 1,
+        type: "complete",
+        at: "now",
+        message: "Tabario AI finished.",
+        verdict: "saved",
+        verdictReason: "The changes were saved and nothing measured them afterwards.",
+      });
+      await Promise.resolve();
+    });
+    const line = verdictLine(host);
+    expect(line?.dataset.verdict).toBe("saved");
+    expect(line?.textContent).toContain("Saved · not verified");
+    expect(line?.textContent).toContain("nothing measured them afterwards");
+    act(() => root.unmount());
+  });
+
+  it("shows a refusal as a refusal, with what was refused in the activity (TAB-1196)", async () => {
+    const { host, root, source } = await startedRun();
+    await act(async () => {
+      source.emit("refusal", {
+        id: 1,
+        type: "refusal",
+        at: "now",
+        message: "Staged changes introduced lint errors and were not applied",
+        refusal: { gate: "lint", stage: "apply", message: "Staged changes introduced lint errors" },
+      });
+      source.emit("failure", {
+        id: 2,
+        type: "failure",
+        at: "now",
+        message: "Staged changes introduced lint errors and were not applied",
+        verdict: "refused",
+        verdictReason: "A check refused the change, so nothing was applied.",
+      });
+      await Promise.resolve();
+    });
+    const line = verdictLine(host);
+    expect(line?.dataset.verdict).toBe("refused");
+    expect(line?.textContent).toContain("Refused · nothing changed");
+    expect(host.textContent).toContain(
+      "Staged changes introduced lint errors and were not applied",
+    );
+    act(() => root.unmount());
+  });
+
+  it("shows no verdict rather than a guessed one when the server sent none (TAB-1196)", async () => {
+    const { host, root, source } = await startedRun();
+    await act(async () => {
+      source.emit("complete", { id: 1, type: "complete", at: "now", message: "done" });
+      await Promise.resolve();
+    });
+    expect(verdictLine(host)).toBeNull();
+    act(() => root.unmount());
+  });
+
+  /**
    * TAB-797, reproduced from the report.
    *
    * The transcript renders `thread.transcript` plus live `assistant` events. The
