@@ -18,6 +18,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertNoIntroducedEgress } from "../agent/guardrails/egress.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PACKAGES_DIR = join(HERE, "..", "..", "..");
@@ -186,6 +187,63 @@ describe("Tabario fork: customer-facing Studio does not egress to third parties"
     for (const [host, reason] of Object.entries(JUSTIFIED_UNREACHABLE)) {
       expect(reason.length, `${host} needs a real justification`).toBeGreaterThan(40);
     }
+  });
+});
+
+/**
+ * TAB-1195. Everything above reads the fork's own source, which is the code
+ * Tabario ships. It says nothing about the files Tabario AI *writes*, and those
+ * are loaded by the same two browsers: the customer's preview iframe, and the
+ * headless Chromium that `run_check` and `frame_screenshot` launch inside the
+ * session sandbox. A project file is authored at run time, so no scan of this
+ * repository can ever see one. What can be asserted here is that the gate every
+ * such write passes through refuses them, and that the gate is still wired in.
+ */
+describe("Tabario fork: project files the agent writes do not egress either", () => {
+  const introduces =
+    (content: string, file = "index.html") =>
+    () =>
+      assertNoIntroducedEgress("", content, file, "apply");
+
+  it.each([
+    ["a tracking pixel", '<img src="https://evil.example/p.png?d=1">'],
+    ["a remote script", '<script src="https://cdn.jsdelivr.net/npm/gsap@3"></script>'],
+    ["a protocol-relative stylesheet", '<link rel="stylesheet" href="//evil.example/a.css">'],
+    ["a font preconnect", '<link rel="preconnect" href="https://fonts.gstatic.com">'],
+    ["a remote video", '<video src="https://evil.example/clip.mp4"></video>'],
+    ["a fetch", '<script>fetch("/collect", { method: "POST", body: document.title })</script>'],
+    ["a beacon", '<script>navigator.sendBeacon("/collect", document.title)</script>'],
+    ["a late import", '<script type="module">import("./late.js")</script>'],
+  ])("refuses %s written into a project file", (_name, content) => {
+    expect(introduces(content)).toThrow(/index\.html would reach outside the project/);
+  });
+
+  it("does not extend the fork's own allowances to project files", () => {
+    // `openrouter.ai` is allowed above because Studio's server calls it. That
+    // is a statement about the fork. A composition naming the same host is a
+    // request from the customer's browser, which nothing above ever allowed.
+    for (const host of [...ALLOWED_HOSTS, ...Object.keys(JUSTIFIED_UNREACHABLE)]) {
+      expect(introduces(`<img src="https://${host}/x.png">`), host).toThrow(host);
+    }
+  });
+
+  it("is called on every write the agent makes, and once more before anything is applied", () => {
+    const agentDir = join(HERE, "..", "agent");
+    const providers = readFileSync(join(agentDir, "providers.ts"), "utf8");
+    const runtime = readFileSync(join(agentDir, "runtime.ts"), "utf8");
+    const bodyOf = (source: string, name: string) => {
+      const start = source.indexOf(`function ${name}(`);
+      expect(start, `${name} is gone from the source`).toBeGreaterThan(-1);
+      return source.slice(start, source.indexOf("\n}\n", start));
+    };
+
+    expect(bodyOf(providers, "editFile")).toContain("assertNoIntroducedEgress(");
+    expect(bodyOf(providers, "writeFile")).toContain("assertNoIntroducedEgress(");
+    expect(bodyOf(runtime, "egressAtApply")).toContain("assertNoIntroducedEgress(");
+    expect(runtime).toContain("egressAtApply(changedFiles, baseline, stagingDir)");
+    expect(runtime).toContain(
+      "await this.stagedRefusal(job, staged.changedFiles, baseline, stagingDir)",
+    );
   });
 });
 

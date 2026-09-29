@@ -49,6 +49,7 @@ const GATE_LABELS: Record<AgentRefusalGate, string> = {
   lint: "the change introduced errors the project did not have before",
   "unsupported-change": "the change touched a file Tabario AI is not allowed to edit",
   conflict: "the project was changed by something else while Tabario AI was working",
+  egress: "the change would have made the project load from or send to another host",
 };
 
 /** The refusal that stopped the apply, when one did. */

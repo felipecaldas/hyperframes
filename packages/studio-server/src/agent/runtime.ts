@@ -24,6 +24,8 @@ import {
   type AgentFileSnapshot,
   type AgentRunLedger,
 } from "./files.js";
+import { assertNoIntroducedEgress } from "./guardrails/egress.js";
+import { GuardrailRefusal } from "./guardrails/refusal.js";
 import { decideVerdict } from "./guardrails/verdict.js";
 import { detectProvider, runTabarioModel, type TabarioModelResult } from "./providers.js";
 import { describeSelectedElement } from "./selection.js";
@@ -217,6 +219,42 @@ async function introducedErrors(
     else introduced.push(finding);
   }
   return introduced;
+}
+
+/**
+ * The egress a run introduced, judged on the staged tree as a whole (TAB-1195).
+ *
+ * `edit_file` and `write_file` already refuse this one change at a time, where
+ * the model can still repair it. This is the same question asked once more at
+ * the only point every write has to pass, so a path into the staging tree that
+ * is not one of those two tools cannot carry a remote URL past the gate.
+ *
+ * `baseline` is the tree the model started from, which is the project plus
+ * whatever registry block the request asked for. A block the user chose to
+ * install is not something the agent introduced.
+ */
+function egressAtApply(
+  changedFiles: AgentChangedFile[],
+  baseline: AgentFileSnapshot,
+  stagingDir: string,
+): AgentRefusal | null {
+  for (const file of changedFiles) {
+    if (file.change === "deleted") continue;
+    const before = Buffer.from(baseline.sourceContents[file.path] ?? "", "base64").toString(
+      "utf-8",
+    );
+    const after = readFileSync(join(stagingDir, file.path), "utf-8");
+    try {
+      assertNoIntroducedEgress(before, after, file.path, "apply");
+    } catch (error) {
+      if (!(error instanceof GuardrailRefusal)) throw error;
+      return {
+        ...error.refusal,
+        message: `Staged changes were not applied. ${error.refusal.message}`,
+      };
+    }
+  }
+  return null;
 }
 
 function isEditRequest(job: AgentRunJob): boolean {
@@ -467,6 +505,23 @@ export class AgentRuntime {
     });
   }
 
+  /**
+   * Build the tree the model works in, and say what it started from
+   * (TAB-1195).
+   *
+   * Only a registry install makes that differ from the project, so only then
+   * is the staging tree read a second time.
+   */
+  private async stageProject(
+    job: AgentRunJob,
+    stagingDir: string,
+    before: AgentFileSnapshot,
+  ): Promise<AgentFileSnapshot> {
+    createAgentStagingProject(job.project.dir, stagingDir);
+    await this.installRegistryItem(job, stagingDir);
+    return job.request.registryItem ? snapshotAgentFiles(stagingDir) : before;
+  }
+
   private async execute(job: AgentRunJob): Promise<void> {
     const before = snapshotAgentFiles(job.project.dir);
     const ledger = createLedger(job, before);
@@ -484,8 +539,7 @@ export class AgentRuntime {
     const tools: Record<string, number> = {};
 
     try {
-      createAgentStagingProject(job.project.dir, stagingDir);
-      await this.installRegistryItem(job, stagingDir);
+      const baseline = await this.stageProject(job, stagingDir, before);
       this.emit(job, { type: "status", message: "Tabario AI is inspecting the timeline…" });
       const result = await runTabarioModel({
         adapter: this.adapter,
@@ -505,12 +559,15 @@ export class AgentRuntime {
         onToolResult: (entry) => {
           (ledger.transcript ??= []).push(entry);
         },
+        onRefusal: (refusal) => {
+          this.refuse(job, ledger, refusal);
+        },
       });
       assistantText ||= result.assistantText;
       if (result.verification) ledger.verification = result.verification;
       this.recordMeter(job, ledger, result, tools);
       if (!job.cancelled && !timeouts.reason()) {
-        failure = await this.validateAndApply(job, before, ledger, stagingDir);
+        failure = await this.validateAndApply(job, before, ledger, stagingDir, baseline);
       }
     } catch (error) {
       if (!job.cancelled) failure = timeouts.reason() ?? errorMessage(error);
@@ -579,6 +636,7 @@ export class AgentRuntime {
     before: AgentFileSnapshot,
     ledger: AgentRunLedger,
     stagingDir: string,
+    baseline: AgentFileSnapshot,
   ): Promise<string | null> {
     const staged = diffAgentFiles(stagingDir, before);
     if (!staged.undoCovered)
@@ -596,33 +654,8 @@ export class AgentRuntime {
         ? `Tabario AI finished without changing project files for this ${job.request.kind} request.`
         : null;
     }
-    this.emit(job, { type: "status", message: "Linting the staged project…" });
-    const findings = await lintProject(this.adapter, stagingDir);
-    this.emit(job, { type: "lint", findings });
-    // Gate on what this run *introduced*, never on what it inherited.
-    //
-    // `lintProject` lints each HTML file on its own, so a mounted
-    // sub-composition is judged without the parent that supplies its runtime:
-    // every `compositions/scene-N.html` reports "uses GSAP but no GSAP script is
-    // loaded" while whole-project `hyperframes check` passes with zero errors.
-    // Comparing against nothing therefore held the gate permanently shut — six
-    // inherited errors on an untouched project meant Tabario AI could never
-    // apply anything to any project with scenes.
-    //
-    // The baseline is linted from the pre-run tree rather than recomputed from
-    // the staged one, because the staged tree already contains the change being
-    // judged and would absorb the very error this is meant to catch.
-    const introduced = await introducedErrors(this.adapter, job.project.dir, findings);
-    if (introduced.length > 0) {
-      const summary = introduced
-        .map((finding) => `${finding.file ?? "project"}: ${finding.message}`)
-        .join("; ");
-      return this.refuse(job, ledger, {
-        gate: "lint",
-        stage: "apply",
-        message: `Staged changes introduced lint errors and were not applied — ${summary}`,
-      });
-    }
+    const refusal = await this.stagedRefusal(job, staged.changedFiles, baseline, stagingDir);
+    if (refusal) return this.refuse(job, ledger, refusal);
     if (job.cancelled || job.controller.signal.aborted) return null;
     if (staged.changedFiles.length === 0) return null;
     this.emit(job, { type: "status", message: "Applying the validated timeline transaction…" });
@@ -642,6 +675,48 @@ export class AgentRuntime {
     ledger.completedAt = new Date().toISOString();
     this.emitApplied(job, ledger, staged.changedFiles);
     return null;
+  }
+
+  /**
+   * What the gates make of the staged tree: the first refusal, or null.
+   *
+   * Egress is asked first. A change that reaches the network is refused for
+   * that whatever else is wrong with it, and the lint is the expensive half.
+   */
+  private async stagedRefusal(
+    job: AgentRunJob,
+    changedFiles: AgentChangedFile[],
+    baseline: AgentFileSnapshot,
+    stagingDir: string,
+  ): Promise<AgentRefusal | null> {
+    const egress = egressAtApply(changedFiles, baseline, stagingDir);
+    if (egress) return egress;
+    this.emit(job, { type: "status", message: "Linting the staged project…" });
+    const findings = await lintProject(this.adapter, stagingDir);
+    this.emit(job, { type: "lint", findings });
+    // Gate on what this run *introduced*, never on what it inherited.
+    //
+    // `lintProject` lints each HTML file on its own, so a mounted
+    // sub-composition is judged without the parent that supplies its runtime:
+    // every `compositions/scene-N.html` reports "uses GSAP but no GSAP script is
+    // loaded" while whole-project `hyperframes check` passes with zero errors.
+    // Comparing against nothing therefore held the gate permanently shut — six
+    // inherited errors on an untouched project meant Tabario AI could never
+    // apply anything to any project with scenes.
+    //
+    // The baseline is linted from the pre-run tree rather than recomputed from
+    // the staged one, because the staged tree already contains the change being
+    // judged and would absorb the very error this is meant to catch.
+    const introduced = await introducedErrors(this.adapter, job.project.dir, findings);
+    if (introduced.length === 0) return null;
+    const summary = introduced
+      .map((finding) => `${finding.file ?? "project"}: ${finding.message}`)
+      .join("; ");
+    return {
+      gate: "lint",
+      stage: "apply",
+      message: `Staged changes introduced lint errors and were not applied — ${summary}`,
+    };
   }
 
   /**

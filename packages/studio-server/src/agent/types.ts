@@ -90,8 +90,9 @@ export interface AgentVerdictReceipt {
  * - `lint`: the staged tree introduced lint errors the project did not have.
  * - `unsupported-change`: the run staged a change to a file it may not edit.
  * - `conflict`: the live project moved while the run was working.
+ * - `egress`: the change made a project file reach the network (TAB-1195).
  */
-export type AgentRefusalGate = "lint" | "unsupported-change" | "conflict";
+export type AgentRefusalGate = "lint" | "unsupported-change" | "conflict" | "egress";
 
 /**
  * One refusal, kept on the ledger and sent down the stream (TAB-1196).

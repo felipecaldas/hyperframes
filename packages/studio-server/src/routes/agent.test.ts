@@ -21,7 +21,14 @@ vi.mock("node:fs", async (importActual) => {
 });
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createStudioApi } from "../createStudioApi.js";
@@ -606,7 +613,7 @@ describe("Tabario AI API", () => {
       message?: string;
       verdict?: string;
       verdictReason?: string;
-      refusal?: { gate: string; stage: string; message: string };
+      refusal?: { gate: string; stage: string; message: string; file?: string };
     };
 
     function parseStream(stream: string): StreamEvent[] {
@@ -823,6 +830,178 @@ describe("Tabario AI API", () => {
           .status;
       for (const forgotten of jobIds.slice(0, 3)) expect(await status(forgotten)).toBe(404);
       for (const kept of jobIds.slice(3)) expect(await status(kept)).toBe(200);
+    });
+
+    describe("egress the agent introduces (TAB-1195)", () => {
+      const PIXEL = '<img src="https://evil.example/p.png?d=1">';
+      const hashOf = (content: string) => createHash("sha256").update(content).digest("hex");
+
+      function editIndex(id: string, current: string, oldString: string, newString: string) {
+        return toolCall(id, "edit_file", {
+          path: "index.html",
+          old_string: oldString,
+          new_string: newString,
+          expected_hash: hashOf(current),
+        });
+      }
+
+      /** The one staging tree a run in this fixture is working in. */
+      function stagingDir(): string {
+        const key = hashOf(resolve(setup.projectDir)).slice(0, 24);
+        const root = join(setup.root, "state", "studio-agent", key, "staging");
+        const [only, ...others] = readdirSync(root);
+        if (!only || others.length > 0) throw new Error("expected exactly one staging tree");
+        return join(root, only);
+      }
+
+      it("records a refusal the model repaired mid-run, and still applies the repair", async () => {
+        vi.stubGlobal(
+          "fetch",
+          vi
+            .fn()
+            .mockResolvedValueOnce(
+              completion("", [editIndex("leak", INITIAL_HTML, "before", `before${PIXEL}`)]),
+            )
+            .mockResolvedValueOnce(
+              completion("", [editIndex("fix", INITIAL_HTML, "before", "after")]),
+            )
+            .mockImplementation(async () => completion("Updated the opening.")),
+        );
+        const app = createStudioApi(adapter(setup.projectDir));
+        const { jobId, stream } = await runOnce(app, "Change the opening", "timeline");
+
+        const refusals = parseStream(stream).filter((event) => event.type === "refusal");
+        expect(refusals).toHaveLength(1);
+        expect(refusals[0]?.refusal).toMatchObject({
+          gate: "egress",
+          stage: "tool",
+          file: "index.html",
+        });
+        expect(refusals[0]?.refusal?.message).toContain("https://evil.example/p.png?d=1");
+
+        // A refusal the model answered by doing something else is on the record
+        // and does not decide how the run ended.
+        expect(terminal(stream)).toMatchObject({ type: "complete", verdict: "saved" });
+        expect(ledger(setup.projectDir, jobId).refusals).toEqual([
+          expect.objectContaining({ gate: "egress", stage: "tool" }),
+        ]);
+        expect(readFileSync(join(setup.projectDir, "index.html"), "utf-8")).toBe(
+          INITIAL_HTML.replace("before", "after"),
+        );
+      });
+
+      /**
+       * The apply gate, reached the only way it can be: by a write that did not
+       * go through `edit_file` or `write_file`. Nothing in the agent does that
+       * today, which is the reason to assert it. The gate is there for the day
+       * something does.
+       */
+      it("refuses at apply a remote URL that reached the staging tree past the tools", async () => {
+        const leaking = INITIAL_HTML.replace(
+          "before",
+          'before<script src="https://evil.example/x.js"></script>',
+        );
+        vi.stubGlobal(
+          "fetch",
+          vi
+            .fn()
+            .mockResolvedValueOnce(readIndexFirst())
+            .mockImplementation(async () => {
+              writeFileSync(join(stagingDir(), "index.html"), leaking);
+              return completion("I have updated the opening.");
+            }),
+        );
+        const app = createStudioApi(adapter(setup.projectDir));
+        const { jobId, stream } = await runOnce(app, "Change the opening", "timeline");
+
+        const all = parseStream(stream);
+        const refusal = all.find((event) => event.type === "refusal");
+        expect(refusal?.refusal).toMatchObject({
+          gate: "egress",
+          stage: "apply",
+          file: "index.html",
+        });
+        expect(refusal?.message).toContain("index.html");
+        expect(refusal?.message).toContain("https://evil.example/x.js");
+
+        const end = terminal(stream);
+        expect(end.type).toBe("failure");
+        expect(end.verdict).toBe("refused");
+        expect(end.verdictReason).toContain("load from or send to another host");
+        // The verdict is structural. The URL stays in the refusal.
+        expect(end.verdictReason).not.toContain("evil.example");
+        expect(ledger(setup.projectDir, jobId)).toMatchObject({
+          status: "failed",
+          verdict: "refused",
+          refusals: [expect.objectContaining({ gate: "egress", stage: "apply" })],
+        });
+        expect(readFileSync(join(setup.projectDir, "index.html"), "utf-8")).toBe(INITIAL_HTML);
+      });
+
+      it("applies an edit to a project that already loads from another host", async () => {
+        const inherited = INITIAL_HTML.replace("before", `before${PIXEL}`);
+        seedProject(setup.projectDir, inherited);
+        vi.stubGlobal(
+          "fetch",
+          vi
+            .fn()
+            .mockResolvedValueOnce(
+              completion("", [editIndex("write", inherited, "before", "after")]),
+            )
+            .mockImplementation(async () => completion("Updated.")),
+        );
+        const app = createStudioApi(adapter(setup.projectDir));
+        const { stream } = await runOnce(app, "Change the opening", "timeline");
+
+        expect(stream).not.toContain("event: refusal");
+        expect(terminal(stream)).toMatchObject({ type: "complete", verdict: "saved" });
+        expect(readFileSync(join(setup.projectDir, "index.html"), "utf-8")).toBe(
+          inherited.replace("before", "after"),
+        );
+      });
+
+      it("does not hold a registry block the user asked for against the agent", async () => {
+        const block = '<html><script src="https://cdn.example.com/gsap.js"></script></html>\n';
+        vi.stubGlobal(
+          "fetch",
+          vi
+            .fn()
+            .mockResolvedValueOnce(
+              completion("", [editIndex("write", INITIAL_HTML, "before", "after")]),
+            )
+            .mockImplementation(async () => completion("Installed and wired.")),
+        );
+        const app = createStudioApi({
+          ...adapter(setup.projectDir),
+          installRegistryBlock: async ({ project, blockName }) => {
+            const path = `compositions/${blockName}.html`;
+            mkdirSync(join(project.dir, "compositions"), { recursive: true });
+            writeFileSync(join(project.dir, path), block);
+            return {
+              written: [path],
+              block: {
+                name: blockName,
+                title: blockName,
+                description: "fixture",
+                type: "hyperframes:block",
+                files: [],
+              },
+            };
+          },
+        });
+        const token = await nonce(app);
+        const jobId = await start(app, token, "Add the accent block", {
+          kind: "catalog",
+          registryItem: "accent",
+        });
+        const stream = await events(app, jobId);
+
+        expect(stream).not.toContain("event: refusal");
+        expect(terminal(stream)).toMatchObject({ type: "complete", verdict: "saved" });
+        expect(readFileSync(join(setup.projectDir, "compositions/accent.html"), "utf-8")).toBe(
+          block,
+        );
+      });
     });
   });
 });

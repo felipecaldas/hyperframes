@@ -19,6 +19,13 @@ import {
 import { isSupportedAgentSource, snapshotAgentFiles } from "./files.js";
 import { assertNoCaptionStructureEdit } from "./guardrails/captionStructure.js";
 import {
+  assertNoIntroducedEgress,
+  classifySrc,
+  egressRefusal,
+  introducedOnly,
+} from "./guardrails/egress.js";
+import { GuardrailRefusal } from "./guardrails/refusal.js";
+import {
   budgetStopMessage,
   parseUsage,
   resolveBudget,
@@ -37,6 +44,7 @@ import {
 import type {
   AgentMeasurementReceipt,
   AgentProviderCapability,
+  AgentRefusal,
   AgentRequestKind,
   AgentThreadSummary,
   AgentToolTranscriptEntry,
@@ -72,6 +80,12 @@ export interface TabarioModelOptions {
   onActivity: () => void;
   /** Every tool call and its result, for the run ledger (TAB-1061). */
   onToolResult?: (entry: AgentToolTranscriptEntry) => void;
+  /**
+   * A guardrail refused a tool call mid-run (TAB-1195). The model is told
+   * through the tool result and may repair the change. This is how the run's
+   * ledger and stream come to know the gate fired at all.
+   */
+  onRefusal?: (refusal: AgentRefusal) => void;
   /**
    * An opaque, stable id for whoever this run is for, sent to OpenRouter as
    * `user` so abuse attribution is possible provider-side (TAB-1193).
@@ -463,9 +477,56 @@ function mediaInventory(root: string): string[] {
   return Object.keys(snapshotAgentFiles(root).files).filter(isMediaPath).sort();
 }
 
-/** A src the project ships nothing for, and cannot: remote, inline, or templated. */
+/**
+ * A src the project ships nothing for, and cannot: remote, inline, or templated.
+ *
+ * Three different things, which is why `classifySrc` tells them apart
+ * (TAB-1195). This predicate only answers "is there a file to look for", and
+ * for all three the answer is no. Which of them may be *written* is decided
+ * separately, in `assertMediaSrcsResolve`.
+ */
 function isNonLocalSrc(src: string): boolean {
-  return /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(src) || /\$\{|\{\{|<%/.test(src);
+  return classifySrc(src) !== "local";
+}
+
+/** Every media src in `content`, in document order, duplicates included. */
+function mediaSrcs(content: string): string[] {
+  return [...content.matchAll(new RegExp(MEDIA_SRC_RE.source, MEDIA_SRC_RE.flags))].map(
+    (match) => match[1] ?? "",
+  );
+}
+
+/**
+ * Refuse a remote media src the change introduced (TAB-1195).
+ *
+ * Until this existed a remote src was skipped by the guard below as "not a
+ * local path, so nothing to resolve", which is true and was the whole check. A
+ * `data:` URI and a template placeholder are still skipped, because neither is
+ * a request. And a remote src the file already had is left alone: the rule is
+ * that the change may not make it worse, not that the file must be clean.
+ */
+function assertNoIntroducedRemoteMedia(
+  root: string,
+  fileRelative: string,
+  before: string,
+  after: string,
+): void {
+  const remote = (content: string) =>
+    mediaSrcs(content).filter((src) => classifySrc(src) === "remote");
+  const introduced = introducedOnly(remote(before), remote(after), (src) => src);
+  if (introduced.length === 0) return;
+
+  const available = mediaInventory(root);
+  throw new GuardrailRefusal(
+    egressRefusal(
+      fileRelative,
+      introduced.map((src) => `remote media ${src}`),
+      "tool",
+      available.length
+        ? `Use one of the media files the project contains: ${available.join(", ")}.`
+        : "This project contains no media files, and media cannot be added by editing HTML.",
+    ),
+  );
 }
 
 /**
@@ -505,14 +566,17 @@ function mediaSrcResolves(root: string, fileRelative: string, src: string): bool
  * The error carries the real inventory, so the refusal is also the answer: the
  * next turn can pick a filename that exists instead of guessing again.
  */
-function assertMediaSrcsResolve(root: string, fileRelative: string, content: string): void {
+function assertMediaSrcsResolve(
+  root: string,
+  fileRelative: string,
+  content: string,
+  before: string,
+): void {
   if (!fileRelative.toLowerCase().endsWith(".html")) return;
+  assertNoIntroducedRemoteMedia(root, fileRelative, before, content);
 
   const missing: string[] = [];
-  const re = new RegExp(MEDIA_SRC_RE.source, MEDIA_SRC_RE.flags);
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(content)) !== null) {
-    const src = match[1] ?? "";
+  for (const src of mediaSrcs(content)) {
     if (isNonLocalSrc(src)) continue;
     if (mediaSrcResolves(root, fileRelative, src)) continue;
     if (!missing.includes(src)) missing.push(src);
@@ -738,7 +802,8 @@ function editFile(args: JsonRecord, options: TabarioModelOptions): unknown {
   // literal — they are content here, not substitution patterns.
   const after = before.replace(oldString, () => newString);
   if (Buffer.byteLength(after, "utf-8") > MAX_FILE_BYTES) throw new Error("file is too large");
-  assertMediaSrcsResolve(options.stagingDir, file.relative, after);
+  assertMediaSrcsResolve(options.stagingDir, file.relative, after, before);
+  assertNoIntroducedEgress(before, after, file.relative, "tool");
   assertNoNewDuplicateHfIds(before, after, file.relative);
   assertNoCaptionStructureEdit(before, after, file.relative);
   writeFileSync(file.absolute, after, "utf-8");
@@ -766,7 +831,8 @@ function writeFile(args: JsonRecord, options: TabarioModelOptions): unknown {
     );
   if ((args.expected_hash ?? null) !== null)
     throw new Error(`hash conflict for ${file.relative}; current hash is null`);
-  assertMediaSrcsResolve(options.stagingDir, file.relative, args.content);
+  assertMediaSrcsResolve(options.stagingDir, file.relative, args.content, "");
+  assertNoIntroducedEgress("", args.content, file.relative, "tool");
   assertNoNewDuplicateHfIds("", args.content, file.relative);
   assertNoCaptionStructureEdit("", args.content, file.relative);
   mkdirSync(dirname(file.absolute), { recursive: true });
@@ -1191,6 +1257,7 @@ async function executeToolCalls(
       // already visible to the model as an ordinary error result and needs no
       // state of its own.
       if (error instanceof FrameReadRequiredError) state.refusedFrameMdWrite = true;
+      if (error instanceof GuardrailRefusal) options.onRefusal?.(error.refusal);
       result = { error: error instanceof Error ? error.message : String(error) };
     }
     const content = JSON.stringify(result);
