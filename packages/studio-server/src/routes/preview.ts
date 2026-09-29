@@ -18,6 +18,7 @@ import { isProjectRootMissing, resolveWithinProject } from "../helpers/safePath.
 import { getMimeType } from "../helpers/mime.js";
 import { buildSubCompositionHtml, hasBaseElement } from "../helpers/subComposition.js";
 import {
+  createProjectSignature,
   resolveProjectAndSignature,
   resolveProjectSignature,
 } from "../helpers/projectSignature.js";
@@ -377,6 +378,7 @@ export function registerPreviewRoutes(api: Hono, adapter: PreviewApiAdapter): vo
     previewVariables: Record<string, unknown> | null,
     builtKey: string,
     capture: boolean,
+    signature: string,
   ): Promise<string | null> {
     const diskMain = resolveProjectMainHtml(project.dir, project.id);
     const normalizedDisk = diskMain ? ensureHfIds(diskMain.html) : null;
@@ -431,8 +433,10 @@ export function registerPreviewRoutes(api: Hono, adapter: PreviewApiAdapter): vo
         mediaCodecProbeCache,
       );
       bundled = addScenePartsManifest(bundled, [`meta[name="${PROJECT_SIGNATURE_META}"]`]);
-      rememberPreview(builtKey, bundled);
-      if (!capture) adapter.previewDocuments?.write(builtKey, bundled);
+      if (createProjectSignature(project.dir) === signature) {
+        rememberPreview(builtKey, bundled);
+        if (!capture) adapter.previewDocuments?.write(builtKey, bundled);
+      }
       return bundled;
     } catch {
       // Re-read disk on bundle failure so we serve the latest file content,
@@ -492,7 +496,7 @@ export function registerPreviewRoutes(api: Hono, adapter: PreviewApiAdapter): vo
     }
     let pending = previewBuilds.get(builtKey);
     if (!pending) {
-      pending = buildPreview(project, previewVariables, builtKey, capture).finally(() =>
+      pending = buildPreview(project, previewVariables, builtKey, capture, signature).finally(() =>
         previewBuilds.delete(builtKey),
       );
       previewBuilds.set(builtKey, pending);
