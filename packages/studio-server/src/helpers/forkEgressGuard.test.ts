@@ -241,9 +241,7 @@ describe("Tabario fork: project files the agent writes do not egress either", ()
     expect(bodyOf(providers, "writeFile")).toContain("assertNoIntroducedEgress(");
     expect(bodyOf(runtime, "egressAtApply")).toContain("assertNoIntroducedEgress(");
     expect(runtime).toContain("egressAtApply(changedFiles, baseline, stagingDir)");
-    expect(runtime).toContain(
-      "await this.stagedRefusal(job, staged.changedFiles, baseline, stagingDir)",
-    );
+    expect(runtime).toContain("await this.stagedRefusal(job, staged.changedFiles, trees)");
   });
 });
 

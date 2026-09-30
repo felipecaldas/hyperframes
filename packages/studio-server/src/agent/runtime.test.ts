@@ -4,7 +4,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { AGENT_IDLE_TIMEOUT_MS, agentStateRoot, unappliedReply } from "./runtime.js";
+import {
+  AGENT_IDLE_TIMEOUT_MS,
+  agentStateRoot,
+  introducedErrors,
+  unappliedReply,
+} from "./runtime.js";
 
 const source = readFileSync(new URL("./runtime.ts", import.meta.url).pathname, "utf8");
 
@@ -120,5 +125,51 @@ describe("the check at apply is in the path of every change (TAB-1222)", () => {
     expect(given).toContain("transcript: thread.transcript");
     expect(given).not.toContain("material");
     expect(given).not.toContain("context");
+  });
+});
+
+/**
+ * TAB-1223. The other two of the three reasons no catalog item could be
+ * applied were both the lint gate's baseline: it linted the project as it was
+ * before the run, so the staged item's own findings, a bare-element block or a
+ * component with no root composition, always counted as introduced.
+ */
+describe("the lint gate judges a catalog run against the tree the model started in (TAB-1223)", () => {
+  const blockError = {
+    severity: "error",
+    message: "Composition starts with a bare element",
+    file: "compositions/lt-clean-bar.html",
+  };
+  const inherited = { severity: "error", message: "uses GSAP", file: "compositions/scene-1.html" };
+
+  it("counts the staged item's own error as inherited, not introduced", () => {
+    expect(introducedErrors([inherited, blockError], [inherited, blockError])).toEqual([]);
+  });
+
+  it("still refuses an error the model adds to the staged item's file", () => {
+    const added = {
+      ...blockError,
+      message: "<div> is a timeline element that contains nested <div>",
+    };
+    expect(introducedErrors([inherited, blockError], [inherited, blockError, added])).toEqual([
+      added,
+    ]);
+  });
+
+  it("still refuses a second occurrence of the item's own error", () => {
+    expect(introducedErrors([blockError], [blockError, blockError])).toEqual([blockError]);
+  });
+
+  it("lints the staged tree after the install and before the model runs, and hands that to apply", () => {
+    const staged = source.indexOf("lintBaseline: await lintProject(this.adapter, stagingDir)");
+    const model = source.indexOf("const result = await runTabarioModel({");
+    expect(staged).toBeGreaterThan(-1);
+    expect(staged).toBeLessThan(model);
+    expect(source).toContain("lintBaseline ?? (await lintProject(this.adapter, job.project.dir))");
+    expect(source).not.toContain("introducedErrors(this.adapter");
+  });
+
+  it("measures undo cover from the staged baseline, so an installed asset is not the model's", () => {
+    expect(source).toContain("diffAgentFiles(trees.stagingDir, trees.before, trees.baseline)");
   });
 });

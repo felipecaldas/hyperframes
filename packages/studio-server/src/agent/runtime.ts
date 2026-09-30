@@ -74,7 +74,19 @@ interface RunTrees {
   before: AgentFileSnapshot;
   /** The tree the model started in: the project, plus a catalog item when one was asked for. */
   baseline: AgentFileSnapshot;
+  /**
+   * What the lint said about `baseline` before the model ran, when a catalog
+   * item was staged (TAB-1223). Null otherwise: the baseline is then the
+   * project, which is linted only if the staged tree has errors to compare.
+   */
+  lintBaseline: LintFinding[] | null;
   stagingDir: string;
+}
+
+interface LintFinding {
+  severity: string;
+  message: string;
+  file?: string;
 }
 
 /**
@@ -245,16 +257,15 @@ function findingKey(finding: { severity: string; message: string; file?: string 
  * error and introduces a different one nets to zero, and a count would wave it
  * through. Duplicates of the same message in one file are matched
  * one-for-one, so going from one occurrence to three still reports two.
+ *
+ * `baseline` is what the lint said about the tree the model started in. On a
+ * catalog run that tree holds the staged item, whose own findings are then
+ * inherited and not introduced (TAB-1223).
  */
-async function introducedErrors(
-  adapter: StudioApiAdapter,
-  projectDir: string,
-  staged: Array<{ severity: string; message: string; file?: string }>,
-): Promise<Array<{ severity: string; message: string; file?: string }>> {
+export function introducedErrors(baseline: LintFinding[], staged: LintFinding[]): LintFinding[] {
   const stagedErrors = staged.filter((finding) => finding.severity.toLowerCase() === "error");
   if (stagedErrors.length === 0) return [];
 
-  const baseline = await lintProject(adapter, projectDir);
   const remaining = new Map<string, number>();
   for (const finding of baseline) {
     if (finding.severity.toLowerCase() !== "error") continue;
@@ -262,7 +273,7 @@ async function introducedErrors(
     remaining.set(key, (remaining.get(key) ?? 0) + 1);
   }
 
-  const introduced: Array<{ severity: string; message: string; file?: string }> = [];
+  const introduced: LintFinding[] = [];
   for (const finding of stagedErrors) {
     const key = findingKey(finding);
     const left = remaining.get(key) ?? 0;
@@ -291,6 +302,10 @@ function egressAtApply(
 ): AgentRefusal | null {
   for (const file of changedFiles) {
     if (file.change === "deleted") continue;
+    // A file with no source snapshot is a binary, and a binary in the staged
+    // tree is a catalog asset: Studio put it there and the model cannot write
+    // one. Its bytes read as text would be scanned for URLs they do not carry.
+    if (!file.supported) continue;
     const before = Buffer.from(baseline.sourceContents[file.path] ?? "", "base64").toString(
       "utf-8",
     );
@@ -580,16 +595,24 @@ export class AgentRuntime {
    * (TAB-1195).
    *
    * Only a registry install makes that differ from the project, so only then
-   * is the staging tree read a second time.
+   * is the staging tree read a second time, and only then is it linted before
+   * the model runs (TAB-1223). A catalog block is a fragment and a component
+   * has no root composition, so the item Studio staged always carries a lint
+   * error of its own. Judged against the project, that error read as the
+   * model's, and no catalog item could ever be applied.
    */
   private async stageProject(
     job: AgentRunJob,
     stagingDir: string,
     before: AgentFileSnapshot,
-  ): Promise<AgentFileSnapshot> {
+  ): Promise<Pick<RunTrees, "baseline" | "lintBaseline">> {
     createAgentStagingProject(job.project.dir, stagingDir);
     await this.installRegistryItem(job, stagingDir);
-    return job.request.registryItem ? snapshotAgentFiles(stagingDir) : before;
+    if (!job.request.registryItem) return { baseline: before, lintBaseline: null };
+    return {
+      baseline: snapshotAgentFiles(stagingDir),
+      lintBaseline: await lintProject(this.adapter, stagingDir),
+    };
   }
 
   private async execute(job: AgentRunJob): Promise<void> {
@@ -609,7 +632,7 @@ export class AgentRuntime {
     const tools: Record<string, number> = {};
 
     try {
-      const baseline = await this.stageProject(job, stagingDir, before);
+      const { baseline, lintBaseline } = await this.stageProject(job, stagingDir, before);
       this.emit(job, { type: "status", message: "Tabario AI is inspecting the timeline…" });
       const result = await runTabarioModel({
         adapter: this.adapter,
@@ -635,7 +658,7 @@ export class AgentRuntime {
       });
       assistantText ||= result.assistantText;
       if (result.verification) ledger.verification = result.verification;
-      const trees: RunTrees = { before, baseline, stagingDir };
+      const trees: RunTrees = { before, baseline, lintBaseline, stagingDir };
       const staged = await this.checkStaged(job, thread, trees, timeouts.touch);
       this.recordMeter(job, ledger, result, tools, staged.review);
       if (!job.cancelled && !timeouts.reason()) {
@@ -675,7 +698,7 @@ export class AgentRuntime {
     if (job.cancelled || job.controller.signal.aborted)
       return { diff: null, review: null, error: null };
     try {
-      const diff = diffAgentFiles(trees.stagingDir, trees.before);
+      const diff = diffAgentFiles(trees.stagingDir, trees.before, trees.baseline);
       const review = await this.reviewStaged(job, thread, trees.baseline, diff, touch);
       return { diff, review, error: null };
     } catch (error) {
@@ -775,7 +798,6 @@ export class AgentRuntime {
     trees: RunTrees,
     change: StagedChange,
   ): Promise<string | null> {
-    const { baseline, stagingDir } = trees;
     const staged = stagedOrThrow(change);
     if (!staged.undoCovered)
       return this.refuse(job, ledger, {
@@ -792,8 +814,7 @@ export class AgentRuntime {
     // a change that was not asked for is recorded as that, whatever the lint
     // would have gone on to say about it.
     const refusal =
-      change.review?.refusal ??
-      (await this.stagedRefusal(job, staged.changedFiles, baseline, stagingDir));
+      change.review?.refusal ?? (await this.stagedRefusal(job, staged.changedFiles, trees));
     if (refusal) return this.refuse(job, ledger, refusal);
     if (job.cancelled || job.controller.signal.aborted) return null;
     return this.applyChecked(job, ledger, trees, staged.changedFiles);
@@ -834,9 +855,9 @@ export class AgentRuntime {
   private async stagedRefusal(
     job: AgentRunJob,
     changedFiles: AgentChangedFile[],
-    baseline: AgentFileSnapshot,
-    stagingDir: string,
+    trees: RunTrees,
   ): Promise<AgentRefusal | null> {
+    const { baseline, lintBaseline, stagingDir } = trees;
     const egress = egressAtApply(changedFiles, baseline, stagingDir);
     if (egress) return egress;
     this.emit(job, { type: "status", message: "Linting the staged project…" });
@@ -852,10 +873,16 @@ export class AgentRuntime {
     // inherited errors on an untouched project meant Tabario AI could never
     // apply anything to any project with scenes.
     //
-    // The baseline is linted from the pre-run tree rather than recomputed from
-    // the staged one, because the staged tree already contains the change being
-    // judged and would absorb the very error this is meant to catch.
-    const introduced = await introducedErrors(this.adapter, job.project.dir, findings);
+    // The baseline is the tree the model started in, linted before it ran
+    // (TAB-1223), or the pre-run project when nothing was staged ahead of the
+    // model. Never the staged tree after the run: that already contains the
+    // change being judged and would absorb the very error this is meant to
+    // catch. And only linted when there is an error to compare, since the
+    // lint is the expensive half.
+    const hasErrors = findings.some((finding) => finding.severity.toLowerCase() === "error");
+    if (!hasErrors) return null;
+    const baselineFindings = lintBaseline ?? (await lintProject(this.adapter, job.project.dir));
+    const introduced = introducedErrors(baselineFindings, findings);
     if (introduced.length === 0) return null;
     const summary = introduced
       .map((finding) => `${finding.file ?? "project"}: ${finding.message}`)

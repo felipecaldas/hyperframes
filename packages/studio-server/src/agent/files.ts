@@ -6,7 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
-  rmSync,
+  rmdirSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -187,16 +187,38 @@ export function compareAgentSnapshots(
   return changedFiles;
 }
 
+/**
+ * A file Studio's catalog install put in the staging tree and the model left
+ * alone (TAB-1223).
+ *
+ * A block can ship an asset, and an asset is not source: nothing snapshots its
+ * contents, so a change to one cannot be undone. But the user chose the block,
+ * the model never touched the file, and undoing a created file is deleting
+ * it. Held to the hash the install wrote, so a binary the model overwrote is
+ * still the model's change and still unsupported.
+ */
+function installedUnchanged(file: AgentChangedFile, staged: AgentFileSnapshot): boolean {
+  return file.change === "created" && staged.files[file.path]?.hash === file.afterHash;
+}
+
+/**
+ * What the run changed from the project, and whether it can be undone.
+ *
+ * `staged` is the tree the model started in. It differs from `before` only
+ * when a catalog item was installed, and then the item's own files are
+ * measured against it rather than counted as the model's.
+ */
 export function diffAgentFiles(
   projectDir: string,
   before: AgentFileSnapshot,
+  staged: AgentFileSnapshot = before,
 ): { after: AgentFileSnapshot; changedFiles: AgentChangedFile[]; undoCovered: boolean } {
   const after = snapshotAgentFiles(projectDir);
   const changedFiles = compareAgentSnapshots(before, after);
   return {
     after,
     changedFiles,
-    undoCovered: changedFiles.every((file) => file.supported),
+    undoCovered: changedFiles.every((file) => file.supported || installedUnchanged(file, staged)),
   };
 }
 
@@ -254,7 +276,10 @@ export function applyStagedAgentFiles(
   const applied: AgentChangedFile[] = [];
   try {
     for (const file of changedFiles) {
-      if (!file.supported) throw new Error(`unsupported staged file: ${file.path}`);
+      // A created file needs no source snapshot to be undone; a changed one
+      // does, and only a supported file has one.
+      if (!file.supported && file.change !== "created")
+        throw new Error(`unsupported staged file: ${file.path}`);
       const destination = join(projectDir, file.path);
       if (file.change === "deleted") {
         if (existsSync(destination)) unlinkSync(destination);
@@ -347,7 +372,9 @@ function removeEmptyDirectories(projectDir: string, dirs: string[]): void {
     if (rel === ".") continue;
     const abs = join(projectDir, rel);
     try {
-      if (existsSync(abs) && readdirSync(abs).length === 0) rmSync(abs, { recursive: false });
+      // `rmSync` refuses a directory unless told to recurse, and that refusal
+      // landed in the catch below, so no directory was ever removed (TAB-1223).
+      if (existsSync(abs) && readdirSync(abs).length === 0) rmdirSync(abs);
     } catch {
       // A non-empty or concurrently changed directory must remain.
     }

@@ -201,3 +201,80 @@ describe("agent source transactions", () => {
     expect(readFileSync(join(outside, "outside.html"), "utf-8")).toBe("after");
   });
 });
+
+/**
+ * TAB-1223. Every catalog item pressed in Studio ended in a refusal, and one
+ * of the three reasons was here: a block that ships an image installed a file
+ * no snapshot covers, and the run was refused as an unsupported change before
+ * any gate read what the model had done.
+ */
+describe("a catalog asset Studio staged is not the model's change", () => {
+  function catalogRun(): {
+    projectDir: string;
+    stagingDir: string;
+    before: ReturnType<typeof snapshotAgentFiles>;
+    baseline: ReturnType<typeof snapshotAgentFiles>;
+  } {
+    const projectDir = mkdtempSync(join(tmpdir(), "hf-agent-files-"));
+    writeFileSync(join(projectDir, "index.html"), "<div></div>\n");
+    const before = snapshotAgentFiles(projectDir);
+    const stagingDir = mkdtempSync(join(tmpdir(), "hf-agent-staging-"));
+    createAgentStagingProject(projectDir, stagingDir);
+    // What `installRegistryBlock` writes for a block with an asset.
+    mkdirSync(join(stagingDir, "compositions"));
+    mkdirSync(join(stagingDir, "assets"));
+    writeFileSync(join(stagingDir, "compositions/instagram-follow.html"), "<div>block</div>\n");
+    writeFileSync(join(stagingDir, "assets/avatar.jpg"), Buffer.from([0xff, 0xd8, 0xff]));
+    const baseline = snapshotAgentFiles(stagingDir);
+    return { projectDir, stagingDir, before, baseline };
+  }
+
+  it("is undo-covered, applied with the change, and removed by undo", () => {
+    const { projectDir, stagingDir, before, baseline } = catalogRun();
+    writeFileSync(join(stagingDir, "index.html"), '<div data-src="instagram-follow"></div>\n');
+
+    const diff = diffAgentFiles(stagingDir, before, baseline);
+    expect(diff.undoCovered).toBe(true);
+    const asset = diff.changedFiles.find((file) => file.path === "assets/avatar.jpg");
+    expect(asset).toMatchObject({ change: "created", supported: false });
+
+    expect(applyStagedAgentFiles(projectDir, stagingDir, before, diff.changedFiles)).toEqual([]);
+    expect(readFileSync(join(projectDir, "assets/avatar.jpg"))).toEqual(
+      Buffer.from([0xff, 0xd8, 0xff]),
+    );
+    expect(existsSync(join(projectDir, "compositions/instagram-follow.html"))).toBe(true);
+
+    const ledger: AgentRunLedger = {
+      version: 1,
+      jobId: "fixture",
+      projectId: "fixture",
+      projectDir,
+      provider: "tabario",
+      createdAt: new Date().toISOString(),
+      status: "complete",
+      undoCovered: true,
+      before,
+      changedFiles: diff.changedFiles,
+    };
+    expect(undoAgentFiles(projectDir, ledger)).toEqual([]);
+    expect(existsSync(join(projectDir, "assets/avatar.jpg"))).toBe(false);
+    expect(existsSync(join(projectDir, "assets"))).toBe(false);
+    expect(readFileSync(join(projectDir, "index.html"), "utf-8")).toBe("<div></div>\n");
+  });
+
+  it("is the model's change again the moment the model overwrites it", () => {
+    const { stagingDir, before, baseline } = catalogRun();
+    writeFileSync(join(stagingDir, "assets/avatar.jpg"), Buffer.from([0x00]));
+
+    const diff = diffAgentFiles(stagingDir, before, baseline);
+    expect(diff.undoCovered).toBe(false);
+  });
+
+  it("does not cover a binary the model created on its own", () => {
+    const { stagingDir, before, baseline } = catalogRun();
+    writeFileSync(join(stagingDir, "assets/other.png"), Buffer.from([0x89]));
+
+    const diff = diffAgentFiles(stagingDir, before, baseline);
+    expect(diff.undoCovered).toBe(false);
+  });
+});
