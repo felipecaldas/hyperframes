@@ -9,7 +9,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import type { RegistryItem } from "@hyperframes/core";
 import type { StudioApiAdapter } from "../types.js";
 import { lintProject } from "../helpers/projectLint.js";
 import {
@@ -19,6 +18,7 @@ import {
 } from "../helpers/layoutProbe.js";
 import { isSupportedAgentSource, snapshotAgentFiles } from "./files.js";
 import { assertNoCaptionStructureEdit } from "./guardrails/captionStructure.js";
+import type { CatalogMount } from "./guardrails/catalogMount.js";
 import {
   assertNoIntroducedEgress,
   classifySrc,
@@ -70,26 +70,6 @@ type ToolCall = {
   type: "function";
   function: { name: string; arguments: string };
 };
-
-/**
- * What Studio staged for a catalog run, so the model is told how the item is
- * mounted rather than left to work it out (TAB-1223).
- *
- * Left to itself, the model pasted the block's markup into `index.html`, which
- * the checker refuses as a timeline element holding nested elements, or wrote
- * a file of its own for it, which the check refuses as unasked for. The
- * install already knows the one element that mounts the item, and the model
- * is handed it.
- */
-export interface CatalogMount {
-  /** The registry item's name, as the user picked it. */
-  item: string;
-  type: RegistryItem["type"];
-  /** Project-relative path of the item's own file. */
-  file: string;
-  /** The mount element as `hyperframes add` prints it; a comment for a component. */
-  snippet: string;
-}
 
 export interface TabarioModelOptions {
   adapter: StudioApiAdapter;

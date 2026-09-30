@@ -29,12 +29,8 @@ import { assertNoIntroducedEgress } from "./guardrails/egress.js";
 import { GuardrailRefusal } from "./guardrails/refusal.js";
 import { reviewChange, spentWithReview, type ReviewResult } from "./guardrails/review.js";
 import { decideVerdict } from "./guardrails/verdict.js";
-import {
-  detectProvider,
-  runTabarioModel,
-  type CatalogMount,
-  type TabarioModelResult,
-} from "./providers.js";
+import type { CatalogMount } from "./guardrails/catalogMount.js";
+import { detectProvider, runTabarioModel, type TabarioModelResult } from "./providers.js";
 import { describeSelectedElement } from "./selection.js";
 import type {
   AgentChangedFile,
@@ -85,6 +81,8 @@ interface RunTrees {
    * project, which is linted only if the staged tree has errors to compare.
    */
   lintBaseline: LintFinding[] | null;
+  /** What Studio staged on a catalog run, as the install said it (TAB-1223). */
+  mount?: CatalogMount;
   stagingDir: string;
 }
 
@@ -607,6 +605,7 @@ export class AgentRuntime {
       item: job.request.registryItem,
       type: installed.block.type,
       file,
+      files: installed.written,
       snippet: installed.snippet ?? "",
     };
   }
@@ -681,7 +680,7 @@ export class AgentRuntime {
       });
       assistantText ||= result.assistantText;
       if (result.verification) ledger.verification = result.verification;
-      const trees: RunTrees = { before, baseline, lintBaseline, stagingDir };
+      const trees: RunTrees = { before, baseline, lintBaseline, mount, stagingDir };
       const staged = await this.checkStaged(job, thread, trees, timeouts.touch);
       this.recordMeter(job, ledger, result, tools, staged.review);
       if (!job.cancelled && !timeouts.reason()) {
@@ -722,7 +721,7 @@ export class AgentRuntime {
       return { diff: null, review: null, error: null };
     try {
       const diff = diffAgentFiles(trees.stagingDir, trees.before, trees.baseline);
-      const review = await this.reviewStaged(job, thread, trees.baseline, diff, touch);
+      const review = await this.reviewStaged(job, thread, trees.baseline, trees.mount, diff, touch);
       return { diff, review, error: null };
     } catch (error) {
       return { diff: null, review: null, error: errorMessage(error) };
@@ -741,6 +740,7 @@ export class AgentRuntime {
     job: AgentRunJob,
     thread: PersistedThread,
     baseline: AgentFileSnapshot,
+    mount: CatalogMount | undefined,
     diff: ReturnType<typeof diffAgentFiles>,
     touch: () => void,
   ): Promise<ReviewResult | null> {
@@ -757,6 +757,7 @@ export class AgentRuntime {
     return reviewChange({
       kind: job.request.kind,
       ...(job.request.registryItem ? { registryItem: job.request.registryItem } : {}),
+      ...(mount ? { mount } : {}),
       transcript: thread.transcript,
       changedFiles,
       baseline,

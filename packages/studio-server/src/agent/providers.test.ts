@@ -3291,6 +3291,7 @@ describe("Tabario AI guardrails: the trust boundary on model context (TAB-1194)"
         item: "lt-clean-bar",
         type: "hyperframes:block",
         file: "compositions/lt-clean-bar.html",
+        files: ["compositions/lt-clean-bar.html"],
         snippet: MOUNT,
       });
 
@@ -3305,6 +3306,7 @@ describe("Tabario AI guardrails: the trust boundary on model context (TAB-1194)"
         item: "grain-overlay",
         type: "hyperframes:component",
         file: "compositions/components/grain-overlay.html",
+        files: ["compositions/components/grain-overlay.html"],
         snippet:
           "<!-- paste from compositions/components/grain-overlay.html into your composition -->",
       });

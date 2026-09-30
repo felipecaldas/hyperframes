@@ -35,6 +35,8 @@ import { createStudioApi } from "../createStudioApi.js";
 import type { StudioApiAdapter } from "../types.js";
 
 const INITIAL_HTML = '<html data-composition-id="fixture"><body>before</body></html>\n';
+/** The element that mounts the fixture block Studio stages on a catalog run (TAB-1223). */
+const MOUNT = '<div data-composition-src="compositions/accent.html"></div>';
 /** A project that already fails lint, as every real one does (TAB-780). */
 const INHERITED_HTML =
   '<html data-composition-id="fixture"><body>INHERITED_ERROR before</body></html>\n';
@@ -1176,7 +1178,7 @@ describe("Tabario AI API", () => {
           vi
             .fn()
             .mockResolvedValueOnce(
-              completion("", [editIndex("write", INITIAL_HTML, "before", "after")]),
+              completion("", [editIndex("write", INITIAL_HTML, "before", `before${MOUNT}`)]),
             )
             .mockImplementation(async () => completion("Installed and wired.")),
         );
@@ -1376,7 +1378,7 @@ describe("Tabario AI API", () => {
                 toolCall("write", "edit_file", {
                   path: "index.html",
                   old_string: "before",
-                  new_string: "after",
+                  new_string: `before${MOUNT}`,
                   expected_hash: hashOf(INITIAL_HTML),
                 }),
               ]),
@@ -1394,8 +1396,43 @@ describe("Tabario AI API", () => {
         expect(terminal(stream).type).toBe("complete");
         const shown = shownToCheck(checks.mock.calls[0]?.[1]);
         expect(shown).toContain("The change, in 1 hunk:");
-        expect(shown).not.toContain("compositions/accent.html");
+        expect(shown).not.toContain("<html>accent</html>");
         expect(existsSync(join(setup.projectDir, "compositions/accent.html"))).toBe(true);
+      });
+
+      it("refuses a catalog run that changed the composition beyond the mount, without asking the check (TAB-1223)", async () => {
+        const checks = stubProvider(
+          vi
+            .fn()
+            .mockResolvedValueOnce(
+              completion("", [
+                toolCall("write", "edit_file", {
+                  path: "index.html",
+                  old_string: "<body>before",
+                  new_string: `<body data-qa-stamp="ok">before${MOUNT}`,
+                  expected_hash: hashOf(INITIAL_HTML),
+                }),
+              ]),
+            )
+            .mockImplementation(async () => completion("Installed and stamped.")),
+        );
+        const app = createStudioApi(adapter(setup.projectDir));
+        const token = await nonce(app);
+        const jobId = await start(app, token, "Add the accent", {
+          kind: "catalog",
+          registryItem: "accent",
+        });
+        const stream = await events(app, jobId);
+
+        expect(stream).toContain('"gate":"unasked-change"');
+        expect(terminal(stream)).toMatchObject({ verdict: "refused" });
+        expect(checks).not.toHaveBeenCalled();
+        expect(readFileSync(join(setup.projectDir, "index.html"), "utf-8")).toBe(INITIAL_HTML);
+        expect(existsSync(join(setup.projectDir, "compositions/accent.html"))).toBe(false);
+        expect(ledger(setup.projectDir, jobId).meter?.review).toMatchObject({
+          outcome: "unasked",
+          calls: 0,
+        });
       });
 
       it("does not ask the check about a catalog item the model left as it was", async () => {

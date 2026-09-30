@@ -33,6 +33,7 @@ import type {
   AgentThreadSummary,
 } from "../types.js";
 import { parseUsage, type CompletionUsage } from "./budget.js";
+import { placementRefusal, type CatalogMount } from "./catalogMount.js";
 import { createContextFrame, type ContextFrame } from "./framing.js";
 import { diffHunks, type DiffLine } from "./lineDiff.js";
 import { createRetryAllowance, resolveRetryPolicy, sendWithRetry } from "./retry.js";
@@ -92,6 +93,8 @@ export interface ReviewHunk {
 export interface ReviewRequest {
   kind: AgentRequestKind;
   registryItem?: string;
+  /** What Studio staged on a catalog run; the placing of it is held before the check reads (TAB-1223). */
+  mount?: CatalogMount;
   transcript: AgentThreadSummary["transcript"];
   /** What the run changed, measured from the tree the model started in. */
   changedFiles: readonly AgentChangedFile[];
@@ -573,6 +576,13 @@ export async function reviewChange(request: ReviewRequest): Promise<ReviewResult
   const hunks = collectHunks(request.changedFiles, request.baseline, request.staged);
   // A change of line endings alone has no hunks and nothing in it to rule on.
   if (hunks.length === 0) return { refusal: null, meter: emptyMeter("asked", 0) };
+  // What a catalog run may change is known before the run, so it is held by
+  // code and the check reads only the fit (TAB-1223). No call was made, and
+  // the meter says so.
+  const placement = request.mount
+    ? placementRefusal(request.mount, request.changedFiles, request.baseline, request.staged)
+    : null;
+  if (placement) return { refusal: placement, meter: emptyMeter("unasked", hunks.length) };
   if (tooLarge(hunks)) {
     return { refusal: unchecked(TOO_LARGE), meter: emptyMeter("too-large", hunks.length) };
   }

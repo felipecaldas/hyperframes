@@ -178,4 +178,11 @@ describe("the lint gate judges a catalog run against the tree the model started 
     expect(source).toContain("kind: job.request.kind,\n        mount,");
     expect(source).toContain('snippet: installed.snippet ?? "",');
   });
+
+  it("holds the placing of the item ahead of the check, through the same gate", () => {
+    expect(source).toContain(
+      "this.reviewStaged(job, thread, trees.baseline, trees.mount, diff, touch)",
+    );
+    expect(source).toContain("...(mount ? { mount } : {}),");
+  });
 });

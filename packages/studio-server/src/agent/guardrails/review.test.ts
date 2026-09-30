@@ -282,6 +282,52 @@ describe("what is read from the check's answer (TAB-1222)", () => {
   });
 });
 
+describe("the placing of a catalog item is held before the check reads (TAB-1223)", () => {
+  const mount = {
+    item: "lt-clean-bar",
+    type: "hyperframes:block" as const,
+    file: "compositions/lt-clean-bar.html",
+    files: ["compositions/lt-clean-bar.html"],
+    snippet: '<div data-composition-src="compositions/lt-clean-bar.html"></div>',
+  };
+  const before = { "index.html": PAGE, "compositions/lt-clean-bar.html": "<div>bar</div>\n" };
+
+  it("refuses the change without a call when a composition holds more than the mount", async () => {
+    const fetchImpl = vi.fn();
+    const baseline = snapshot(before);
+    const staged = snapshot({ ...before, "index.html": `${PAGE}\n${STAMP}` });
+    const result = await reviewChange(
+      request({
+        mount,
+        baseline,
+        staged,
+        changedFiles: compareAgentSnapshots(baseline, staged),
+        fetchImpl,
+      }),
+    );
+    expect(result.refusal).toMatchObject({ gate: "unasked-change", file: "index.html" });
+    expect(result.meter).toMatchObject({ outcome: "unasked", calls: 0 });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("reads the fit inside the item's own file as the check always did", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(reply(rulings(true)));
+    const baseline = snapshot(before);
+    const staged = snapshot({ ...before, "compositions/lt-clean-bar.html": "<div>Felipe</div>\n" });
+    const result = await reviewChange(
+      request({
+        mount,
+        baseline,
+        staged,
+        changedFiles: compareAgentSnapshots(baseline, staged),
+        fetchImpl,
+      }),
+    );
+    expect(result.refusal).toBeNull();
+    expect(result.meter).toMatchObject({ outcome: "asked", calls: 1 });
+  });
+});
+
 describe("the check at apply (TAB-1222)", () => {
   it("lets a change through when every hunk was asked for", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(reply(rulings(true, true)));
