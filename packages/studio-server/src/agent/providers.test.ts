@@ -3299,6 +3299,9 @@ describe("Tabario AI guardrails: the trust boundary on model context (TAB-1194)"
       expect(placements(system, MOUNT, codeOf(messages))).toEqual([false]);
       expect(system).toContain("Its own file is compositions/lt-clean-bar.html.");
       expect(system).toContain("Do not paste the item's markup into index.html");
+      expect(system).toContain(
+        "Leave its script and link tags, its doctype and its comments as they are",
+      );
     });
 
     it("tells the model a staged component is pasted from its file, not mounted (TAB-1223)", async () => {

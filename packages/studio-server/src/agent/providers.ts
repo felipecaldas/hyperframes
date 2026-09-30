@@ -1631,8 +1631,9 @@ function mountRules(mount: CatalogMount): string {
     return (
       `${file} A component is not mounted. Paste its markup from that file into the ` +
       "composition where the user was on the timeline, above what is already there, and " +
-      "fit it to the project's own colours, type and timing. Change nothing else in the " +
-      "project, and write no new file for it."
+      "fit it to the project's own colours, type and timing. Leave its script and link tags " +
+      "and its comments as they are. Change nothing else in the project, and write no new " +
+      "file for it."
     );
   }
   return (
@@ -1641,7 +1642,9 @@ function mountRules(mount: CatalogMount): string {
     `${mount.snippet}\n` +
     "Do not paste the item's markup into index.html, and write no new file for it. To fit " +
     "the item to the project, change its own file only, and in it only its placeholder text, " +
-    "names, media, colours, type, size or timing. Change nothing else in the project."
+    "names, media, colours, type, size or timing. Leave its script and link tags, its doctype " +
+    "and its comments as they are: the item loads what it runs on, and a file it loads from " +
+    "another host was there before you. Change nothing else in the project."
   );
 }
 
