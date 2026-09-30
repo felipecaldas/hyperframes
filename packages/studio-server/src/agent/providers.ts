@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import type { RegistryItem } from "@hyperframes/core";
 import type { StudioApiAdapter } from "../types.js";
 import { lintProject } from "../helpers/projectLint.js";
 import {
@@ -70,10 +71,32 @@ type ToolCall = {
   function: { name: string; arguments: string };
 };
 
+/**
+ * What Studio staged for a catalog run, so the model is told how the item is
+ * mounted rather than left to work it out (TAB-1223).
+ *
+ * Left to itself, the model pasted the block's markup into `index.html`, which
+ * the checker refuses as a timeline element holding nested elements, or wrote
+ * a file of its own for it, which the check refuses as unasked for. The
+ * install already knows the one element that mounts the item, and the model
+ * is handed it.
+ */
+export interface CatalogMount {
+  /** The registry item's name, as the user picked it. */
+  item: string;
+  type: RegistryItem["type"];
+  /** Project-relative path of the item's own file. */
+  file: string;
+  /** The mount element as `hyperframes add` prints it; a comment for a component. */
+  snippet: string;
+}
+
 export interface TabarioModelOptions {
   adapter: StudioApiAdapter;
   stagingDir: string;
   kind: AgentRequestKind;
+  /** Set on a catalog run, once Studio has staged the item. */
+  mount?: CatalogMount;
   transcript: AgentThreadSummary["transcript"];
   signal: AbortSignal;
   onAssistant: (text: string) => void;
@@ -1613,9 +1636,39 @@ const KIND_RULES: Partial<Record<AgentRequestKind, string>> = {
     "project's own.",
 };
 
-function kindRules(kind: AgentRequestKind): string {
+/**
+ * How the staged item goes into the composition, said to the model in the one
+ * message content cannot reach (TAB-1223).
+ *
+ * A block is mounted by one element, and the install built that element; the
+ * model adds a start time and a track to it and nothing else. A component has
+ * no mount and is pasted from its file. Either way the item's own file is the
+ * only file the model fits to the project, and nothing else changes.
+ */
+function mountRules(mount: CatalogMount): string {
+  const file = `Its own file is ${mount.file}.`;
+  if (mount.type === "hyperframes:component") {
+    return (
+      `${file} A component is not mounted. Paste its markup from that file into the ` +
+      "composition where the user was on the timeline, above what is already there, and " +
+      "fit it to the project's own colours, type and timing. Change nothing else in the " +
+      "project, and write no new file for it."
+    );
+  }
+  return (
+    `${file} Mount it in index.html with exactly this element, on a track of its own above ` +
+    "what is already there, with a data-start at where the user was on the timeline:\n" +
+    `${mount.snippet}\n` +
+    "Do not paste the item's markup into index.html, and write no new file for it. To fit " +
+    "the item to the project, change its own file only, and in it only its placeholder text, " +
+    "names, media, colours, type, size or timing. Change nothing else in the project."
+  );
+}
+
+function kindRules(kind: AgentRequestKind, mount?: CatalogMount): string {
   const rules = KIND_RULES[kind];
-  return rules ? `\n\n${rules}` : "";
+  if (!rules) return "";
+  return kind === "catalog" && mount ? `\n\n${rules} ${mountRules(mount)}` : `\n\n${rules}`;
 }
 
 function initialMessages(options: TabarioModelOptions, frame: ContextFrame): ChatMessage[] {
@@ -1629,7 +1682,7 @@ function initialMessages(options: TabarioModelOptions, frame: ContextFrame): Cha
       role: "system",
       content:
         systemPrompt(options.kind, hasFrameMd, frame) +
-        kindRules(options.kind) +
+        kindRules(options.kind, options.mount) +
         studioRecord(transcript, frame),
     },
     ...transcript.map(chatMessage),

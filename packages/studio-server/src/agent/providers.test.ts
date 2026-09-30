@@ -3266,6 +3266,60 @@ describe("Tabario AI guardrails: the trust boundary on model context (TAB-1194)"
 
       expect(messages[0]?.content).not.toContain("The user started this run");
     });
+
+    const MOUNT =
+      '<div data-composition-id="lt-clean-bar" data-composition-src="compositions/lt-clean-bar.html" ' +
+      'data-duration="4" data-width="1920" data-height="1080"></div>';
+
+    async function fromCatalog(mount: NonNullable<Parameters<typeof runTabarioModel>[0]["mount"]>) {
+      const root = project({ "index.html": HTML });
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(readIndexFirst())
+        .mockResolvedValueOnce(completion("Done."));
+      return run(root, fetchImpl, {
+        kind: "catalog",
+        mount,
+        transcript: [
+          { role: "user", text: "Add it here", at: new Date().toISOString(), context: MATERIAL },
+        ],
+      });
+    }
+
+    it("hands the model the element that mounts a staged block, outside the frame (TAB-1223)", async () => {
+      const { messages } = await fromCatalog({
+        item: "lt-clean-bar",
+        type: "hyperframes:block",
+        file: "compositions/lt-clean-bar.html",
+        snippet: MOUNT,
+      });
+
+      const system = messages[0]?.content ?? "";
+      expect(placements(system, MOUNT, codeOf(messages))).toEqual([false]);
+      expect(system).toContain("Its own file is compositions/lt-clean-bar.html.");
+      expect(system).toContain("Do not paste the item's markup into index.html");
+    });
+
+    it("tells the model a staged component is pasted from its file, not mounted (TAB-1223)", async () => {
+      const { messages } = await fromCatalog({
+        item: "grain-overlay",
+        type: "hyperframes:component",
+        file: "compositions/components/grain-overlay.html",
+        snippet:
+          "<!-- paste from compositions/components/grain-overlay.html into your composition -->",
+      });
+
+      const system = messages[0]?.content ?? "";
+      expect(system).toContain("Its own file is compositions/components/grain-overlay.html.");
+      expect(system).toContain("A component is not mounted.");
+      expect(system).not.toContain("Mount it in index.html");
+    });
+
+    it("says nothing about a mount when a catalog run staged nothing", async () => {
+      const { messages } = await fromPanel("catalog");
+
+      expect(messages[0]?.content).not.toContain("Its own file is");
+    });
   });
 
   /**

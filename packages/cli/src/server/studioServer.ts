@@ -863,13 +863,36 @@ export async function loadPreviewServerBuildSignature(): Promise<string> {
 // canvas. Applies to ALL written files — including any .html a dependency ships,
 // not just the requested block's — which is intentional. No-op when the host
 // index.html is absent or carries no dimensions.
-function rewriteWrittenToHostViewport(projectDir: string, written: string[]): void {
+/** The viewport the project's index.html declares, or null when it declares none. */
+function hostViewport(projectDir: string): { width: string; height: string } | null {
   const indexPath = join(projectDir, "index.html");
-  if (!existsSync(indexPath)) return;
+  if (!existsSync(indexPath)) return null;
   const indexHtml = readFileSync(indexPath, "utf-8");
-  const hostW = indexHtml.match(/data-width="(\d+)"/)?.[1];
-  const hostH = indexHtml.match(/data-height="(\d+)"/)?.[1];
-  if (!hostW || !hostH) return;
+  const width = indexHtml.match(/data-width="(\d+)"/)?.[1];
+  const height = indexHtml.match(/data-height="(\d+)"/)?.[1];
+  return width && height ? { width, height } : null;
+}
+
+/**
+ * The mount snippet with the host's dimensions in place of the item's.
+ *
+ * The installed file is rewritten to the host viewport below, so a mount that
+ * still declared the registry's size would show the item letterboxed inside
+ * its own frame (TAB-1223).
+ */
+function snippetForHost(snippet: string, projectDir: string): string {
+  const host = hostViewport(projectDir);
+  if (!host) return snippet;
+  return snippet.replace(
+    /data-width="\d+" data-height="\d+"/,
+    `data-width="${host.width}" data-height="${host.height}"`,
+  );
+}
+
+function rewriteWrittenToHostViewport(projectDir: string, written: string[]): void {
+  const host = hostViewport(projectDir);
+  if (!host) return;
+  const { width: hostW, height: hostH } = host;
 
   for (const absPath of written) {
     if (!absPath.endsWith(".html")) continue;
@@ -1377,6 +1400,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
       return {
         written: written.includes(primaryPath) ? [primary, ...others] : others,
         block: item,
+        snippet: snippetForHost(result.snippet, opts.project.dir),
       };
     },
   };

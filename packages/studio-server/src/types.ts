@@ -345,9 +345,17 @@ export interface StudioApiAdapter {
   /** Optional: list all registry items (blocks + components) for the catalog. */
   listRegistryCatalog?(): Promise<RegistryItem[]>;
 
-  /** Optional: install a registry item into a project directory. */
+  /**
+   * Optional: install a registry item into a project directory.
+   *
+   * `snippet` is the element that mounts a block in a host composition, as
+   * `hyperframes add` prints it, sized to the host's viewport when the host
+   * declares one; for a component, which is pasted rather than mounted, it is
+   * the comment `add` prints instead. Tabario AI is handed it on a catalog run
+   * (TAB-1223).
+   */
   installRegistryBlock?(opts: {
     project: ResolvedProject;
     blockName: string;
-  }): Promise<{ written: string[]; block: RegistryItem }>;
+  }): Promise<{ written: string[]; block: RegistryItem; snippet?: string }>;
 }

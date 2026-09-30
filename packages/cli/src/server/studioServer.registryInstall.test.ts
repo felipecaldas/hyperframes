@@ -232,4 +232,16 @@ describe("Studio catalog install", () => {
       "compositions/components/studio-drop-part.html",
     ]);
   });
+
+  it("says how the item is mounted, at the host's size, and that a component is pasted (TAB-1223)", async () => {
+    const { link } = projectWithRegistry();
+
+    expect((await installer(link)("studio-drop-block")).snippet).toBe(
+      '<div data-composition-id="studio-drop-block" data-composition-src="scenes/studio-drop-block.html" ' +
+        'data-duration="6" data-width="1920" data-height="1080"></div>',
+    );
+    expect((await installer(link)("studio-drop-part")).snippet).toBe(
+      "<!-- paste from compositions/components/studio-drop-part.html into your composition -->",
+    );
+  });
 });

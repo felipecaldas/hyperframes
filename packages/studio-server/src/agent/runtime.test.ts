@@ -172,4 +172,10 @@ describe("the lint gate judges a catalog run against the tree the model started 
   it("measures undo cover from the staged baseline, so an installed asset is not the model's", () => {
     expect(source).toContain("diffAgentFiles(trees.stagingDir, trees.before, trees.baseline)");
   });
+
+  it("hands the model how the staged item is mounted, as the install said it", () => {
+    expect(source).toContain("const mount = await this.installRegistryItem(job, stagingDir);");
+    expect(source).toContain("kind: job.request.kind,\n        mount,");
+    expect(source).toContain('snippet: installed.snippet ?? "",');
+  });
 });

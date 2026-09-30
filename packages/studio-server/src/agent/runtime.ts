@@ -29,7 +29,12 @@ import { assertNoIntroducedEgress } from "./guardrails/egress.js";
 import { GuardrailRefusal } from "./guardrails/refusal.js";
 import { reviewChange, spentWithReview, type ReviewResult } from "./guardrails/review.js";
 import { decideVerdict } from "./guardrails/verdict.js";
-import { detectProvider, runTabarioModel, type TabarioModelResult } from "./providers.js";
+import {
+  detectProvider,
+  runTabarioModel,
+  type CatalogMount,
+  type TabarioModelResult,
+} from "./providers.js";
 import { describeSelectedElement } from "./selection.js";
 import type {
   AgentChangedFile,
@@ -579,15 +584,31 @@ export class AgentRuntime {
     };
   }
 
-  private async installRegistryItem(job: AgentRunJob, stagingDir: string): Promise<void> {
-    if (!job.request.registryItem) return;
+  /**
+   * Stage the catalog item and say how it is mounted (TAB-1223). Undefined
+   * when the run is not a catalog run.
+   */
+  private async installRegistryItem(
+    job: AgentRunJob,
+    stagingDir: string,
+  ): Promise<CatalogMount | undefined> {
+    if (!job.request.registryItem) return undefined;
     if (!this.adapter.installRegistryBlock)
       throw new Error("Registry installation is unavailable.");
     this.emit(job, { type: "status", message: `Staging ${job.request.registryItem}…` });
-    await this.adapter.installRegistryBlock({
+    const installed = await this.adapter.installRegistryBlock({
       project: { ...job.project, dir: stagingDir },
       blockName: job.request.registryItem,
     });
+    // The install lists the item's own file first.
+    const file = installed.written[0];
+    if (!file) return undefined;
+    return {
+      item: job.request.registryItem,
+      type: installed.block.type,
+      file,
+      snippet: installed.snippet ?? "",
+    };
   }
 
   /**
@@ -605,13 +626,14 @@ export class AgentRuntime {
     job: AgentRunJob,
     stagingDir: string,
     before: AgentFileSnapshot,
-  ): Promise<Pick<RunTrees, "baseline" | "lintBaseline">> {
+  ): Promise<Pick<RunTrees, "baseline" | "lintBaseline"> & { mount?: CatalogMount }> {
     createAgentStagingProject(job.project.dir, stagingDir);
-    await this.installRegistryItem(job, stagingDir);
-    if (!job.request.registryItem) return { baseline: before, lintBaseline: null };
+    const mount = await this.installRegistryItem(job, stagingDir);
+    if (!job.request.registryItem) return { baseline: before, lintBaseline: null, mount };
     return {
       baseline: snapshotAgentFiles(stagingDir),
       lintBaseline: await lintProject(this.adapter, stagingDir),
+      mount,
     };
   }
 
@@ -632,12 +654,13 @@ export class AgentRuntime {
     const tools: Record<string, number> = {};
 
     try {
-      const { baseline, lintBaseline } = await this.stageProject(job, stagingDir, before);
+      const { baseline, lintBaseline, mount } = await this.stageProject(job, stagingDir, before);
       this.emit(job, { type: "status", message: "Tabario AI is inspecting the timeline…" });
       const result = await runTabarioModel({
         adapter: this.adapter,
         stagingDir,
         kind: job.request.kind,
+        mount,
         transcript: thread.transcript,
         signal: job.controller.signal,
         principal: projectKey(job.project.dir),
