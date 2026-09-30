@@ -19,7 +19,10 @@
  * 2. **Only what is egress.** `isNonLocalSrc` used to lump three things
  *    together. A remote URL is egress. A `data:` URI is not, and a template
  *    placeholder is not either, because the compiler fills it in later.
- *    Refusing a placeholder would break every template-driven project.
+ *    Refusing a placeholder would break every template-driven project. Nor is
+ *    a URL spelled out inside an image or font `data:` URI (TAB-1223): the
+ *    registry's grain overlay carries an SVG noise texture whose `xmlns` read
+ *    as a remote URL, and the paste of the component was refused three times.
  * 3. **Text on screen is not a request.** A caption may say a web address. Only
  *    markup, styles and script are read for URLs, never the words between tags.
  *
@@ -86,9 +89,21 @@ const ABSOLUTE_URL_RE = /\b(?:https?|wss?|ftps?):\/\/[^\s"'<>`)\\]+/gi;
 const PROTOCOL_RELATIVE_RE =
   /(?:["'`]|\burl\(\s*)(\/\/[a-z0-9][a-z0-9.-]*\.[a-z]{2,}[^\s"'<>`)\\]*)/gi;
 
+/**
+ * An image or a font carried in a `data:` URI, quoted or bare. The browser
+ * decodes it as a picture or a face and fetches nothing from inside it: an SVG
+ * read as an image loads no external resource, by specification. So its body
+ * is bytes, not a request, however many namespace URLs it spells out. A
+ * document in a `data:` URI (`text/html`) is still read, since a frame opened
+ * on it does make the requests it holds.
+ */
+const INERT_DATA_URI_RE =
+  /(["'`])data:(?:image|font|application\/font)[^]*?\1|\bdata:(?:image|font|application\/font)[^\s)>]*/gi;
+
 function scanLiterals(text: string): Finding[] {
-  const absolute = [...text.matchAll(ABSOLUTE_URL_RE)].map((match) => urlFinding(match[0]));
-  const relative = [...text.matchAll(PROTOCOL_RELATIVE_RE)].map((match) =>
+  const read = text.replace(INERT_DATA_URI_RE, (_match, quote: string | undefined) => quote ?? "");
+  const absolute = [...read.matchAll(ABSOLUTE_URL_RE)].map((match) => urlFinding(match[0]));
+  const relative = [...read.matchAll(PROTOCOL_RELATIVE_RE)].map((match) =>
     urlFinding(match[1] ?? ""),
   );
   return [...absolute, ...relative];

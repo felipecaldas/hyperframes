@@ -195,6 +195,27 @@ describe("assertNoIntroducedEgress (TAB-1195)", () => {
 
     it.each([
       ["a data URI", '<img src="data:image/png;base64,iVBORw0KGgo=">'],
+      [
+        "an SVG namespace inside an image data URI in a style (TAB-1223)",
+        "<style>.grain { background: url(\"data:image/svg+xml,%3Csvg viewBox='0 0 256 256' " +
+          "xmlns='http://www.w3.org/2000/svg'%3E%3C/svg%3E\"); }</style>",
+      ],
+      [
+        "an SVG namespace inside an image data URI in an attribute",
+        "<img src=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3C/svg%3E\">",
+      ],
+      [
+        "a bare image data URI in a style",
+        "<style>.g { background: url(data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'/%3E); }</style>",
+      ],
+      [
+        "a font data URI",
+        "<style>@font-face { src: url('data:font/woff2;base64,d09GMgABAAAAAA') " +
+          "format('woff2'); /* http://www.w3.org/TR/css-fonts */ }</style>".replace(
+            "/* http://www.w3.org/TR/css-fonts */",
+            "",
+          ),
+      ],
       ["a ${} placeholder", '<video src="${clipUrl}"></video>'],
       ["a {{}} placeholder", '<video src="{{ clip.url }}"></video>'],
       ["a <% %> placeholder", '<video src="<%= clipUrl %>"></video>'],
@@ -213,6 +234,12 @@ describe("assertNoIntroducedEgress (TAB-1195)", () => {
       ["script that makes no request", "<script>gsap.timeline({ paused: true });</script>"],
     ])("allows %s", (_name, after) => {
       expect(refused(`<div>${after}</div>`)).toBeNull();
+    });
+
+    it("still reads a document carried in a data URI, since a frame on it makes its requests", () => {
+      expect(
+        refused("<iframe src=\"data:text/html,<img src='https://evil.example/p.png'>\"></iframe>"),
+      ).toContain("https://evil.example/p.png");
     });
 
     it("does not read prose files", () => {

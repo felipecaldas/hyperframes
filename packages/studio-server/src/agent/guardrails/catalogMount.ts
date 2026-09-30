@@ -59,6 +59,11 @@ function withoutMounts(html: string, file: string): string {
   return html.replace(MOUNT_ELEMENT, (match, src: string) => (src === file ? "" : match));
 }
 
+/** How many elements in `html` mount `file`. */
+function mountCount(html: string, file: string): number {
+  return [...html.matchAll(MOUNT_ELEMENT)].filter((match) => match[1] === file).length;
+}
+
 function refusal(file: string, what: string): AgentRefusal {
   return {
     gate: "unasked-change",
@@ -76,10 +81,12 @@ function refusal(file: string, what: string): AgentRefusal {
  * file is either the item's own, or a composition that was in the project and
  * now holds exactly what it held plus the element that mounts the item.
  *
- * A component has no mount and is pasted, so a pre-existing composition it
- * was pasted into is left to the check to read. A file the run made, removed,
- * or changed that is not a composition is not the placing of the item, whatever
- * the item is.
+ * A block is mounted once: the model mounted it twice on one run in twelve,
+ * and a second element is a second copy of the item on the timeline, which is
+ * not what was asked for. A component has no mount and is pasted, so a
+ * pre-existing composition it was pasted into is left to the check to read. A
+ * file the run made, removed, or changed that is not a composition is not the
+ * placing of the item, whatever the item is.
  */
 export function placementRefusal(
   mount: CatalogMount,
@@ -88,6 +95,7 @@ export function placementRefusal(
   staged: AgentFileSnapshot,
 ): AgentRefusal | null {
   const installed = new Set(mount.files);
+  let mounts = 0;
   for (const file of changedFiles) {
     if (installed.has(file.path)) continue;
     if (file.change !== "modified" || !file.path.endsWith(".html")) {
@@ -95,13 +103,17 @@ export function placementRefusal(
     }
     if (mount.type !== "hyperframes:block") continue;
     const before = decode(baseline.sourceContents[file.path]);
-    const after = withoutMounts(decode(staged.sourceContents[file.path]), mount.file);
-    if (normalize(after) !== normalize(before)) {
+    const staged_ = decode(staged.sourceContents[file.path]);
+    if (
+      normalize(withoutMounts(staged_, mount.file)) !== normalize(withoutMounts(before, mount.file))
+    ) {
       return refusal(
         file.path,
         `${file.path} holds more than the element that mounts ${mount.item}`,
       );
     }
+    mounts += mountCount(staged_, mount.file) - mountCount(before, mount.file);
+    if (mounts > 1) return refusal(file.path, `${mount.item} is mounted more than once`);
   }
   return null;
 }

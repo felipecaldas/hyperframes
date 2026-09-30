@@ -72,6 +72,28 @@ describe("what a catalog run may change (TAB-1223)", () => {
     expect(refusal?.message).not.toContain("data-qa-stamp");
   });
 
+  it("refuses the item mounted twice, and lets a second mount join one the project had", () => {
+    const twice = INDEX.replace(
+      '<div id="caption-0"',
+      `${PLACED}\n${PLACED}\n      <div id="caption-0"`,
+    );
+    const refusal = ruling(BLOCK, { ...BEFORE, "index.html": twice });
+    expect(refusal).toMatchObject({ gate: "unasked-change", file: "index.html" });
+    expect(refusal?.message).toContain("lt-clean-bar is mounted more than once");
+    const had = { ...BEFORE, "index.html": INDEX.replace("</body>", `${PLACED}</body>`) };
+    const baseline = snapshot(had);
+    const staged = snapshot({
+      ...had,
+      "index.html": had["index.html"].replace(
+        '<div id="caption-0"',
+        `${PLACED}\n<div id="caption-0"`,
+      ),
+    });
+    expect(
+      placementRefusal(BLOCK, compareAgentSnapshots(baseline, staged), baseline, staged),
+    ).toBeNull();
+  });
+
   it("refuses the block's markup pasted in place of a mount", () => {
     const index = INDEX.replace('<div id="caption-0"', `${ITEM}      <div id="caption-0"`);
     expect(ruling(BLOCK, { ...BEFORE, "index.html": index })?.gate).toBe("unasked-change");
