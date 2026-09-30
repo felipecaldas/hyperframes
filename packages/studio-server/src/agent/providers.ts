@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import type { StudioApiAdapter } from "../types.js";
-import { lintProject } from "../helpers/projectLint.js";
+import { introducedFindings, lintProject, type LintFinding } from "../helpers/projectLint.js";
 import {
   unavailableMeasurement,
   type LayoutElementMeasurement,
@@ -77,6 +77,12 @@ export interface TabarioModelOptions {
   kind: AgentRequestKind;
   /** Set on a catalog run, once Studio has staged the item. */
   mount?: CatalogMount;
+  /**
+   * What the lint said of the tree the model starts in, on a catalog run: the
+   * staged item's own findings. `validate_project` reports what is not in it,
+   * as the apply gate does, so the model is not sent to repair the item.
+   */
+  lintBaseline?: LintFinding[] | null;
   transcript: AgentThreadSummary["transcript"];
   signal: AbortSignal;
   onAssistant: (text: string) => void;
@@ -855,8 +861,14 @@ function deleteFile(args: JsonRecord, options: TabarioModelOptions): unknown {
   return { path: file.relative, deleted: true };
 }
 
+/**
+ * Lint the staged tree, reporting what the run introduced. On a catalog run the
+ * staged item's own findings are the baseline, so the model is not told to
+ * repair what Studio put there.
+ */
 async function validateProject(_args: JsonRecord, options: TabarioModelOptions): Promise<unknown> {
-  const findings = await lintProject(options.adapter, options.stagingDir);
+  const linted = await lintProject(options.adapter, options.stagingDir);
+  const findings = options.lintBaseline ? introducedFindings(options.lintBaseline, linted) : linted;
   return {
     valid: !findings.some((finding) => finding.severity.toLowerCase() === "error"),
     findings,

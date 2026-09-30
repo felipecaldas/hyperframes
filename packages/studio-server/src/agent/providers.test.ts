@@ -3452,3 +3452,68 @@ describe("Tabario AI guardrails: the trust boundary on model context (TAB-1194)"
     expect(placements(users[1]?.content ?? "", "Do not report a result", code)).toEqual([false]);
   });
 });
+
+describe("validate_project on a catalog run (TAB-1223)", () => {
+  const oldKey = process.env.OPENROUTER_API_KEY;
+
+  beforeEach(() => {
+    process.env.OPENROUTER_API_KEY = "test-key";
+  });
+
+  afterEach(() => {
+    if (oldKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = oldKey;
+  });
+
+  const ITEM = "compositions/lt-clean-bar.html";
+  const own = { severity: "error", message: "Composition starts with a bare element", file: ITEM };
+
+  function project(): string {
+    const root = mkdtempSync(join(tmpdir(), "tabario-catalog-lint-"));
+    mkdirSync(join(root, "compositions"));
+    writeFileSync(
+      join(root, "index.html"),
+      '<html data-composition-id="demo"><body></body></html>\n',
+    );
+    writeFileSync(join(root, ITEM), '<div data-composition-id="lt-clean-bar"></div>\n');
+    return root;
+  }
+
+  async function validated(root: string, lintBaseline: Array<typeof own> | null) {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(completion("", [call("lint", "validate_project", {})]))
+      .mockResolvedValueOnce(completion("Nothing needed changing."));
+    const results: string[] = [];
+    await runTabarioModel({
+      adapter: {
+        ...adapter(),
+        lint: (_html, options) =>
+          options?.filePath === ITEM
+            ? { findings: [{ severity: own.severity, message: own.message }] }
+            : { findings: [] },
+      },
+      stagingDir: root,
+      kind: "catalog",
+      lintBaseline,
+      transcript: [{ role: "user", text: "add the item", at: new Date().toISOString() }],
+      signal: new AbortController().signal,
+      onAssistant: () => {},
+      onTool: () => {},
+      onActivity: () => {},
+      onToolResult: (entry) => results.push(entry.result),
+      fetchImpl,
+    });
+    return JSON.parse(results[0] ?? "null") as { valid: boolean; findings: unknown[] };
+  }
+
+  it("does not report the staged item's own finding, which the apply gate does not hold either", async () => {
+    expect(await validated(project(), [own])).toEqual({ valid: true, findings: [] });
+  });
+
+  it("still reports it on a run with no baseline, as before", async () => {
+    const result = await validated(project(), null);
+    expect(result.valid).toBe(false);
+    expect(result.findings).toEqual([own]);
+  });
+});

@@ -169,6 +169,10 @@ describe("the lint gate judges a catalog run against the tree the model started 
     expect(source).not.toContain("introducedErrors(this.adapter");
   });
 
+  it("hands the same baseline to the model's tools, so validate_project does not report the item's own findings", () => {
+    expect(source).toContain("mount,\n        lintBaseline,\n");
+  });
+
   it("measures undo cover from the staged baseline, so an installed asset is not the model's", () => {
     expect(source).toContain("diffAgentFiles(trees.stagingDir, trees.before, trees.baseline)");
   });

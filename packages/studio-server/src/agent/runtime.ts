@@ -12,7 +12,9 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { ResolvedProject, StudioApiAdapter } from "../types.js";
-import { lintProject } from "../helpers/projectLint.js";
+import { introducedErrors, lintProject, type LintFinding } from "../helpers/projectLint.js";
+
+export { introducedErrors };
 import {
   applyStagedAgentFiles,
   compareAgentSnapshots,
@@ -84,12 +86,6 @@ interface RunTrees {
   /** What Studio staged on a catalog run, as the install said it (TAB-1223). */
   mount?: CatalogMount;
   stagingDir: string;
-}
-
-interface LintFinding {
-  severity: string;
-  message: string;
-  file?: string;
 }
 
 /**
@@ -246,44 +242,6 @@ function durationLabel(milliseconds: number): string {
   return milliseconds % 60_000 === 0
     ? `${milliseconds / 60_000} minute${milliseconds === 60_000 ? "" : "s"}`
     : `${milliseconds} ms`;
-}
-
-/** A finding's identity for baseline comparison — file, severity and message. */
-function findingKey(finding: { severity: string; message: string; file?: string }): string {
-  return `${finding.file ?? ""}::${finding.severity.toLowerCase()}::${finding.message}`;
-}
-
-/**
- * The `error` findings present after the run that were not present before it.
- *
- * Counted by identity rather than by tally: an edit that fixes one inherited
- * error and introduces a different one nets to zero, and a count would wave it
- * through. Duplicates of the same message in one file are matched
- * one-for-one, so going from one occurrence to three still reports two.
- *
- * `baseline` is what the lint said about the tree the model started in. On a
- * catalog run that tree holds the staged item, whose own findings are then
- * inherited and not introduced (TAB-1223).
- */
-export function introducedErrors(baseline: LintFinding[], staged: LintFinding[]): LintFinding[] {
-  const stagedErrors = staged.filter((finding) => finding.severity.toLowerCase() === "error");
-  if (stagedErrors.length === 0) return [];
-
-  const remaining = new Map<string, number>();
-  for (const finding of baseline) {
-    if (finding.severity.toLowerCase() !== "error") continue;
-    const key = findingKey(finding);
-    remaining.set(key, (remaining.get(key) ?? 0) + 1);
-  }
-
-  const introduced: LintFinding[] = [];
-  for (const finding of stagedErrors) {
-    const key = findingKey(finding);
-    const left = remaining.get(key) ?? 0;
-    if (left > 0) remaining.set(key, left - 1);
-    else introduced.push(finding);
-  }
-  return introduced;
 }
 
 /**
@@ -660,6 +618,7 @@ export class AgentRuntime {
         stagingDir,
         kind: job.request.kind,
         mount,
+        lintBaseline,
         transcript: thread.transcript,
         signal: job.controller.signal,
         principal: projectKey(job.project.dir),
