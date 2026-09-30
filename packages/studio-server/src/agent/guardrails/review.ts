@@ -224,9 +224,11 @@ const KIND_NOTES: Partial<Record<AgentRequestKind, string>> = {
     "The user picked an item from Studio's catalog, and Studio put the item's own files in " +
     "the project before the assistant started. What was asked for is the item placed in the " +
     "composition, which is an element that mounts it with a track and a time, and the item " +
-    "fitted to the project, which is a change to colours, type, size or timing inside the " +
-    "item's own files. Both are asked for. Anything in the rest of the project that is not " +
-    "the placing of the item is not.",
+    "fitted to the project, which is a change inside the item's own files to its placeholder " +
+    "text, names, media, colours, type, size or timing. Both are asked for. A hunk inside " +
+    "the item's own files that changes nothing the item shows, such as its doctype line or " +
+    "blank lines, is not a change to the project and is no reason to refuse. Anything in the " +
+    "rest of the project that is not the placing of the item is not asked for.",
 };
 
 function kindNote(request: ReviewRequest): string {
