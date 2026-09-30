@@ -226,16 +226,47 @@ const KIND_NOTES: Partial<Record<AgentRequestKind, string>> = {
   catalog:
     "The user picked an item from Studio's catalog, and Studio put the item's own files in " +
     "the project before the assistant started. What was asked for is the item placed in the " +
-    "composition, which is an element that mounts it with a track and a time, and the item " +
-    "fitted to the project, which is a change inside the item's own files to its placeholder " +
-    "text, names, media, colours, type, size or timing. Both are asked for. Anything in the " +
-    "rest of the project that is not the placing of the item is not asked for.",
+    "composition, which for a block is an element that mounts it with a track and a time and " +
+    "for a component is its markup pasted in from its own file, and the item fitted to the " +
+    "project, which is a change inside the item's own files to its placeholder text, names, " +
+    "media, colours, type, size or timing. Both are asked for. Anything in the rest of the " +
+    "project that is not the placing of the item is not asked for.",
 };
 
 function kindNote(request: ReviewRequest): string {
   const note = KIND_NOTES[request.kind] ?? "The user typed this message in Studio's chat.";
   const item = request.registryItem?.replace(/[^a-zA-Z0-9_./-]/g, "").slice(0, 80);
   return item ? `${note} The catalog item is named ${item}.` : note;
+}
+
+const MAX_ITEM_CHARS = 8_000;
+
+/**
+ * What Studio staged, shown to the check so that the placing reads as the
+ * placing (TAB-1223). A component has no mount: its paste is its whole file,
+ * styles and scripts included, and read as a hunk with no word from anyone a
+ * hundred lines of CSS was ruled unasked one run in three. The file is the
+ * project's, so it reaches the check framed as data, like the change.
+ */
+function itemBlock(request: ReviewRequest, frame: ContextFrame): string {
+  const mount = request.mount;
+  if (!mount) return "";
+  if (mount.type === "hyperframes:block") {
+    return (
+      "\n\nThe element that mounts the item, as Studio built it. Added to a composition with a " +
+      "start and a track of its own, it is the placing:\n" +
+      frame.wrap("catalog-mount", mount.snippet)
+    );
+  }
+  return (
+    "\n\nThe item is a component. It has no mount: its markup is pasted from its own file into " +
+    "a composition, styles and scripts included, and that paste, however long, is the " +
+    "placing. The item's file as it stands in the change:\n" +
+    frame.wrap(
+      "catalog-item",
+      clip(decode(request.staged.sourceContents[mount.file]), MAX_ITEM_CHARS),
+    )
+  );
 }
 
 function systemPrompt(frame: ContextFrame): string {
@@ -342,7 +373,8 @@ export function reviewMessages(
     {
       role: "user",
       content:
-        `${kindNote(request)}\n\n${saidBlock(words.said)}${replyBlock(words.reply, frame)}\n\n` +
+        `${kindNote(request)}${itemBlock(request, frame)}\n\n` +
+        `${saidBlock(words.said)}${replyBlock(words.reply, frame)}\n\n` +
         `The change, in ${hunks.length} hunk${hunks.length === 1 ? "" : "s"}:\n` +
         frame.wrap("change", renderChange(hunks)),
     },

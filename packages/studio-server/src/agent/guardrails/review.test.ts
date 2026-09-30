@@ -310,6 +310,52 @@ describe("the placing of a catalog item is held before the check reads (TAB-1223
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("shows the check the element that mounts a block, framed as data", () => {
+    const item = request({ kind: "catalog", registryItem: "lt-clean-bar", mount });
+    const [, user] = reviewMessages(item, hunksOf(item), createContextFrame());
+    expect(user?.content).toContain("The element that mounts the item, as Studio built it.");
+    expect(user?.content).toMatch(
+      /<<TABARIO-DATA-[0-9a-f]+ source="catalog-mount">>\n<div data-composition-src="compositions\/lt-clean-bar.html"><\/div>\n<<END-TABARIO-DATA-[0-9a-f]+>>/,
+    );
+    expect(user?.content).not.toContain("The item is a component");
+  });
+
+  it("shows the check a component's file, since its paste is the placing", () => {
+    const component = {
+      item: "grain-overlay",
+      type: "hyperframes:component" as const,
+      file: "compositions/components/grain-overlay.html",
+      files: ["compositions/components/grain-overlay.html"],
+      snippet: "<!-- paste from compositions/components/grain-overlay.html -->",
+    };
+    const grain =
+      '<div id="grain-overlay"></div>\n<style>#grain-overlay { opacity: 0.2; }</style>\n';
+    const files = { "index.html": PAGE, [component.file]: grain };
+    const baseline = snapshot(files);
+    const staged = snapshot({ ...files, "index.html": `${PAGE}\n${grain}` });
+    const item = request({
+      kind: "catalog",
+      registryItem: "grain-overlay",
+      mount: component,
+      baseline,
+      staged,
+      changedFiles: compareAgentSnapshots(baseline, staged),
+    });
+    const [, user] = reviewMessages(item, hunksOf(item), createContextFrame());
+    expect(user?.content).toContain("The item is a component. It has no mount");
+    expect(user?.content).toContain("for a component is its markup pasted in from its own file");
+    expect(user?.content).toMatch(
+      /<<TABARIO-DATA-[0-9a-f]+ source="catalog-item">>\n<div id="grain-overlay"><\/div>\n<style>#grain-overlay \{ opacity: 0.2; \}<\/style>\n\n<<END-TABARIO-DATA-[0-9a-f]+>>/,
+    );
+  });
+
+  it("shows nothing of the kind on a run with no item", () => {
+    const chat = request();
+    const [, user] = reviewMessages(chat, hunksOf(chat), createContextFrame());
+    expect(user?.content).not.toContain("catalog-mount");
+    expect(user?.content).not.toContain("catalog-item");
+  });
+
   it("reads the fit inside the item's own file as the check always did", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(reply(rulings(true)));
     const baseline = snapshot(before);
