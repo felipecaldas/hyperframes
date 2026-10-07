@@ -10,6 +10,7 @@ import { resetUnknownEnumWarnings } from "../runtime/getVariables";
 import { sanitizeCssValue } from "../runtime/applyVariableBindings";
 import { getHyperframeRuntimeScript } from "../generated/runtime-inline";
 import { ensureHfIds } from "../parsers/hfIds";
+import { AFTER_FONTS_SCRIPT_TYPE, AFTER_FONTS_SCRIPTS } from "./scriptRuns";
 
 function makeTempProject(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), "hf-bundler-test-"));
@@ -215,6 +216,33 @@ describe("bundleToSingleHtml", () => {
     expect(bundled).toContain('document.getElementById("scene")');
   });
 
+  it("defers the root's and every mounted composition's scripts until fonts, but not the runtime", async () => {
+    const dir = makeTempProject({
+      "index.html": `<!doctype html>
+<html><body>
+  <div data-composition-id="main" data-width="320" data-height="180">
+    <div data-composition-id="scene" data-composition-src="compositions/scene.html"></div>
+  </div>
+  <script>window.ROOT_SCRIPT = 1;</script>
+  <script type="module">window.ROOT_MODULE = 1;</script>
+</body></html>`,
+      "compositions/scene.html": `<template><div data-composition-id="scene" data-width="320" data-height="180">
+  <script>window.SCENE_SCRIPT = 1;</script>
+</div></template>`,
+    });
+
+    const { document } = parseHTML(await bundleToSingleHtml(dir));
+    const deferred = [...document.querySelectorAll(AFTER_FONTS_SCRIPTS)].map(
+      (el) => el.textContent,
+    );
+    for (const mark of ["SCENE_SCRIPT", "ROOT_SCRIPT", "ROOT_MODULE"]) {
+      expect(deferred.some((text) => text?.includes(mark))).toBe(true);
+    }
+    expect([...document.querySelectorAll("body script")].length).toBe(deferred.length);
+    const runtime = document.querySelector("script[data-hyperframes-preview-runtime]");
+    expect(runtime?.getAttribute("type")).toBeNull();
+  });
+
   it("binds a mounted composition's scripts to its own file for __hyperframes.assetUrl", async () => {
     const dir = makeTempProject({
       "index.html": `<!doctype html>
@@ -257,8 +285,13 @@ describe("bundleToSingleHtml", () => {
 
     const { document } = parseHTML(await bundleToSingleHtml(dir));
     const importMaps = [...document.querySelectorAll('script[type="importmap"]')];
-    const modules = [...document.querySelectorAll('script[type="module"]')];
-    const classic = [...document.querySelectorAll("script:not([type])")].map((s) => s.textContent);
+    // Deferred until fonts: the runtime runs each as the type its marker names.
+    const modules = [
+      ...document.querySelectorAll(`script[type="${AFTER_FONTS_SCRIPT_TYPE}+module"]`),
+    ];
+    const classic = [...document.querySelectorAll(`script[type="${AFTER_FONTS_SCRIPT_TYPE}"]`)].map(
+      (s) => s.textContent,
+    );
 
     expect(importMaps).toHaveLength(1);
     expect(JSON.parse(importMaps[0]!.textContent || "")).toEqual({
@@ -599,7 +632,9 @@ describe("bundleToSingleHtml", () => {
 
     const bundled = await bundleToSingleHtml(dir);
 
-    expect(bundled).toMatch(/<script\b[^>]*\btype="module"[^>]*\bsrc="\.\/module\.js"/);
+    expect(bundled).toMatch(
+      /<script\b[^>]*\btype="text\/hf-after-fonts\+module"[^>]*\bsrc="\.\/module\.js"/,
+    );
     expect(bundled).not.toContain('import { value } from "./value.js"');
   });
 
@@ -1354,6 +1389,336 @@ describe("bundleToSingleHtml", () => {
     expect(bundled).toContain("@media print");
     expect(bundled).toContain("display: block");
     expect(styleText(bundled)).not.toContain("@import");
+  });
+
+  describe("head style coalescing", () => {
+    async function bundledHeadStyles(head: string, files: Record<string, string> = {}) {
+      const dir = makeTempProject({
+        ...files,
+        "index.html": `<!doctype html>
+<html><head>${head}</head><body>
+  <div data-composition-id="root" data-width="320" data-height="180"></div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines.root = {}</script>
+</body></html>`,
+      });
+      const { document } = parseHTML(await bundleToSingleHtml(dir));
+      return [
+        ...document.querySelectorAll("head style:not([data-hyperframes-text-rendering])"),
+      ].map((el) => ({
+        media: el.getAttribute("media"),
+        type: el.getAttribute("type"),
+        css: el.textContent,
+        ...(el.hasAttribute("title") && { title: el.getAttribute("title") }),
+      }));
+    }
+
+    it("does not merge a non-CSS style into CSS", async () => {
+      expect(
+        await bundledHeadStyles(
+          `<style>p{color:red}</style><style type="text/x-tpl">{{ a }}</style>`,
+        ),
+      ).toEqual([
+        { media: null, type: null, css: "p{color:red}" },
+        { media: null, type: "text/x-tpl", css: "{{ a }}" },
+      ]);
+    });
+
+    it("still merges styles the browser applies under the same condition", async () => {
+      expect(
+        await bundledHeadStyles(
+          `<style>a{color:red}</style><style type="text/css">b{color:red}</style>` +
+            `<style media="all">i{color:red}</style><style type="TEXT/CSS">u{color:red}</style>` +
+            `<style media=" ALL ">s{color:red}</style>` +
+            `<style media="print">a{color:blue}</style><style media="print">b{color:blue}</style>`,
+        ),
+      ).toEqual([
+        {
+          media: null,
+          type: null,
+          css: "a{color:red}\n\nb{color:red}\n\ni{color:red}\n\nu{color:red}\n\ns{color:red}",
+        },
+        { media: "print", type: null, css: "a{color:blue}\n\nb{color:blue}" },
+      ]);
+    });
+
+    it("inlines each linked sheet at its link's place with the link's media", async () => {
+      expect(
+        await bundledHeadStyles(
+          `<style>p{color:red}</style><link rel="stylesheet" href="print.css" media="print">` +
+            `<style>p{color:green}</style><link rel="stylesheet" href="late.css">`,
+          { "print.css": "p{color:blue}", "late.css": "p{color:black}" },
+        ),
+      ).toEqual([
+        { media: null, type: null, css: "p{color:red}" },
+        { media: "print", type: null, css: "p{color:blue}" },
+        { media: null, type: null, css: "p{color:green}\n\np{color:black}" },
+      ]);
+    });
+
+    it("does not inline a linked sheet of a non-CSS type as CSS", async () => {
+      expect(
+        await bundledHeadStyles(`<link rel="stylesheet" type="text/x-scss" href="a.scss">`, {
+          "a.scss": "p{color:blue}",
+        }),
+      ).toEqual([]);
+    });
+
+    it("does not inline a disabled linked sheet", async () => {
+      expect(
+        await bundledHeadStyles(`<link rel="stylesheet" href="a.css" disabled>`, {
+          "a.css": "p{color:blue}",
+        }),
+      ).toEqual([]);
+    });
+
+    it("merges a titled style only with styles of the same title", async () => {
+      expect(
+        await bundledHeadStyles(
+          `<style>a{color:red}</style><style title="t">b{color:red}</style><style title="t">i{color:red}</style>` +
+            `<style title="T">u{color:red}</style><style title="">s{color:red}</style><style>q{color:red}</style>` +
+            `<link rel="stylesheet" href="alt.css" title="u">`,
+          { "alt.css": "p{color:blue}" },
+        ),
+      ).toEqual([
+        { media: null, type: null, css: "a{color:red}" },
+        { media: null, type: null, css: "b{color:red}\n\ni{color:red}", title: "t" },
+        { media: null, type: null, css: "u{color:red}", title: "T" },
+        { media: null, type: null, css: "s{color:red}\n\nq{color:red}", title: "" },
+        { media: null, type: null, css: "p{color:blue}", title: "u" },
+      ]);
+    });
+
+    it("keeps a composition's print style print-only and its non-CSS style out of CSS", async () => {
+      const comp = (
+        id: string,
+      ) => `<div data-composition-id="${id}" data-width="320" data-height="180">
+  <style media="print">.${id}-p{color:blue}</style><style type="text/x-tpl">.${id}-t{color:red}</style>
+  <p class="${id}-p">x</p></div>`;
+      const dir = makeTempProject({
+        "index.html": `<!doctype html>
+<html><head></head><body>
+  <div data-composition-id="root" data-width="320" data-height="180">
+    <div data-composition-id="file" data-composition-src="file.html"></div>
+    <div data-composition-id="inline"></div>
+  </div>
+  <template id="inline-template">${comp("inline")}</template>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines.root = {}</script>
+</body></html>`,
+        "file.html": `<template id="file-template">${comp("file")}</template>`,
+      });
+      const { document } = parseHTML(await bundleToSingleHtml(dir));
+      const css = (selector: string) =>
+        [...document.querySelectorAll(selector)].map((el) => el.textContent).join("\n");
+      for (const id of ["file", "inline"]) {
+        expect(css('style[media="print"]')).toContain(`.${id}-p{color:blue}`);
+        expect(css("style:not([media]):not([type])")).not.toContain(`.${id}-p{`);
+        expect(css("style:not([type])")).not.toContain(`.${id}-t{`);
+      }
+    });
+
+    it("keeps rule order across a conditional style", async () => {
+      expect(
+        await bundledHeadStyles(
+          `<style>p{color:red}</style><style media="print">p{color:blue}</style><style>p{color:green}</style>`,
+        ),
+      ).toEqual([
+        { media: null, type: null, css: "p{color:red}" },
+        { media: "print", type: null, css: "p{color:blue}" },
+        { media: null, type: null, css: "p{color:green}" },
+      ]);
+    });
+
+    it("inlines a linked sheet whose type carries a charset, but not a style with that type", async () => {
+      expect(
+        await bundledHeadStyles(
+          `<link rel="stylesheet" type="text/css; charset=utf-8" href="a.css">` +
+            `<style type="text/css; charset=utf-8">p{color:red}</style>`,
+          { "a.css": "p{color:blue}" },
+        ),
+      ).toEqual([
+        { media: null, type: null, css: "p{color:blue}" },
+        { media: null, type: "text/css; charset=utf-8", css: "p{color:red}" },
+      ]);
+    });
+
+    it("keeps the untitled copy of a @font-face that a later alternate style repeats", async () => {
+      const face = `@font-face{font-family:"PF";src:url(https://cdn.example/f.woff2)}`;
+      const dir = makeTempProject({
+        "index.html": `<!doctype html>
+<html><head><style>${face}.t{font-family:"PF"}</style><style title="main">.x{}</style>
+<style title="alt">${face}</style></head><body>
+  <div data-composition-id="root" data-width="320" data-height="180"></div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines.root = {}</script>
+</body></html>`,
+      });
+      const { document } = parseHTML(await bundleToSingleHtml(dir));
+      const untitled = [...document.querySelectorAll("head style:not([title])")];
+      expect(untitled.map((el) => el.textContent).join("")).toContain("@font-face");
+    });
+
+    it("keeps a root-less template's non-CSS style out of CSS", async () => {
+      const dir = makeTempProject({
+        "index.html": `<!doctype html>
+<html><head></head><body>
+  <div data-composition-id="root" data-width="320" data-height="180">
+    <div data-composition-id="bare"></div>
+  </div>
+  <template id="bare-template"><style type="text/x-tpl">.bare-t{color:red}</style><p>x</p></template>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines.root = {}</script>
+</body></html>`,
+      });
+      const { document } = parseHTML(await bundleToSingleHtml(dir));
+      const css = [...document.querySelectorAll("style:not([type])")].map((el) => el.textContent);
+      expect(css.join("\n")).not.toContain(".bare-t{");
+    });
+  });
+
+  describe("composition links to the same file", () => {
+    async function sharedLinks(aLink: string, bLink: string, rootHead = "", rootBody = "") {
+      const comp = (id: string, link: string) =>
+        `<template id="${id}-template"><div data-composition-id="${id}" data-width="320" data-height="180">${link}<p class="${id}">x</p></div></template>`;
+      const dir = makeTempProject({
+        "index.html": `<!doctype html>
+<html><head>${rootHead}</head><body>${rootBody}
+  <div data-composition-id="root" data-width="320" data-height="180">
+    <div data-composition-id="a" data-composition-src="a.html"></div>
+    <div data-composition-id="b" data-composition-src="b.html"></div>
+  </div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines.root = {}</script>
+</body></html>`,
+        "a.html": comp("a", aLink.replace("HREF", "shared.css")),
+        "b.html": comp("b", bLink.replace("HREF", "shared.css")),
+        "shared.css": ".a,.b{color:green}",
+      });
+      const { document } = parseHTML(await bundleToSingleHtml(dir));
+      return [...document.querySelectorAll("link[href]")].map((el) =>
+        Object.fromEntries([...el.attributes].map((attr) => [attr.name, attr.value])),
+      );
+    }
+    const link = (attrs = "") => `<link rel="stylesheet" href="HREF"${attrs}>`;
+    const plain = { href: "shared.css", rel: "stylesheet" };
+    const print = { ...plain, media: "print" };
+
+    it.each([
+      ["a plain link after a print one", link(' media="print"'), link(), [print, plain]],
+      [
+        "a plain link after a titled one",
+        link(' title="alt"'),
+        link(),
+        [{ ...plain, title: "alt" }, plain],
+      ],
+      ["a print link after a plain one", link(), link(' media="print"'), [plain, print]],
+      [
+        "a screen link after a print one",
+        link(' media="print"'),
+        link(' media="screen"'),
+        [print, { ...plain, media: "screen" }],
+      ],
+      ["two print links", link(' media="print"'), link(' media="print"'), [print]],
+      ["two plain links", link(), link(), [plain]],
+      [
+        "a plain link after a disabled one",
+        link(" disabled"),
+        link(),
+        [{ ...plain, disabled: "" }, plain],
+      ],
+      [
+        "a stylesheet after a preload of the same file",
+        '<link rel="preload" as="style" href="HREF">',
+        link(),
+        [plain, { href: "shared.css", rel: "preload", as: "style" }],
+      ],
+      [
+        "two links of different non-CSS types",
+        link(' type="text/x-scss"'),
+        link(' type="text/x-less"'),
+        [
+          { ...plain, type: "text/x-scss" },
+          { ...plain, type: "text/x-less" },
+        ],
+      ],
+      [
+        "a plain link after a CORS one, as one link",
+        link(" crossorigin"),
+        link(),
+        [{ ...plain, crossorigin: "" }],
+      ],
+      [
+        "two CORS links spelled differently, as one link",
+        link(' crossorigin=""'),
+        link(' crossorigin="anonymous"'),
+        [{ ...plain, crossorigin: "" }],
+      ],
+    ])("keeps %s under its own condition", async (_, aLink, bLink, expected) => {
+      expect(await sharedLinks(aLink, bLink)).toEqual(expected);
+    });
+
+    it("keeps a plain link after an alternate one", async () => {
+      const links = await sharedLinks(
+        `<link rel="alternate stylesheet" title="alt" href="HREF">`,
+        link(),
+      );
+      expect(links).toContainEqual(plain);
+    });
+
+    it("keeps a composition's plain link when the root links the same URL for print", async () => {
+      const url = "https://cdn.example/shared.css";
+      const links = await sharedLinks(
+        link().replace("HREF", url),
+        link(),
+        `<link rel="stylesheet" href="${url}" media="print">`,
+      );
+      expect(links).toEqual([{ ...print, href: url }, { ...plain, href: url }, plain]);
+    });
+
+    it("lets the root's link stand for a composition's that differs only in fetch attributes", async () => {
+      const url = "https://cdn.example/shared.css";
+      const snippet = ' integrity="sha512-x" crossorigin="anonymous" referrerpolicy="no-referrer"';
+      for (const [rootAttrs, compAttrs] of [
+        [' integrity="sha384-x"', ""],
+        [' referrerpolicy="no-referrer"', ""],
+        [" crossorigin", ""],
+        [snippet, snippet],
+      ]) {
+        const rootLink = link(rootAttrs).replace("HREF", url);
+        const links = await sharedLinks(link(compAttrs).replace("HREF", url), "", rootLink);
+        expect(links).toHaveLength(1);
+      }
+    });
+
+    it("keeps a composition's link when the root's same link is in a noscript", async () => {
+      const url = "https://cdn.example/shared.css";
+      expect(
+        await sharedLinks(
+          link().replace("HREF", url),
+          "",
+          "",
+          `<noscript>${link().replace("HREF", url)}</noscript>`,
+        ),
+      ).toEqual([
+        { ...plain, href: url },
+        { ...plain, href: url },
+      ]);
+    });
+
+    it("carries a composition link's type and disabled state", async () => {
+      const dir = makeTempProject({
+        "index.html": `<!doctype html>
+<html><head></head><body>
+  <div data-composition-id="root" data-width="320" data-height="180">
+    <div data-composition-id="a" data-composition-src="a.html"></div>
+  </div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines.root = {}</script>
+</body></html>`,
+        "a.html": `<template id="a-template"><div data-composition-id="a" data-width="320" data-height="180">
+<link rel="stylesheet" href="x.scss" type="text/x-scss"><link rel="stylesheet" href="off.css" disabled><p>x</p></div></template>`,
+      });
+      const { document } = parseHTML(await bundleToSingleHtml(dir));
+      expect(document.querySelector('link[href="x.scss"]')?.getAttribute("type")).toBe(
+        "text/x-scss",
+      );
+      expect(document.querySelector('link[href="off.css"]')?.hasAttribute("disabled")).toBe(true);
+    });
   });
 
   it("preserves @import for absolute URLs", async () => {
@@ -2144,6 +2509,190 @@ describe("bundleToSingleHtml script order", () => {
       expect(before).toBeGreaterThan(-1);
       expect(before).toBeLessThan(lib);
       expect(lib).toBeLessThan(after);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  const LOCAL_ORDER_GSAP = "https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js";
+  async function bundledBody(scripts: string, files: Record<string, string>) {
+    const dir = makeTempProject({
+      "index.html": `<!doctype html>
+<html><body>
+  <div data-composition-id="root" data-width="320" data-height="180"></div>
+  ${scripts}
+</body></html>`,
+      ...files,
+    });
+    try {
+      const { document } = parseHTML(await bundleToSingleHtml(dir));
+      return [...document.querySelectorAll("body script")];
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("keeps each local script in its own place around a CDN script", async () => {
+    const scripts = await bundledBody(
+      `<script src="setup.js"></script>
+  <script src="${LOCAL_ORDER_GSAP}"></script>
+  <script src="main.js"></script>`,
+      { "setup.js": "window.SETUP_RAN = 1;", "main.js": "window.MAIN_RAN = gsap.version;" },
+    );
+    const setupAt = scripts.findIndex((el) => el.textContent?.includes("SETUP_RAN"));
+    const gsapAt = scripts.findIndex((el) => el.getAttribute("src") === LOCAL_ORDER_GSAP);
+    const mainAt = scripts.findIndex((el) => el.textContent?.includes("MAIN_RAN"));
+    expect(setupAt).toBeGreaterThan(-1);
+    expect(setupAt).toBeLessThan(gsapAt);
+    expect(gsapAt).toBeLessThan(mainAt);
+  });
+
+  it.each(["defer", "async"])(
+    "inlines a local %s script in its own tag, keeping the attribute so the runtime times it",
+    async (when) => {
+      const scripts = await bundledBody(
+        `<script>window.FIRST = 1;</script>
+  <script ${when} src="main.js"></script>
+  <script>window.LAST = 1;</script>`,
+        { "main.js": "window.MAIN_RAN = 1;" },
+      );
+      const main = scripts.find((el) => el.textContent?.includes("MAIN_RAN"));
+      expect(main?.hasAttribute(when)).toBe(true);
+      expect(main?.hasAttribute("src")).toBe(false);
+      expect(main?.getAttribute("data-hf-inlined-src")).toBe("main.js");
+      expect(main?.textContent).not.toMatch(/FIRST|LAST/);
+    },
+  );
+
+  it.each(["", ' type="text/babel"'])(
+    "escapes a local file's script-closing text, so the page keeps its structure (%s)",
+    async (type) => {
+      const scripts = await bundledBody(
+        `<script${type} src="main.js"></script><p id="after">ok</p>`,
+        {
+          "main.js": `window.CLOSE = "</script><p id='leak'>x</p>"; window.OPEN = "<!-- <script>";`,
+        },
+      );
+      const holder = scripts.find((el) => el.textContent?.includes("window.CLOSE"));
+      expect(holder?.textContent).toContain("window.OPEN");
+      expect(holder?.textContent).not.toMatch(/<\/script|<!--/i);
+      expect(holder?.ownerDocument.getElementById("leak")).toBeNull();
+    },
+  );
+
+  it.each([
+    ["a local file", `<script nomodule src="legacy.js"></script>`],
+    ["an inline script", `<script nomodule>window.LEGACY_RAN = 1;</script>`],
+  ])("keeps nomodule on %s, so modern browsers still skip it", async (_, legacy) => {
+    const scripts = await bundledBody(
+      `<script>window.FIRST = 1;</script>\n  ${legacy}\n  <script>window.LAST = 1;</script>`,
+      {
+        "legacy.js": "window.LEGACY_RAN = 1;",
+      },
+    );
+    const holder = scripts.find((el) => el.textContent?.includes("LEGACY_RAN"));
+    expect(holder?.hasAttribute("nomodule")).toBe(true);
+    expect(holder?.textContent).not.toMatch(/FIRST|LAST/);
+  });
+
+  it("keeps a local script's non-JavaScript type, so it is not run as JavaScript", async () => {
+    const scripts = await bundledBody(`<script type="text/babel" src="app.jsx"></script>`, {
+      "app.jsx": "const App = () => <div />;",
+    });
+    const holder = scripts.find((el) => el.textContent?.includes("const App"));
+    expect(holder?.getAttribute("type")).toBe("text/babel");
+  });
+
+  it.each(["", ' type="text/babel"'])(
+    "keeps a local file's unicode regex for <!-- valid JavaScript (%s)",
+    async (type) => {
+      const scripts = await bundledBody(`<script${type} src="main.js"></script>`, {
+        "main.js": "window.HAS_COMMENT = /<!--/u.test(document.body.innerHTML);",
+      });
+      const holder = scripts.find((el) => el.textContent?.includes("HAS_COMMENT"));
+      expect(() => new Function(holder?.textContent ?? "")).not.toThrow();
+    },
+  );
+
+  it("keeps an authored script that reads the runtime global", async () => {
+    const scripts = await bundledBody(
+      `<script>if (window.__hyperframeRuntime) window.AUTHOR_SEEN = 1;</script>`,
+      {},
+    );
+    expect(scripts.some((el) => el.textContent?.includes("AUTHOR_SEEN"))).toBe(true);
+  });
+
+  it("keeps a run that merges a local file with a legacy <!-- comment valid, every script in order", async () => {
+    const scripts = await bundledBody(
+      `<script src="esc.js"></script>
+  <script src="legacy.js"></script>
+  <script>window.RAN.push("a");</script>
+  <script>window.RAN.push("b");</script>
+  <script src="plain.js"></script>`,
+      {
+        "esc.js": 'window.RAN = ["esc"]; window.CLOSE = "</script>";',
+        "legacy.js": '<!-- a legacy comment\nwindow.RAN.push("legacy");',
+        "plain.js": 'window.RAN.push("plain");',
+      },
+    );
+    const merged = scripts.find((el) => el.textContent?.includes('"plain"'));
+    expect(merged?.textContent).not.toMatch(/<\/script|<!--/i);
+    const page = { RAN: [] as string[] };
+    new Function("window", merged?.textContent ?? "")(page);
+    expect(page.RAN).toEqual(["esc", "legacy", "a", "b", "plain"]);
+  });
+
+  it.each([
+    ["in <head>", `<script src="legacy.js"></script>`, ""],
+    ["deferred in <body>", "", `<script defer src="legacy.js"></script>`],
+  ])(
+    "keeps a local file with a legacy <!-- comment valid when it is inlined on its own (%s)",
+    async (_, head, body) => {
+      const dir = makeTempProject({
+        "index.html": `<!doctype html>
+<html><head>${head}</head><body>
+  <div data-composition-id="root" data-width="320" data-height="180"></div>
+  ${body}
+</body></html>`,
+        "legacy.js": '<!-- a legacy comment\nwindow.RAN = ["legacy"];',
+      });
+      try {
+        const { document } = parseHTML(await bundleToSingleHtml(dir));
+        const file = document.querySelector("script[data-hf-inlined-src]");
+        expect(file?.textContent).not.toContain("<!--");
+        const page = { RAN: [] as string[] };
+        new Function("window", file?.textContent ?? "")(page);
+        expect(page.RAN).toEqual(["legacy"]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("leaves a local non-JavaScript file's text as written", async () => {
+    const scripts = await bundledBody(`<script type="application/json" src="data.json"></script>`, {
+      "data.json": "[1,2]",
+    });
+    expect(scripts.find((el) => el.getAttribute("type") === "application/json")?.textContent).toBe(
+      "[1,2]",
+    );
+  });
+
+  it("still adds the runtime when an authored script mentions its marker attribute", async () => {
+    const dir = makeTempProject({
+      "index.html": `<!doctype html>
+<html><head></head><body>
+  <div data-composition-id="root" data-width="320" data-height="180"></div>
+  <script>window.MARKER = document.querySelector("[data-hyperframes-preview-runtime]");</script>
+</body></html>`,
+    });
+    try {
+      const { document } = parseHTML(await bundleToSingleHtml(dir));
+      const scripts = [...document.querySelectorAll("script")];
+      expect(
+        scripts.filter((el) => el.hasAttribute("data-hyperframes-preview-runtime")),
+      ).toHaveLength(1);
+      expect(scripts.some((el) => el.textContent?.includes("window.MARKER"))).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

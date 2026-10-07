@@ -1,20 +1,30 @@
 import type { Hono } from "hono";
+import { parseHTML } from "linkedom";
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import { Readable } from "node:stream";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import {
+  AFTER_FONTS_SCRIPT_TYPE,
   addScenePartsManifest,
-  injectScriptsIntoHtml,
+  RUNTIME_BOOTSTRAP_ATTR,
   insertBeforeCloseTag,
+  insertRuntimeTag,
   stripEmbeddedRuntimeScripts,
   type BundleOptions,
 } from "@hyperframes/core/compiler";
-import { STUDIO_PREVIEW_MARK_META } from "@hyperframes/core/studio-preview-mark";
-import { injectTagsAtHeadStart } from "@hyperframes/core/compiler/html-document";
+import {
+  STUDIO_PREVIEW_MARK_META,
+  STUDIO_PREVIEW_ERRORS,
+} from "@hyperframes/core/studio-preview-mark";
+import { findStartTags, injectTagsAtHeadStart } from "@hyperframes/core/compiler/html-document";
 import { isWithinProjectRoot } from "@hyperframes/parsers/asset-resolution";
 import type { ResolvedProject, StudioApiAdapter } from "../types.js";
-import { isProjectRootMissing, resolveWithinProject } from "../helpers/safePath.js";
+import {
+  isPrivateProjectFile,
+  isProjectRootMissing,
+  resolveWithinProject,
+} from "../helpers/safePath.js";
 import { getMimeType } from "../helpers/mime.js";
 import { buildSubCompositionHtml, hasBaseElement } from "../helpers/subComposition.js";
 import {
@@ -112,6 +122,12 @@ function parseStudioMotionManifestContent(content: string): {
   }
 }
 
+/** Swaps any runtime already in the page for the preview runtime, placed as the bundler places it. */
+function withPreviewRuntime(html: string, runtimeUrl: string): string {
+  const tag = `<script ${RUNTIME_BOOTSTRAP_ATTR}="1" src="${runtimeUrl}"></script>`;
+  return insertRuntimeTag(stripEmbeddedRuntimeScripts(html), tag);
+}
+
 function injectScriptTagIntoHead(html: string, scriptTag: string): string {
   return insertBeforeCloseTag(html, "head", `${scriptTag}\n`) ?? `${scriptTag}\n${html}`;
 }
@@ -159,17 +175,56 @@ function injectMotionPathPluginIfNeeded(html: string): string {
   // core gsap script — which often lives at body-end, not <head>. Insert it
   // directly after the gsap script tag; only fall back to <head> if none is found
   // (e.g. gsap is inlined).
-  const gsapScript = /<script\b[^>]*\bsrc=["'][^"']*\/gsap(\.min)?\.js["'][^>]*>\s*<\/script>/i;
-  const match = html.match(gsapScript);
-  if (match) {
+  const gsap = findGsapCoreScript(html);
+  if (gsap) {
     // Match the plugin version to the composition's own gsap so the plugin
     // registers cleanly (a minor-version skew triggers a GSAP compatibility warning).
-    const version = match[0].match(/gsap@([\d.]+)/)?.[1] ?? GSAP_CDN_VERSION;
-    const pluginTag = `<script src="/api/vendor/gsap@${version}/dist/MotionPathPlugin.min.js"></script>`;
-    const end = html.indexOf(match[0]) + match[0].length;
-    return html.slice(0, end) + "\n" + pluginTag + html.slice(end);
+    const version = gsap.src.match(/gsap@([\d.]+)/)?.[1] ?? GSAP_CDN_VERSION;
+    const ordering = `${gsap.type ? ` type="${gsap.type}"` : ""}${gsap.defer ? " defer" : ""}`;
+    // Tabario fork (TAB-697): same-origin, not upstream's motionPathPluginUrl() jsdelivr URL.
+    const pluginTag = `<script${ordering} src="/api/vendor/gsap@${version}/dist/MotionPathPlugin.min.js"></script>`;
+    return html.slice(0, gsap.end) + "\n" + pluginTag + html.slice(gsap.end);
   }
   return injectScriptTagIntoHead(html, GSAP_MOTION_PATH_CDN_SCRIPT);
+}
+
+function isGsapCoreUrl(src: string): boolean {
+  const base = "http://localhost/";
+  return URL.canParse(src, base) && /\/gsap(\.min)?\.js$/i.test(new URL(src, base).pathname);
+}
+
+type GsapCoreScript = { src: string; type: string | null; defer: boolean; end: number };
+
+function findGsapCoreScript(html: string): GsapCoreScript | null {
+  const scripts = [...parseHTML(html).document.querySelectorAll("script")];
+  // The scanner skips comments, raw text and templates, so its `<script` offsets line up with the DOM's scripts.
+  const starts = findStartTags(html, "script");
+  if (starts.length !== scripts.length) return null;
+  const at = scripts.findIndex((script) =>
+    isGsapCoreUrl(lowerCaseAttributes(script).get("src") ?? ""),
+  );
+  if (at === -1) return null;
+  const attributes = lowerCaseAttributes(scripts[at]!);
+  const end = scriptCloseEnd(html, starts[at]!);
+  if (end === 0) return null;
+  return {
+    src: attributes.get("src")!,
+    type: attributes.get("type") ?? null,
+    defer: attributes.has("defer"),
+    end,
+  };
+}
+
+function lowerCaseAttributes(el: Element): Map<string, string> {
+  return new Map([...el.attributes].map((a) => [a.name.toLowerCase(), a.value]));
+}
+
+/** Index just past the `</script>` that closes the script starting at `start`; 0 when it never closes. */
+function scriptCloseEnd(html: string, start: number): number {
+  const close = /<\/script/gi;
+  close.lastIndex = start;
+  const closeAt = close.exec(html)?.index;
+  return closeAt === undefined ? 0 : html.indexOf(">", closeAt) + 1;
 }
 
 function injectStudioMotionDependencies(html: string, manifestContent: string): string {
@@ -193,12 +248,9 @@ function injectStudioMotionScript(
     activeCompositionPath,
   });
   if (!script) return html;
-  return injectScriptsIntoHtml(
-    injectStudioMotionDependencies(html, manifestContent),
-    [],
-    [script],
-    false,
-  );
+  const withDependencies = injectStudioMotionDependencies(html, manifestContent);
+  const tag = `<script type="${AFTER_FONTS_SCRIPT_TYPE}">${script.replace(/<\/script/gi, "<\\/script")}</script>`;
+  return insertBeforeCloseTag(withDependencies, "body", tag) ?? `${withDependencies}${tag}`;
 }
 
 const GSAP_FALLBACK_ATTR = "data-hf-gsap-fallback";
@@ -210,15 +262,17 @@ const GSAP_CDN_FALLBACK_SCRIPT = `<script ${GSAP_FALLBACK_ATTR}>
     if(loaded[file])return loaded[file];
     return loaded[file]=new Promise(function(ok,fail){
       var s=document.createElement("script");
-      s.src=cdnBase+file;s.onload=ok;s.onerror=fail;
+      s.src=cdnBase+file;s.hfGsapFallback=true;s.onload=ok;s.onerror=fail;
       document.head.appendChild(s);
     });
   }
   document.addEventListener("error",function(e){
     var t=e.target;
-    if(!t||t.tagName!=="SCRIPT"||!t.src)return;
+    if(!t||t.tagName!=="SCRIPT"||!t.src||t.hfGsapFallback)return;
     var m=t.src.match(/gsap[^/]*\\/dist\\/(.+\\.js)/);
-    if(m)loadFallback(m[1]);
+    if(m)loadFallback(m[1]).catch(function(){
+      reportError(new Error("GSAP could not load from "+t.src+" or "+cdnBase+m[1]+", so this preview's animations will not play."));
+    });
   },true);
 })();
 </script>`;
@@ -276,6 +330,10 @@ function previewVariablesFromRequest(rawVariables: string | undefined):
 /** Captures screenshot right after a seek, so they get every image eager and no preview mark. */
 export const PREVIEW_CAPTURE_PARAM = "hf-capture";
 
+// Studio's console capture attaches at the iframe's load; this keeps what was raised before it.
+const EARLY_ERRORS_SCRIPT = `<script>(function(){var seen=window.${STUDIO_PREVIEW_ERRORS}=[];
+addEventListener("error",function(e){seen.push(e.message||String(e))});})();</script>`;
+
 function injectStudioPreviewAugmentations(
   html: string,
   adapter: StudioApiAdapter,
@@ -285,7 +343,10 @@ function injectStudioPreviewAugmentations(
 ): string {
   const marked = capture
     ? html
-    : injectTagsAtHeadStart(lazyPreviewImages(html), `<meta name="${STUDIO_PREVIEW_MARK_META}">`);
+    : injectTagsAtHeadStart(
+        lazyPreviewImages(html),
+        `<meta name="${STUDIO_PREVIEW_MARK_META}">${EARLY_ERRORS_SCRIPT}`,
+      );
   return injectStudioMotionScript(
     injectMotionPathPluginIfNeeded(
       injectGsapCdnFallback(
@@ -349,6 +410,14 @@ export const PREVIEW_BUNDLE_OPTIONS = {
   sceneParts: true,
 } as const satisfies BundleOptions;
 
+const previewBaseHref = (projectId: string) =>
+  `/api/projects/${encodeURIComponent(projectId)}/preview/`;
+
+const withPreviewBase = (html: string, projectId: string) =>
+  hasBaseElement(html)
+    ? html
+    : injectTagsAtHeadStart(html, `<base href="${previewBaseHref(projectId)}">`);
+
 export function registerPreviewRoutes(api: Hono, adapter: PreviewApiAdapter): void {
   const previewCacheHeaders = (etag: string) => ({
     "Cache-Control": "private, no-cache",
@@ -381,7 +450,6 @@ export function registerPreviewRoutes(api: Hono, adapter: PreviewApiAdapter): vo
     signature: string,
   ): Promise<string | null> {
     const diskMain = resolveProjectMainHtml(project.dir, project.id);
-    const normalizedDisk = diskMain ? ensureHfIds(diskMain.html) : null;
 
     try {
       let bundled = await adapter.bundle(project.dir, {
@@ -391,30 +459,15 @@ export function registerPreviewRoutes(api: Hono, adapter: PreviewApiAdapter): vo
       let mainCompositionPath = "index.html";
       if (!bundled) {
         if (!diskMain) return null;
-        // Disk HTML may carry a baked inline runtime from a prior export; strip
-        // it so the preview runtime injected below isn't double-loaded (the
-        // bundled path already strips via htmlBundler). Idempotent if absent.
-        bundled = stripEmbeddedRuntimeScripts(normalizedDisk ?? diskMain.html);
+        bundled = ensureHfIds(diskMain.html);
         mainCompositionPath = diskMain.compositionPath;
       }
+      bundled = withPreviewRuntime(bundled, adapter.runtimeUrl);
       recordPreviewReferences(project.dir, bundled);
       recordPreviewBuilt(project.dir);
 
-      // Inject runtime if not already present (check URL pattern and bundler attribute)
-      if (
-        !bundled.includes("hyperframe.runtime") &&
-        !bundled.includes("hyperframes-preview-runtime")
-      ) {
-        const runtimeTag = `<script src="${adapter.runtimeUrl}"></script>`;
-        bundled =
-          insertBeforeCloseTag(bundled, "body", `${runtimeTag}\n`) ?? `${bundled}\n${runtimeTag}`;
-      }
-
       // Inject <base> for relative asset resolution
-      const baseHref = `/api/projects/${project.id}/preview/`;
-      if (!hasBaseElement(bundled)) {
-        bundled = bundled.replace(/<head>/i, `<head><base href="${baseHref}">`);
-      }
+      bundled = withPreviewBase(bundled, project.id);
 
       // Also covers elements the adapter injected; ids already present are kept.
       bundled = injectStudioPreviewAugmentations(
@@ -443,7 +496,10 @@ export function registerPreviewRoutes(api: Hono, adapter: PreviewApiAdapter): vo
       // not the pre-request snapshot that may have been saved over.
       const fallback = resolveProjectMainHtml(project.dir, project.id);
       if (fallback) {
-        const fallbackHtml = ensureHfIds(fallback.html);
+        const fallbackHtml = withPreviewBase(
+          withPreviewRuntime(ensureHfIds(fallback.html), adapter.runtimeUrl),
+          project.id,
+        );
         let fallbackAugmented = injectStudioPreviewAugmentations(
           await transformPreviewHtml(fallbackHtml, adapter, project, fallback.compositionPath),
           adapter,
@@ -554,7 +610,7 @@ export function registerPreviewRoutes(api: Hono, adapter: PreviewApiAdapter): vo
     const stamped = pinSubCompHfIds(compFile, compPath);
     if (stamped === null) return c.text("not found", 404); // file removed between stat and read
 
-    const baseHref = `/api/projects/${project.id}/preview/`;
+    const baseHref = previewBaseHref(project.id);
     let html = buildSubCompositionHtml(
       project.dir,
       compPath,
@@ -583,7 +639,7 @@ export function registerPreviewRoutes(api: Hono, adapter: PreviewApiAdapter): vo
     // use resolveWithinProject because saves write their data-hf-id values.
     const candidate = resolve(project.dir, subPath);
     const file = isWithinProjectRoot(project.dir, candidate) ? candidate : null;
-    if (!file) {
+    if (!file || isPrivateProjectFile(project.dir, file)) {
       return c.text("not found", 404);
     }
     recordPreviewRead(project.dir, file);

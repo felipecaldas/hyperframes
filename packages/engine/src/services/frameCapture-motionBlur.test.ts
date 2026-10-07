@@ -28,13 +28,14 @@ interface RecordedSeek {
   time: number;
   suppressEvents?: boolean;
   subFrameDivisions?: number;
+  exact?: boolean;
 }
 
 function installPageGlobals(seeks: RecordedSeek[]): void {
   const root = globalThis as Record<string, unknown>;
   root.window = {
     __hf: {
-      seek: (time: number, options?: { suppressEvents?: boolean; subFrameDivisions?: number }) => {
+      seek: (time: number, options?: Omit<RecordedSeek, "time">) => {
         seeks.push({ time, ...options });
       },
     },
@@ -175,6 +176,23 @@ describe("sub-frame accumulation reaches the page with distinct sample times", (
   });
 });
 
+describe("frame export keeps its frame grid (issue #4430)", () => {
+  // `exact` is the snapshot-only opt-out of the runtime's seek quantization. Export must
+  // never send it, or frames would land between grid points instead of on them.
+  it("never asks for an exact seek with motion blur off", async () => {
+    await captureFrameToBuffer(makeSession({ motionBlur: undefined }), 10, 10 / 30);
+
+    expect(seeks).toEqual([{ time: 10 / 30 }]);
+  });
+
+  it("never asks for an exact seek on any motion-blur sample", async () => {
+    await captureFrameToBuffer(makeSession(), 10, 10 / 30);
+
+    expect(seeks.length).toBeGreaterThan(1);
+    expect(seeks.every((s) => !("exact" in s))).toBe(true);
+  });
+});
+
 describe("accumulation composes with static-frame dedup", () => {
   // 720 degrees is the widest shutter After Effects offers, and the AD5 reference export
   // uses it, so it is the case a reader is most likely to check the frame ranges against.
@@ -299,10 +317,59 @@ describe("resolveSessionMotionBlur rejects what accumulation cannot render", () 
     expect(() => resolveSessionMotionBlur(session)).toThrow(/format "png"/);
   });
 
-  it("rejects injected video frames, which cannot follow a sub-frame seek", () => {
-    expect(() =>
-      resolveSessionMotionBlur(withOptions({ onBeforeCapture: async () => {} })),
-    ).toThrow(/video/);
+  it("accepts a session that injects video frames (#5144)", () => {
+    const plan = resolveSessionMotionBlur(withOptions({ onBeforeCapture: async () => {} }));
+    expect(plan).not.toBeUndefined();
+  });
+});
+
+describe("injected video is held for the whole shutter window (#5144)", () => {
+  function recordInjections() {
+    const calls: Array<{ time: number; held: number | undefined; seeksBefore: number }> = [];
+    const hook: CaptureSession["onBeforeCapture"] = async (_page, time, held) => {
+      calls.push({ time, held, seeksBefore: seeks.length });
+    };
+    return { calls, hook };
+  }
+  const sampleSeekTimes = () =>
+    seeks.filter((s) => s.subFrameDivisions !== undefined).map((s) => s.time);
+
+  it("injects at the frame time first, then each sample at its own time holding the frame", async () => {
+    const { calls, hook } = recordInjections();
+
+    await captureFrameToBuffer(makeSession({ onBeforeCapture: hook }), 10, 10 / 30);
+
+    // The first call comes right after the eventful seek, before any sample seek.
+    expect(calls[0]).toEqual({ time: 10 / 30, held: 10 / 30, seeksBefore: 1 });
+    const sampleCalls = calls.slice(1);
+    expect(sampleCalls.map((call) => call.time)).toEqual(sampleSeekTimes());
+    expect(new Set(sampleCalls.map((call) => call.time)).size).toBe(16);
+    expect(sampleCalls.map((call) => call.held)).toEqual(Array(16).fill(10 / 30));
+  });
+
+  it("holds the frame time for the adaptive probes too", async () => {
+    const { calls, hook } = recordInjections();
+
+    await captureFrameToBuffer(
+      makeSession({ onBeforeCapture: hook, motionBlur: resolveMotionBlurPlan({}) ?? undefined }),
+      10,
+      10 / 30,
+    );
+
+    expect(calls.map((call) => call.time)).toEqual([10 / 30, ...sampleSeekTimes()]);
+    expect(calls.map((call) => call.held)).toEqual(Array(calls.length).fill(10 / 30));
+  });
+
+  it("holds nothing on a frame without blur", async () => {
+    const { calls, hook } = recordInjections();
+
+    await captureFrameToBuffer(
+      makeSession({ onBeforeCapture: hook, motionBlur: undefined }),
+      10,
+      10 / 30,
+    );
+
+    expect(calls).toEqual([{ time: 10 / 30, held: undefined, seeksBefore: 1 }]);
   });
 });
 

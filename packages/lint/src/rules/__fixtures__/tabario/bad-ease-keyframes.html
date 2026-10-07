@@ -40,9 +40,10 @@
         tl.to(
           ".item",
           {
-            keyframes: { "0%": { opacity: 0 }, "100%": { opacity: 1 } },
+            // Inside the keyframes object: GSAP ignores a tween-level easeEach
+            // on percentage keyframes, and so does the parser since v0.8.140.
+            keyframes: { "0%": { opacity: 0 }, "100%": { opacity: 1 }, easeEach: "elastic.out(1, 0.3)" },
             duration: 0.4,
-            easeEach: "elastic.out(1, 0.3)",
           },
           0.6,
         );

@@ -47,6 +47,13 @@ describe("shouldWatchProjectFile", () => {
     expect(shouldWatchProjectFile(".thumbnails/frame.jpg")).toBe(false);
     expect(shouldWatchProjectFile(".waveform-cache/peaks.json")).toBe(false);
   });
+
+  it("skips the temp file of a save in flight, but not a user's own .tmp file", () => {
+    expect(shouldWatchProjectFile("index.html.hf0a1b2c.tmp")).toBe(false);
+    expect(shouldWatchProjectFile("compositions/intro.html.hf0a1b2c.tmp")).toBe(false);
+    expect(shouldWatchProjectFile("foo.12345678.tmp")).toBe(true);
+    expect(shouldWatchProjectFile("notes.tmp")).toBe(true);
+  });
 });
 
 describe("createProjectWatcher", () => {
@@ -87,6 +94,29 @@ describe("createProjectWatcher", () => {
       );
       projectWatcher.close();
       expect(mockWatcher.close).toHaveBeenCalled();
+    },
+  );
+
+  it.runIf(process.platform === "linux")("closes every watch it opened, its parent's too", () => {
+    const projectWatcher = createProjectWatcher("/fake/project/dir");
+    const opened = vi.mocked(watch).mock.calls.map(([path]) => path);
+    expect(opened).toContain("/fake/project");
+    projectWatcher.close();
+    expect(mockWatcher.close).toHaveBeenCalledTimes(opened.length);
+  });
+
+  it.runIf(process.platform === "linux")(
+    "keeps reporting project files when its parent cannot be watched",
+    () => {
+      vi.useFakeTimers();
+      fakeDirs.unwatchable = "/fake/project";
+      const projectWatcher = createProjectWatcher("/fake/project/dir");
+      const listener = vi.fn();
+      projectWatcher.addListener(listener);
+      mockWatcher.emit("change", "change", "index.html");
+      vi.advanceTimersByTime(30);
+      expect(listener).toHaveBeenCalledExactlyOnceWith("index.html");
+      projectWatcher.close();
     },
   );
 

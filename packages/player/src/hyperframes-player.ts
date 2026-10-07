@@ -1192,8 +1192,8 @@ class HyperframesPlayer extends HTMLElement {
    * iframe on every frame. Used for the runtime bridge path so that animation
    * advances even when the composition iframe's own rAF is throttled by
    * Chromium (e.g. deeply nested cross-origin iframes in Electron / Claude desktop).
-   * The runtime's own rAF loop still runs — ticking GSAP twice per frame is
-   * harmless because seekTimelineAndAdapters is idempotent.
+   * The runtime skips a tick seek only when that timeline time is already
+   * rendered. Host ticks still advance a throttled iframe.
    */
   private _startParentTickClock(): void {
     this._stopParentTickClock();
@@ -1552,7 +1552,7 @@ class HyperframesPlayer extends HTMLElement {
   private _onIframeLoad() {
     // In video mode the iframe only ever loads about:blank; its load must not reset the video.
     if (!this._connected || this._videoSource) return;
-    // The runtime posts its timeline at DOMContentLoaded, before `load`, and every
+    // The runtime posts its timeline once its scripts ran, before or after `load`, and every
     // host-initiated navigation clears `_ready` first. So a ready player already holds this
     // document's handshake (an opaque origin reads as null); a paused runtime never posts it again.
     const doc = this._getSameOriginIframeDocument();
@@ -1563,8 +1563,8 @@ class HyperframesPlayer extends HTMLElement {
     }
 
     this._ready = false;
-    // The runtime installs its bridge at DOMContentLoaded, posts `ready`, and only then does the
-    // iframe's load event fire. Do not erase that authoritative handshake here: doing so strands
+    // The runtime installs its bridge once its scripts ran and posts `ready`, which can come before
+    // the iframe's load event. Do not erase that authoritative handshake here: doing so strands
     // retained data set after load until a second `ready` that never comes. Source setters and
     // sandbox-policy reloads already clear bridge readiness before starting a navigation.
     this._invalidateAssetsWait();

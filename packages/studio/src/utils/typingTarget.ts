@@ -21,6 +21,14 @@ export function isTypingTarget(target: EventTarget | null): boolean {
   return element.closest(TYPING_SELECTOR) !== null;
 }
 
+/** Plain keys (arrows, Space, Delete) also belong to a focused slider or player; Cmd shortcuts still do not. */
+export function ownsPlainKeys(target: EventTarget | null): boolean {
+  return isTypingTarget(target) || asElement(target)?.closest(KEY_OWNING_CONTROLS) != null;
+}
+
+// A slider steps and a native player seeks and plays with these keys themselves.
+const KEY_OWNING_CONTROLS = "[role='slider'],video[controls],audio[controls]";
+
 /**
  * Whether a keyboard event still belongs to an editor even when its reported
  * target was retargeted to a window/body boundary.
@@ -70,6 +78,7 @@ const TYPING_SELECTOR = [
   // `input` and matched above. Without this row the shared Toggle would let a
   // global shortcut claim Space instead of flipping the control (KTD13).
   "[role='switch']",
+  "[role='dialog'][aria-modal='true']",
   ".cm-editor",
 ].join(",");
 

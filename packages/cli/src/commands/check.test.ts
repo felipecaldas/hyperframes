@@ -949,6 +949,7 @@ function reportWithFindings(overrides: Partial<CheckReport> = {}): CheckReport {
   return {
     ok: true,
     strict: false,
+    browserSkipped: false,
     lint: { ...emptySection(), filesScanned: 0 },
     runtime: emptySection(),
     layout: {
@@ -1047,6 +1048,7 @@ describe("check pipeline", () => {
     const envelope = JSON.parse(output);
     expect(envelope).toMatchObject({
       ok: true,
+      browserSkipped: false,
       lint: { ok: true },
       runtime: { ok: true },
       layout: { ok: true },
@@ -1057,7 +1059,7 @@ describe("check pipeline", () => {
     });
   });
 
-  it("short-circuits on lint errors without launching a browser", async () => {
+  it("short-circuits on lint errors without launching a browser, and flags the skipped sections", async () => {
     const lint = lintWith(
       "error",
       "root_missing_composition_id",
@@ -1069,6 +1071,42 @@ describe("check pipeline", () => {
     expect(checkExitCode(report)).toBe(1);
     expect(report.lint.findings).toHaveLength(1);
     expect(browser).not.toHaveBeenCalled();
+    // The browser sections look clean either way; only browserSkipped tells them apart.
+    expect(report.browserSkipped).toBe(true);
+    expect(report.runtime).toMatchObject({ ok: true, errorCount: 0, findings: [] });
+    expect(report.layout).toMatchObject({ ok: true, errorCount: 0, findings: [], duration: 0 });
+    expect(report.motion).toMatchObject({ ok: true, errorCount: 0, findings: [] });
+    expect(report.contrast).toMatchObject({ ok: true, errorCount: 0, findings: [] });
+  });
+
+  it("marks browserSkipped true when the linter itself crashes", async () => {
+    const { deps } = dependencies(fakeDriver());
+    deps.lintProject = vi.fn(async () => {
+      throw new Error("unreadable index.html");
+    });
+    const report = await runCheckPipeline(PROJECT, DEFAULT_CHECK_OPTIONS, deps);
+
+    expect(report.ok).toBe(false);
+    expect(report.browserSkipped).toBe(true);
+    expect(report.runtime.findings[0]?.code).toBe("check_lint_failure");
+  });
+
+  it("marks browserSkipped false once a browser session actually runs", async () => {
+    const { report } = await runScenario(fakeDriver());
+    expect(report.browserSkipped).toBe(false);
+  });
+
+  it("marks browserSkipped true when the browser session throws before producing results", async () => {
+    const { deps } = dependencies(fakeDriver());
+    deps.runBrowserCheck = vi.fn(async () => {
+      throw new Error("Chrome launch failed");
+    });
+    const report = await runCheckPipeline(PROJECT, DEFAULT_CHECK_OPTIONS, deps);
+
+    expect(report.ok).toBe(false);
+    expect(report.browserSkipped).toBe(true);
+    expect(report.runtime.findings).toHaveLength(1);
+    expect(report.layout).toMatchObject({ ok: true, errorCount: 0, findings: [] });
   });
 
   it("gates AA contrast failures and --no-contrast skips the pass", async () => {
@@ -1474,9 +1512,37 @@ describe("check pipeline", () => {
           (finding) =>
             finding.code === "sweep_static" &&
             finding.severity === "error" &&
-            finding.message.includes("did not advance"),
+            finding.message.includes("did not advance") &&
+            finding.fixHint?.includes("data-no-timeline"),
         ),
       ).toBe(true);
+    });
+
+    it("warns, without failing, when only the audio advanced and nothing on screen moved", async () => {
+      let call = 0;
+      const driver = fakeDriver({
+        getDuration: vi.fn(async () => 6),
+        collectLayoutGeometry: vi.fn(async () => `still\u001f${call++}`),
+      });
+      const { report } = await runScenario(driver);
+
+      const sweep = report.layout.findings.filter((finding) => finding.code === "sweep_static");
+      expect(sweep.map((finding) => [finding.severity, finding.message])).toEqual([
+        ["warning", "Only the audio advanced under seek; nothing on screen moved."],
+      ]);
+      expect(sweep[0]?.fixHint).toContain("data-no-timeline");
+      expect(report.ok).toBe(true);
+    });
+
+    it("does not flag a sweep where something on screen moved", async () => {
+      let call = 0;
+      const driver = fakeDriver({
+        getDuration: vi.fn(async () => 6),
+        collectLayoutGeometry: vi.fn(async () => `frame${call++}\u001f0`),
+      });
+      const { report } = await runScenario(driver);
+
+      expect(report.layout.findings.some((finding) => finding.code === "sweep_static")).toBe(false);
     });
 
     it("does not flag --at times the user picked on a still end card", async () => {

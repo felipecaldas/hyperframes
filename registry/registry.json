@@ -244,6 +244,10 @@
       "type": "hyperframes:block"
     },
     {
+      "name": "flowing-gradient",
+      "type": "hyperframes:block"
+    },
+    {
       "name": "freeze-frame-dressing",
       "type": "hyperframes:block"
     },
@@ -261,6 +265,10 @@
     },
     {
       "name": "glitch",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "godrays",
       "type": "hyperframes:block"
     },
     {
@@ -321,6 +329,10 @@
     },
     {
       "name": "liquid-glass-widgets",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "liquid-metal",
       "type": "hyperframes:block"
     },
     {
@@ -388,6 +400,14 @@
       "type": "hyperframes:block"
     },
     {
+      "name": "marble",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "mesh-gradient",
+      "type": "hyperframes:block"
+    },
+    {
       "name": "message-thread-reveal",
       "type": "hyperframes:block"
     },
@@ -417,6 +437,10 @@
     },
     {
       "name": "mk-specs-list",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "nebula",
       "type": "hyperframes:block"
     },
     {

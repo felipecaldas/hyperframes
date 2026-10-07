@@ -9,6 +9,8 @@ import { setCompositionSourceMap } from "../editor/domEditingDom";
 import { ensureMotionPathPluginLoaded } from "../../utils/gsapSoftReload";
 import { useAssetPreviewStore } from "../../utils/assetPreviewStore";
 import { createStableContext } from "../../utils/hmrStableContext";
+import { studioApiFetch } from "../../utils/studioApiFetch";
+import { previewReloadBegun } from "../../player/previewReloading";
 
 export function shouldDisableTimelineWhileCompositionLoading(compositionLoading: boolean): boolean {
   return compositionLoading;
@@ -21,7 +23,7 @@ export interface NLEContextValue {
   play: () => void;
   pause: () => void;
   togglePlay: () => void;
-  seek: (time: number, options?: { keepPlaying?: boolean }) => boolean;
+  seek: (time: number, options?: { keepPlaying?: boolean; follow?: boolean }) => boolean;
   refreshPlayer: () => void;
   onIframeLoad: () => void;
   // The hidden reload iframe NLEPreview renders next to the live one during a full reload.
@@ -129,9 +131,13 @@ export function NLEProvider({
   // Lightweight reload: change iframe src instead of destroying the Player.
   const prevRefreshKeyRef = useRef(refreshKey);
   useEffect(() => {
-    if (refreshKey === prevRefreshKeyRef.current) return;
-    prevRefreshKeyRef.current = refreshKey;
-    refreshPlayer();
+    try {
+      if (refreshKey === prevRefreshKeyRef.current) return;
+      prevRefreshKeyRef.current = refreshKey;
+      refreshPlayer();
+    } finally {
+      previewReloadBegun();
+    }
   }, [refreshKey, refreshPlayer]);
 
   // Steps that follow every load of the live iframe, including a reload promoted in place.
@@ -209,7 +215,7 @@ export function NLEProvider({
     setCompositionSourceMap(emptyMap);
     onCompIdToSrcChangeRef.current?.(emptyMap);
 
-    fetch(buildProjectApiPath(projectId, `/files/index.html`), {
+    studioApiFetch(buildProjectApiPath(projectId, `/files/index.html`), {
       signal: controller.signal,
     })
       .then((r) => {

@@ -16,10 +16,13 @@ vi.mock("@hyperframes/engine", () => ({
 }));
 
 vi.mock("../audioPadTrim.js", () => ({
+  AAC_DELIVERY_TRUE_PEAK_DBFS: -1,
   padOrTrimAudioToVideoFrameCount: padOrTrimAudioMock,
 }));
 
+const { reportAssembleProgressMock } = vi.hoisted(() => ({ reportAssembleProgressMock: vi.fn() }));
 vi.mock("../shared.js", () => ({
+  reportAssembleProgress: reportAssembleProgressMock,
   updateJobStatus: vi.fn(),
 }));
 
@@ -83,6 +86,7 @@ describe("runAssembleStage audio duration parity", () => {
       undefined,
       { audioCodec: "aac" },
       { num: 30, den: 1 },
+      expect.any(Function),
     );
   });
 
@@ -152,6 +156,34 @@ describe("runAssembleStage audio duration parity", () => {
       expect(muxVideoWithAudioMock).toHaveBeenCalledTimes(1);
       expect(packageHlsMock).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe("runAssembleStage progress", () => {
+  beforeEach(() => {
+    resetMocks();
+    reportAssembleProgressMock.mockReset();
+  });
+
+  it.each([
+    ["the audio mux", true],
+    ["MP4 faststart", false],
+  ])("reports the seconds %s has written against the video's length", async (_pass, hasAudio) => {
+    const write = async (...args: unknown[]) => {
+      (args.at(-1) as (seconds: number) => void)(0.5);
+      return { success: true };
+    };
+    muxVideoWithAudioMock.mockImplementation(write);
+    applyFaststartMock.mockImplementation(write);
+    const input = makeInput({ hasAudio });
+    await runAssembleStage(input);
+    expect(reportAssembleProgressMock).toHaveBeenCalledWith(input.job, 0.5, 1, undefined);
+  });
+
+  it("closes at the video's full length when no pass reports seconds", async () => {
+    const input = makeInput({ hasAudio: false });
+    await runAssembleStage(input);
+    expect(reportAssembleProgressMock.mock.calls).toEqual([[input.job, 1, 1, undefined]]);
   });
 });
 
@@ -236,5 +268,36 @@ describe("runAssembleStage HLS packaging", () => {
       "Audio duration normalization failed: ffmpeg trim failed",
     );
     expect(packageHlsMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("runAssembleStage limiter honesty", () => {
+  beforeEach(resetMocks);
+
+  it("records and logs how far the true-peak limiter lowered the mix", async () => {
+    padOrTrimAudioMock.mockResolvedValue({
+      success: true,
+      outputPath: "/tmp/audio.duration-normalized.m4a",
+      targetDurationSeconds: 1,
+      sourceDurationSeconds: 1,
+      operation: "copy",
+      audioLoweredDb: 1.44,
+    });
+    const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
+    const input = makeInput();
+    input.job.config.logger = logger;
+
+    await runAssembleStage(input);
+
+    expect(input.job.audioLoweredDb).toBe(1.44);
+    expect(logger.info).toHaveBeenCalledWith("Audio lowered by 1.4 dB to stay under −1 dBTP", {
+      audioLoweredDb: 1.44,
+    });
+  });
+
+  it("leaves the job untouched when the limiter did not engage", async () => {
+    const input = makeInput();
+    await runAssembleStage(input);
+    expect(input.job).not.toHaveProperty("audioLoweredDb");
   });
 });

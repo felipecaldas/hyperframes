@@ -26,6 +26,12 @@
       "types": "./dist/canaryRegistry.d.ts",
       "environments": ["browser", "bun", "node"]
     },
+    "./telemetry-redaction": {
+      "source": "./src/telemetryRedaction.ts",
+      "runtime": "./dist/telemetryRedaction.js",
+      "types": "./dist/telemetryRedaction.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
     "./beats": {
       "source": "./src/beats/index.ts",
       "runtime": "./dist/beats/index.js",
@@ -42,6 +48,12 @@
       "source": "./src/safePath.ts",
       "runtime": "./dist/safePath.js",
       "types": "./dist/safePath.d.ts",
+      "environments": ["bun", "node"]
+    },
+    "./atomic-file": {
+      "source": "./src/atomicFile.ts",
+      "runtime": "./dist/atomicFile.js",
+      "types": "./dist/atomicFile.d.ts",
       "environments": ["bun", "node"]
     },
     "./asset-paths": {
@@ -72,6 +84,12 @@
       "source": "./src/studioPreviewMark.ts",
       "runtime": "./dist/studioPreviewMark.js",
       "types": "./dist/studioPreviewMark.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./gsap-cdn": {
+      "source": "./src/gsapCdn.ts",
+      "runtime": "./dist/gsapCdn.js",
+      "types": "./dist/gsapCdn.d.ts",
       "environments": ["browser", "bun", "node"]
     },
     "./media-timing": {
@@ -194,6 +212,12 @@
       "types": "./dist/audioCarve.d.ts",
       "environments": ["browser", "bun", "node"]
     },
+    "./media-link": {
+      "source": "./src/mediaLink.ts",
+      "runtime": "./dist/mediaLink.js",
+      "types": "./dist/mediaLink.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
     "./audio-groups": {
       "source": "./src/audioGroups.ts",
       "runtime": "./dist/audioGroups.js",
@@ -210,6 +234,12 @@
       "source": "./src/clipFacts.ts",
       "runtime": "./dist/clipFacts.js",
       "types": "./dist/clipFacts.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./audible-video": {
+      "source": "./src/audibleVideo.ts",
+      "runtime": "./dist/audibleVideo.js",
+      "types": "./dist/audibleVideo.d.ts",
       "environments": ["browser", "bun", "node"]
     },
     "./audio-gain": {
@@ -266,6 +296,12 @@
       "types": "./dist/runtime/clipTree.d.ts",
       "environments": ["browser", "bun", "node"]
     },
+    "./runtime/dom-realm": {
+      "source": "./src/runtime/domRealm.ts",
+      "runtime": "./dist/runtime/domRealm.js",
+      "types": "./dist/runtime/domRealm.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
     "./runtime/custom-ease": {
       "source": "./src/runtime/customEase.ts",
       "runtime": "./dist/runtime/customEase.js",
@@ -282,6 +318,12 @@
       "source": "./src/runtime/startResolver.ts",
       "runtime": "./dist/runtime/startResolver.js",
       "types": "./dist/runtime/startResolver.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./runtime/composition-length": {
+      "source": "./src/runtime/compositionLength.ts",
+      "runtime": "./dist/runtime/compositionLength.js",
+      "types": "./dist/runtime/compositionLength.d.ts",
       "environments": ["browser", "bun", "node"]
     },
     "./runtime/protocol": {
@@ -444,6 +486,18 @@
       "source": "./src/fonts/systemFontLocator.ts",
       "runtime": "./dist/fonts/systemFontLocator.js",
       "types": "./dist/fonts/systemFontLocator.d.ts",
+      "environments": ["bun", "node"]
+    },
+    "./fonts/embed": {
+      "source": "./src/fonts/deterministicFonts.ts",
+      "runtime": "./dist/fonts/deterministicFonts.js",
+      "types": "./dist/fonts/deterministicFonts.d.ts",
+      "environments": ["bun", "node"]
+    },
+    "./fonts/embedded-data": {
+      "source": "./src/fonts/fontData.generated.ts",
+      "runtime": "./dist/fonts/fontData.generated.js",
+      "types": "./dist/fonts/fontData.generated.d.ts",
       "environments": ["bun", "node"]
     },
     "./figma": {

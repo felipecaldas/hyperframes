@@ -8,6 +8,7 @@ import { buildElementAgentPrompt, type DomEditSelection } from "../components/ed
 import { usePlayerStore } from "../player";
 import { openAgentBridge } from "../utils/agentBridge";
 import { elementRequestParts } from "../utils/agentRequestParts";
+import { studioApiFetch } from "../utils/studioApiFetch";
 
 // ── Types ──
 
@@ -55,7 +56,7 @@ export function useAskAgentModal({
 
       const targetPath = selection.sourceFile || activeCompPath || "index.html";
       try {
-        const response = await fetch(
+        const response = await studioApiFetch(
           buildProjectApiPath(pid, `/files/${encodeURIComponent(targetPath)}`),
         );
         if (!response.ok) return;

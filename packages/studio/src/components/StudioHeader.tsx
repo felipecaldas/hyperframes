@@ -1,4 +1,4 @@
-import { useState, type MouseEvent } from "react";
+import { memo, useContext, useState, type MouseEvent } from "react";
 import { Camera } from "../icons/SystemIcons";
 import { useStudioShellContext } from "../contexts/StudioContext";
 import { usePanelLayoutContext } from "../contexts/PanelLayoutContext";
@@ -6,12 +6,15 @@ import { trackStudioEvent } from "../utils/studioTelemetry";
 import { Button, buttonBase, buttonSizes, buttonVariants, cn, Tooltip } from "./ui";
 import { Dock } from "./dock/Dock";
 import { InspectorIcon } from "./icons/InspectorIcon";
+import { OpenInDesktopButton } from "./OpenInDesktopButton";
 import { HyperframesLogo } from "./ui/HyperframesLogo";
 import { ArrowLeft, Robot } from "@phosphor-icons/react";
 import { toggleAgentBridge } from "../utils/agentBridge";
 import { TABARIO_STUDIO_HOSTED } from "./editor/manualEditingAvailability";
+import { ShowThemeToggle, ThemeToggle } from "./ThemeToggle";
+import { studioApiFetch } from "../utils/studioApiFetch";
 
-export interface StudioHeaderProps {
+interface StudioHeaderProps {
   captureFrameHref: string;
   captureFrameFilename: string;
   handleCaptureFrameClick: (event: MouseEvent<HTMLAnchorElement>) => void;
@@ -49,7 +52,7 @@ function useReturnToTabario() {
     setReturning(true);
     setError(null);
     try {
-      const response = await fetch("/api/tabario/session/exit", {
+      const response = await studioApiFetch("/api/tabario/session/exit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: "{}",
@@ -72,7 +75,7 @@ function useReturnToTabario() {
 }
 
 // fallow-ignore-next-line complexity
-export function StudioHeader({
+export const StudioHeader = memo(function StudioHeader({
   captureFrameHref,
   captureFrameFilename,
   handleCaptureFrameClick,
@@ -82,6 +85,7 @@ export function StudioHeader({
   inspectorPanelActive,
   onExport,
 }: StudioHeaderProps) {
+  const showThemeToggle = useContext(ShowThemeToggle);
   const { projectId, renderQueue } = useStudioShellContext();
   const { rightCollapsed, setRightCollapsed, setRightPanelTab } = usePanelLayoutContext();
   const isRendering = renderQueue.isRendering;
@@ -188,7 +192,8 @@ export function StudioHeader({
               aria-pressed={inspectorButtonActive}
               className={cn(
                 "h-full rounded-none",
-                inspectorButtonActive && "bg-hover text-accent enabled:hover:text-accent",
+                inspectorButtonActive &&
+                  "bg-on text-accent-ink enabled:hover:bg-on-hover enabled:hover:text-accent-ink",
               )}
               icon={<InspectorIcon size={16} />}
               onClick={() => {
@@ -208,7 +213,9 @@ export function StudioHeader({
             </Button>
           </Tooltip>
         </div>
+        {showThemeToggle && <ThemeToggle />}
         <Dock.WindowMenu />
+        <OpenInDesktopButton />
         <Tooltip
           label={
             ffmpegMissing
@@ -242,4 +249,4 @@ export function StudioHeader({
       </div>
     </div>
   );
-}
+});

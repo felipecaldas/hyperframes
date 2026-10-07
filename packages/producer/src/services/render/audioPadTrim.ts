@@ -47,7 +47,7 @@ const AUDIO_DURATION_TOLERANCE_SECONDS = 0.001;
  * was a wider surface than the symbol has consumers for. The fork's fallow gate
  * flagged it as an unused export (TAB-1172).
  */
-const AAC_DELIVERY_TRUE_PEAK_DBFS = -1;
+export const AAC_DELIVERY_TRUE_PEAK_DBFS = -1;
 const MAX_TRUE_PEAK_CORRECTION_PASSES = 3;
 const TRUE_PEAK_RETRY_MARGIN_DB = 0.1;
 
@@ -108,6 +108,8 @@ export interface PadTrimAudioResult {
   error?: string;
   /** Stable machine-readable cause for failures safe to retry on a fresh host. */
   failureReason?: "external_interruption";
+  /** dB the true-peak limiter lowered the whole mix by; absent when it did not engage. */
+  audioLoweredDb?: number;
 }
 
 export type PadTrimAudioStepKind = "copy" | "trim" | "normalize";
@@ -392,6 +394,7 @@ export async function padOrTrimAudioToVideoFrameCount(
     for (const path of plan.cleanupPaths) rmSync(path, { force: true });
   }
 
+  let loweredDb = 0;
   if (probeTruePeak) {
     const correction = await enforceAacTruePeak({
       audioPath: input.outputPath,
@@ -411,6 +414,7 @@ export async function padOrTrimAudioToVideoFrameCount(
         failureReason: correction.failureReason,
       };
     }
+    loweredDb = correction.loweredDb ?? 0;
   }
   return {
     success: true,
@@ -418,6 +422,7 @@ export async function padOrTrimAudioToVideoFrameCount(
     targetDurationSeconds,
     sourceDurationSeconds: audioInfo.durationSeconds,
     operation: plan.operation,
+    ...(loweredDb > 0 ? { audioLoweredDb: loweredDb } : {}),
   };
 }
 
@@ -433,9 +438,12 @@ interface EnforceAacTruePeakInput {
   }>;
 }
 
-async function enforceAacTruePeak(
-  input: EnforceAacTruePeakInput,
-): Promise<{ success: boolean; error?: string; failureReason?: "external_interruption" }> {
+async function enforceAacTruePeak(input: EnforceAacTruePeakInput): Promise<{
+  success: boolean;
+  error?: string;
+  failureReason?: "external_interruption";
+  loweredDb?: number;
+}> {
   let scratchDir: string | undefined;
   try {
     scratchDir = mkdtempSync(join(dirname(input.audioPath), ".true-peak-"));
@@ -443,6 +451,7 @@ async function enforceAacTruePeak(
     const measurements: string[] = [];
     let limiterCeilingDb = AAC_DELIVERY_TRUE_PEAK_DBFS;
     let measuredPath = input.audioPath;
+    let initialTruePeakDbfs = Number.NaN;
     for (let pass = 0; pass <= MAX_TRUE_PEAK_CORRECTION_PASSES; pass += 1) {
       const truePeakDbfs = await input.probeTruePeak(measuredPath, input.signal);
       measurements.push(
@@ -453,9 +462,17 @@ async function enforceAacTruePeak(
       if (Number.isNaN(truePeakDbfs) || truePeakDbfs === Number.POSITIVE_INFINITY) {
         return { success: false, error: "audioPadTrim: FFmpeg reported an invalid true peak" };
       }
+      if (pass === 0) initialTruePeakDbfs = truePeakDbfs;
       if (truePeakDbfs <= AAC_DELIVERY_TRUE_PEAK_DBFS) {
-        if (measuredPath === correctedPath) renameSync(correctedPath, input.audioPath);
-        return { success: true };
+        if (measuredPath !== correctedPath) return { success: true };
+        renameSync(correctedPath, input.audioPath);
+        // Tabario fork: the limiter only touches peaks and never turns the mix
+        // down, so upstream's whole-mix attenuation has no equivalent here. What
+        // was lowered is the true peak, from its first measurement to its last.
+        return {
+          success: true,
+          loweredDb: Number((initialTruePeakDbfs - truePeakDbfs).toFixed(2)),
+        };
       }
       if (pass === MAX_TRUE_PEAK_CORRECTION_PASSES) break;
 
@@ -656,7 +673,10 @@ async function runFfprobeJson<T>(args: string[], signal?: AbortSignal): Promise<
   if (!args.includes("--")) {
     throw new Error('[audioPadTrim] ffprobe args must terminate options with "--".');
   }
-  const proc = spawn(getFfprobeBinary(), args, { stdio: ["ignore", "pipe", "pipe"] });
+  const proc = spawn(getFfprobeBinary(), args, {
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
   trackChildProcess(proc);
   let stdout = "";
   proc.stdout.on("data", (data: Buffer) => {

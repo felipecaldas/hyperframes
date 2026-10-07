@@ -9,6 +9,7 @@ import type { RuntimeColorGradingApi } from "./colorGrading";
 import type { HyperframePickerApi } from "../inline-scripts/pickerApi";
 import type { PlayerAPI } from "../core.types";
 import type { ClipTree } from "./clipTree";
+import type { SvgSelectorAliases } from "../compiler/svgSelectorAliases";
 
 type ThreeClockLike = {
   elapsedTime: number;
@@ -34,9 +35,12 @@ type ThreeLike = {
 
 declare global {
   interface Window {
+    __hfHasFrameSources?: () => boolean;
     __timelines: Record<string, RuntimeTimelineLike>;
     __player?: PlayerAPI;
     __hyperframes?: {
+      registerFrameSource: typeof import("./frameSources").registerFrameSource;
+      createFilmBridge: typeof import("./filmBridge").createFilmBridge;
       /** A path the calling composition wrote relative to its own file, as a URL the page can load. */
       assetUrl?: (path: string) => string;
       registerRuntimeDataHandler?: (
@@ -49,6 +53,7 @@ declare global {
     };
     __clipManifest?: RuntimeTimelineMessage;
     __clipTree?: ClipTree;
+    __hfSvgSelectorAliases?: SvgSelectorAliases;
     __hf?: {
       colorGrading?: RuntimeColorGradingApi;
       onSwallowed?: (label: string, err: unknown) => void;
@@ -68,6 +73,8 @@ declare global {
        *  runtime's paused-side enforcement leaves it alone. Always release. */
       leasePausedMedia?: (el: HTMLMediaElement) => void;
       releasePausedMedia?: (el: HTMLMediaElement) => void;
+      /** Where Studio's loop wraps to while it plays, or null: the clips due there stay loaded. */
+      setLoopStart?: (seconds: number | null) => void;
       /** Read-only level taps for the Studio meters: nothing exists until
        *  `start()`, and `stop()` removes every tap. Peaks are linear per channel. */
       audioMeter?: {
@@ -136,6 +143,7 @@ declare global {
     gsap?: {
       timeline: (params?: { paused?: boolean }) => RuntimeTimelineLike;
       set?: (target: Element, vars: Record<string, unknown>) => unknown;
+      config?: (vars: Record<string, unknown>) => unknown;
       parseEase?: (
         ease: string | ((progress: number) => number),
         ...args: unknown[]

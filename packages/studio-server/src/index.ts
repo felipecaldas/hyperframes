@@ -15,7 +15,12 @@ export type {
   AgentProviderCapability,
   AgentThreadSummary,
 } from "./agent/types.js";
-export { createProjectSignature, affectsProjectSignature } from "./helpers/projectSignature.js";
+export { MAX_UPLOAD_BYTES } from "./routes/files.js";
+export {
+  createProjectSignature,
+  affectsProjectSignature,
+  STUDIO_SIGNATURE_MANIFEST_PATHS,
+} from "./helpers/projectSignature.js";
 export { AGENT_IDLE_TIMEOUT_MS, agentStateRoot } from "./agent/runtime.js";
 export { compositionsAffectedBy } from "./helpers/compositionInputs.js";
 export { affectsPreview } from "./helpers/previewReads.js";
@@ -67,7 +72,11 @@ export {
   type FileWriteReceipt,
 } from "./helpers/fileVersion.js";
 export { buildSubCompositionHtml } from "./helpers/subComposition.js";
-export { getElementScreenshotClip, type ScreenshotClip } from "./helpers/screenshotClip.js";
+export {
+  clearElementScreenshotIsolation,
+  getElementScreenshotClip,
+  type ScreenshotClip,
+} from "./helpers/screenshotClip.js";
 export {
   measureInPage,
   classifyLayoutProbe,

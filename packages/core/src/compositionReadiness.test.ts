@@ -8,6 +8,7 @@ import {
   settleFirstFrameCompositionReadiness,
 } from "./compositionReadiness.js";
 import { createRuntimeStartTimeResolver } from "./runtime/startResolver.js";
+import { STUDIO_PREVIEW_MARK_META } from "./studioPreviewMark.js";
 import { isRuntimeElementVisibleAt } from "./runtime/timeline.js";
 
 function docWith(bodyHtml: string): Document {
@@ -179,6 +180,23 @@ describe("mediaReadinessInput", () => {
     await expect(pending).resolves.toBeUndefined();
   });
 
+  it("waits on a later clip in Studio's preview only once the runtime has set it to buffer", () => {
+    const html =
+      '<video id="deferred" data-start="30" data-duration="5" preload="none" src="a.mp4"></video>' +
+      '<video id="untrimmed" data-start="30" preload="metadata" src="b.mp4"></video>' +
+      '<video id="due" data-start="30" data-duration="5" preload="auto" src="c.mp4"></video>';
+    const preview = docWith(html);
+    preview.head
+      .appendChild(preview.createElement("meta"))
+      .setAttribute("name", STUDIO_PREVIEW_MARK_META);
+    const plain = docWith(html);
+    const ids = (doc: Document) =>
+      scanPendingCompositionAssets(doc, { scope: "all" }).pendingMedia.map((el) => el.id);
+
+    expect(ids(preview)).toEqual(["due"]);
+    expect(ids(plain)).toEqual(["deferred", "untrimmed", "due"]);
+  });
+
   it("waits on a later scene's image in the full scan unless it is lazy", () => {
     const doc = docWith(
       '<div data-start="30" data-duration="5"><img id="later" src="later.png">' +
@@ -291,7 +309,7 @@ describe("paintAndIdleReadinessInput", () => {
     await flushMicrotasks();
     expect(isResolved()).toBe(false);
 
-    // First quiet gap (10ms < 50ms threshold) — one is not enough.
+    // First quiet gap (10ms < 50ms threshold): one is not enough.
     fireFrame(26);
     await flushMicrotasks();
     expect(isResolved()).toBe(false);
@@ -340,29 +358,80 @@ describe("paintAndIdleReadinessInput", () => {
     expect(pendingFrameCount()).toBe(0); // the in-flight rAF was cancelled, not left pending
   });
 
-  it("gives up and resolves after MAX_PAINT_WAIT_MS of steady sub-20fps painting, never reaching a quiet gap", async () => {
-    // A composition rendering a real, steady 15fps (~66ms/frame) never
-    // produces a sub-50ms gap — this is the exact shape that used to hang
-    // paintAndIdleReadinessInput until settleCompositionReadiness's 8s
-    // shared timeout won the race on every single Play.
+  it("settles a steady slow document after two of its own quiet gaps", async () => {
     const { fireFrame, isResolved } = startPaintAndIdleTracking();
-    const FRAME_GAP_MS = 66;
-
-    let ts = 0;
-    fireFrame(ts); // first paint scheduled
-    await flushMicrotasks();
-    ts += FRAME_GAP_MS;
-    fireFrame(ts); // first paint presented, lastTs = 66
-    await flushMicrotasks();
-
-    while (ts < 1_500) {
+    for (const ts of [0, 66, 132]) {
+      fireFrame(ts);
+      await flushMicrotasks();
       expect(isResolved()).toBe(false);
-      ts += FRAME_GAP_MS;
+    }
+    fireFrame(198);
+    await flushMicrotasks();
+    expect(isResolved()).toBe(true);
+  });
+
+  it("accepts ordinary jitter up to one and a half of the shortest gap", async () => {
+    const { fireFrame, isResolved } = startPaintAndIdleTracking();
+    for (const ts of [0, 50, 125]) {
+      fireFrame(ts);
+      await flushMicrotasks();
+      expect(isResolved()).toBe(false);
+    }
+    fireFrame(200);
+    await flushMicrotasks();
+    expect(isResolved()).toBe(true);
+  });
+
+  it.each([
+    { label: "variable-refresh", frames: [0, 8, 24, 40] },
+    { label: "alternating", frames: [0, 16, 49, 65] },
+  ])("preserves fast $label gaps", async ({ frames }) => {
+    const { fireFrame, isResolved } = startPaintAndIdleTracking();
+    for (const ts of frames) {
+      expect(isResolved()).toBe(false);
       fireFrame(ts);
       await flushMicrotasks();
     }
-    // The frame that crosses MAX_PAINT_WAIT_MS resolves on its own — no
-    // quiet gap was ever produced, only elapsed steady-paint time.
+    expect(isResolved()).toBe(true);
+  });
+
+  it("preserves fast-page settlement after zero timestamps", async () => {
+    const { fireFrame, isResolved } = startPaintAndIdleTracking();
+    for (const ts of [0, 0, 16]) {
+      fireFrame(ts);
+      await flushMicrotasks();
+      expect(isResolved()).toBe(false);
+    }
+    fireFrame(32);
+    await flushMicrotasks();
+    expect(isResolved()).toBe(true);
+  });
+
+  it("does not raise the shortest-gap baseline during later stalls", async () => {
+    const { fireFrame, isResolved } = startPaintAndIdleTracking();
+    for (const ts of [0, 100, 140, 230, 320, 410]) {
+      fireFrame(ts);
+      await flushMicrotasks();
+      expect(isResolved()).toBe(false);
+    }
+  });
+
+  it("keeps the paint cap when stalls prevent two consecutive quiet gaps", async () => {
+    const { fireFrame, isResolved } = startPaintAndIdleTracking();
+    let ts = 0;
+    fireFrame(ts);
+    await flushMicrotasks();
+    ts = 66;
+    fireFrame(ts);
+    await flushMicrotasks();
+    let slow = true;
+    while (ts < 1_500) {
+      expect(isResolved()).toBe(false);
+      ts += slow ? 200 : 66;
+      slow = !slow;
+      fireFrame(ts);
+      await flushMicrotasks();
+    }
     expect(isResolved()).toBe(true);
   });
 });

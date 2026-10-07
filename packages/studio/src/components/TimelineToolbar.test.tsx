@@ -2,14 +2,16 @@
 
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GsapAnimation } from "@hyperframes/core/gsap-parser";
 import { usePlayerStore } from "../player/store/playerStore";
 import { makeSelection } from "../hooks/domSelectionTestHarness";
 import { useAudioMetersVisible } from "../utils/audioMeterVisibility";
 import { readStudioUiPreferences } from "../utils/studioUiPreferences";
+import { dispatchPlainKey, type HotkeyCallbacks } from "../hooks/appHotkeysDispatch";
 import { AudioMeterStrip } from "./nle/AudioMeterStrip";
 import { TimelineToolbar } from "./TimelineToolbar";
+import { registerTimelineZoomViewport } from "../player/components/timelineZoomInput";
 
 vi.mock("../contexts/StudioContext", () => ({
   useStudioShellContextOptional: () => ({
@@ -210,7 +212,109 @@ describe("TimelineToolbar — keyframes on audio tracks", () => {
   });
 });
 
+describe("TimelineToolbar snap key", () => {
+  let root: ReturnType<typeof createRoot> | null = null;
+  const snapBefore = usePlayerStore.getState().timelineSnapEnabled;
+  afterEach(() => {
+    act(() => root?.unmount());
+    root = null;
+    usePlayerStore.getState().setTimelineSnapEnabled(snapBefore);
+  });
+
+  it("N toggles snapping, but not while a picker that owns typing has focus", () => {
+    root = renderToolbar().root;
+    const pressN = (target: EventTarget) =>
+      act(() => {
+        target.dispatchEvent(new KeyboardEvent("keydown", { key: "n", bubbles: true }));
+      });
+    const before = usePlayerStore.getState().timelineSnapEnabled;
+    const picker = document.createElement("button");
+    picker.setAttribute("role", "combobox");
+    document.body.append(picker);
+
+    pressN(picker);
+    expect(usePlayerStore.getState().timelineSnapEnabled).toBe(before);
+    pressN(document.body);
+    expect(usePlayerStore.getState().timelineSnapEnabled).toBe(!before);
+  });
+});
+
 describe("TimelineToolbar Fit", () => {
+  // A zoom lands on the next frame; these tests step frames instead of waiting for them.
+  beforeEach(() => {
+    vi.useFakeTimers({
+      toFake: [
+        "requestAnimationFrame",
+        "cancelAnimationFrame",
+        "setTimeout",
+        "clearTimeout",
+        "performance",
+      ],
+    });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A mounted timeline for the zoom to preview on: 1080px wide, 32px of headers. */
+  function mountTimelineViewport() {
+    const scroll = document.createElement("div");
+    Object.defineProperties(scroll, {
+      clientWidth: { value: 1080 },
+      // At Fit the content is as wide as the view.
+      scrollWidth: { value: 1080 },
+      scrollLeft: { value: 0, writable: true },
+    });
+    usePlayerStore.setState({
+      zoomMode: "fit",
+      manualZoomPercent: 100,
+      timelineFitPps: 10,
+      timelinePps: 10,
+    });
+    return registerTimelineZoomViewport({ scroll, contentOrigin: 32 });
+  }
+
+  it("moves the slider and its readout with a zoom while it is previewed", () => {
+    const unregister = mountTimelineViewport();
+    const { host, root } = renderToolbar();
+    const slider = host.querySelector<HTMLInputElement>('input[aria-label="Timeline zoom"]')!;
+    const before = slider.value;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+        slider,
+        String(Number(before) + 5),
+      );
+      slider.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => vi.advanceTimersToNextFrame());
+    // Not laid out yet: the store still holds Fit, but the toolbar shows the zoom on screen.
+    expect(usePlayerStore.getState().zoomMode).toBe("fit");
+    expect(slider.value).not.toBe(before);
+    expect(host.querySelector('[aria-label="Timeline zoom level"]')?.textContent).not.toBe("Fit");
+    act(() => root.unmount());
+    act(() => unregister());
+  });
+
+  it("keeps Fit when it is picked while a zoom waits to be laid out", () => {
+    const unregister = mountTimelineViewport();
+    const { host, root } = renderToolbar();
+    act(() =>
+      host
+        .querySelector('button[aria-label="Zoom in"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+    );
+
+    act(() =>
+      host
+        .querySelector('button[aria-label="Fit timeline to width"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+    );
+    act(() => vi.advanceTimersByTime(1000));
+    expect(usePlayerStore.getState().zoomMode).toBe("fit");
+    act(() => root.unmount());
+    act(() => unregister());
+  });
+
   it("shows Fit as a named icon and says whether fit is on", () => {
     const { host, root } = renderToolbar();
     const fit = () => host.querySelector('button[aria-label="Fit timeline to width"]');
@@ -223,7 +327,21 @@ describe("TimelineToolbar Fit", () => {
         .querySelector('button[aria-label="Zoom in"]')
         ?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
     );
+    act(() => vi.advanceTimersToNextFrame());
     expect(fit()?.getAttribute("aria-pressed")).toBe("false");
+    act(() => root.unmount());
+  });
+
+  it("counts a zoom-in click as a person's zoom, so the timeline anchors it on the playhead", () => {
+    const { host, root } = renderToolbar();
+    const before = usePlayerStore.getState().userZoomCount;
+    act(() =>
+      host
+        .querySelector('button[aria-label="Zoom in"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+    );
+    act(() => vi.advanceTimersToNextFrame());
+    expect(usePlayerStore.getState().userZoomCount).toBe(before + 1);
     act(() => root.unmount());
   });
 });
@@ -266,10 +384,158 @@ describe("TimelineToolbar audio meters", () => {
   });
 });
 
+describe("TimelineToolbar history", () => {
+  const historyButtons = (host: HTMLElement) =>
+    host.querySelectorAll('button[aria-label="Undo"], button[aria-label="Redo"]').length;
+
+  it("shows Undo and Redo by default", () => {
+    const { host, root } = renderToolbar();
+    expect(historyButtons(host)).toBe(2);
+    act(() => root.unmount());
+  });
+
+  it("renders neither when the host hides history", () => {
+    const { host, root } = renderToolbar(undefined, { showHistory: false });
+    expect(historyButtons(host)).toBe(0);
+    act(() => root.unmount());
+  });
+});
+
+describe("TimelineToolbar tool menu", () => {
+  async function openMenuRows(props: Partial<React.ComponentProps<typeof TimelineToolbar>>) {
+    const { host, root } = renderToolbar(undefined, props);
+    const trigger = host.querySelector<HTMLButtonElement>('button[aria-label^="Timeline tool:"]')!;
+    await act(async () => {
+      trigger.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const rows = [...document.querySelectorAll('[role="menuitem"] > span:first-child')].map(
+      (label) => label.textContent,
+    );
+    act(() => root.unmount());
+    return rows;
+  }
+
+  it("lists Select, Split, Select leftward and Select rightward by default", async () => {
+    expect(await openMenuRows({})).toEqual([
+      "Select",
+      "Split",
+      "Select leftward",
+      "Select rightward",
+    ]);
+  });
+
+  it("lists only Select and Split when the host hides select around the playhead", async () => {
+    expect(await openMenuRows({ showSelectAroundPlayhead: false })).toEqual(["Select", "Split"]);
+  });
+
+  it.each([true, false])("[ and ] select around the playhead with the rows shown: %s", (shown) => {
+    usePlayerStore.setState({
+      currentTime: 4,
+      elements: [0, 4, 7].map((start, track) => ({
+        id: `c${start}`,
+        key: `c${start}`,
+        tag: "div",
+        start,
+        duration: 2,
+        track,
+      })),
+    });
+    const { root } = renderToolbar(undefined, { showSelectAroundPlayhead: shown });
+    const press = (key: string) =>
+      act(() =>
+        dispatchPlainKey(new KeyboardEvent("keydown", { key }), key, {} as HotkeyCallbacks),
+      );
+    try {
+      press("[");
+      expect([...usePlayerStore.getState().selectedElementIds]).toEqual(["c0"]);
+      press("]");
+      expect([...usePlayerStore.getState().selectedElementIds].sort()).toEqual(["c4", "c7"]);
+    } finally {
+      act(() => root.unmount());
+      usePlayerStore.setState({
+        elements: [],
+        selectedElementId: null,
+        selectedElementIds: new Set(),
+      });
+    }
+  });
+});
+
 describe("TimelineToolbar add beat", () => {
   it("shows Add beat by default, as Studio does", () => {
     const { host, root } = renderToolbar();
     expect(host.querySelector('button[aria-label="Add beat at playhead"]')).not.toBeNull();
     act(() => root.unmount());
+  });
+});
+
+describe("TimelineToolbar Linked Selection", () => {
+  it("is on by default, first among the editing toggles, and persists a click", async () => {
+    const { useLinkedClipPreferences } = await import("../utils/linkedClipPreferences");
+    const { host } = renderToolbar();
+    const button = host.querySelector<HTMLButtonElement>('button[aria-label="Linked Selection"]');
+    expect(button?.getAttribute("aria-pressed")).toBe("true");
+    const snapping = host.querySelector('button[aria-label="Toggle timeline snapping"]');
+    expect(snapping && button?.compareDocumentPosition(snapping)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    act(() => button?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(button?.getAttribute("aria-pressed")).toBe("false");
+    expect(readStudioUiPreferences().linkedSelectionEnabled).toBe(false);
+    act(() => useLinkedClipPreferences.getState().setLinkedSelection(true));
+  });
+
+  it("right-click toggles the out-of-sync indicator preference", async () => {
+    const { useLinkedClipPreferences } = await import("../utils/linkedClipPreferences");
+    const { host } = renderToolbar();
+    const button = host.querySelector('button[aria-label="Linked Selection"]');
+    act(() => button?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })));
+    const item = document.querySelector<HTMLButtonElement>('[role="menuitemcheckbox"]');
+    expect(item?.textContent).toContain("Show out-of-sync indicators");
+    expect(item?.getAttribute("aria-checked")).toBe("true");
+    act(() => item?.click());
+    expect(useLinkedClipPreferences.getState().syncIndicatorsVisible).toBe(false);
+    expect(readStudioUiPreferences().syncIndicatorsVisible).toBe(false);
+    act(() => useLinkedClipPreferences.getState().setSyncIndicatorsVisible(true));
+  });
+});
+
+describe("TimelineToolbar — host right actions", () => {
+  it("draws the host's controls immediately before the thumbnails toggle", () => {
+    const { host, root } = renderToolbar(undefined, {
+      rightActions: <button type="button">Script</button>,
+    });
+    const buttons = [...host.querySelectorAll("button")];
+    const script = buttons.findIndex((b) => b.textContent === "Script");
+    const thumbs = buttons.findIndex((b) => b.getAttribute("aria-label")?.includes("thumbnails"));
+    expect(script).toBeGreaterThan(-1);
+    expect(thumbs).toBe(script + 1);
+    act(() => root.unmount());
+  });
+});
+
+describe("TimelineToolbar split hint", () => {
+  async function splitTooltip(props: Partial<React.ComponentProps<typeof TimelineToolbar>>) {
+    usePlayerStore.setState({
+      elements: [{ id: "a", domId: "a", tag: "div", start: 0, duration: 4, track: 0 }],
+      selectedElementId: "a",
+      currentTime: 2,
+    });
+    const { host, root } = renderToolbar(undefined, { onSplitElement: vi.fn(), ...props });
+    const button = host.querySelector<HTMLButtonElement>('button[aria-label="Split at playhead"]');
+    act(() => button?.focus());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const label = document.querySelector('[role="tooltip"]')?.textContent;
+    act(() => root.unmount());
+    usePlayerStore.setState({ elements: [], selectedElementId: null, currentTime: 0 });
+    return label;
+  }
+
+  it("names S unless the host binds Split to another key", async () => {
+    expect(await splitTooltip({})).toBe("Split at playhead (S)");
+    expect(await splitTooltip({ splitShortcut: "⌘B" })).toBe("Split at playhead (⌘B)");
   });
 });

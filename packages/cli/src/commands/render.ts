@@ -62,6 +62,7 @@ import { resolve, dirname, join, basename } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { loadProducer } from "../utils/producer.js";
 import { c } from "../ui/colors.js";
+import { desktopHint } from "../utils/desktopApp.js";
 import {
   formatBytes,
   formatRenderSummaryDetail,
@@ -71,7 +72,7 @@ import {
   errorBox,
 } from "../ui/format.js";
 import { warnIfWebmAlphaDropped } from "../utils/webmAlphaCheck.js";
-import { renderProgress } from "../ui/progress.js";
+import { renderProgress, renderMachineProgress } from "../ui/progress.js";
 import {
   trackRenderComplete,
   trackRenderError,
@@ -524,6 +525,8 @@ export interface RenderOptions {
   throwOnError?: boolean;
   /** Skip the interactive feedback prompt after a successful render. */
   skipFeedback?: boolean;
+  /** False for a batch row: one line about the desktop app per batch is noise, not a pointer. */
+  desktopHint?: boolean;
   /**
    * OPT IN to managing the DE parallel-router circuit breaker
    * (`applyDeParallelRouterCircuitBreaker`) for this render. Default OFF —
@@ -798,6 +801,7 @@ async function renderDocker(
     outputDir: resolve(outputDir),
     outputFilename,
     platform,
+    hostStdoutIsTty: process.stdout.isTTY === true,
     options: {
       fps: options.fps,
       quality: options.quality,
@@ -886,6 +890,8 @@ async function renderDocker(
   runPostRenderStep("printRenderComplete", () =>
     printRenderComplete({
       outputPath,
+      projectDir,
+      desktopHint: wantsDesktopHint(options),
       elapsedMs: elapsed,
       quiet: options.quiet,
       format: options.format,
@@ -1090,8 +1096,9 @@ async function executeLocalRender(
 
   const onProgress = options.quiet
     ? undefined
-    : (progressJob: { progress: number }, message: string) => {
+    : (progressJob: Pick<RenderJob, "progress" | "stageProgress">, message: string) => {
         renderProgress(progressJob.progress, message);
+        renderMachineProgress(progressJob.progress, progressJob.stageProgress);
       };
 
   try {
@@ -1138,6 +1145,8 @@ async function executeLocalRender(
   runPostRenderStep("printRenderComplete", () =>
     printRenderComplete({
       outputPath,
+      projectDir,
+      desktopHint: wantsDesktopHint(options),
       elapsedMs: elapsed,
       quiet: options.quiet,
       format: options.format,
@@ -1647,15 +1656,19 @@ const KNOWN_STAGE_CODES: Readonly<Record<string, string>> = {
   "Render complete": "render_complete",
   "Render cancelled": "render_cancelled",
   pipeline: "pipeline",
+  "Starting browsers": "starting_browsers",
+  // Was "Encoding video" before encode reported frames; keeps the same bucket.
+  "Encoding frame": "encoding_video",
 };
 
+// Live counts in a progress label ("Capturing frame 120/600 (6 workers)") would make a code per render.
+const STAGE_COUNTS = /\([^)]*\)|\d+\/\d+/g;
+
 export function normalizeStageCode(stage: string): string {
-  const known = KNOWN_STAGE_CODES[stage];
+  const base = stage.replace(STAGE_COUNTS, "").trim();
+  const known = KNOWN_STAGE_CODES[base];
   if (known) return known;
-  // The producer's "Starting browsers (k/n ready)" carries live counts; keep one code for it.
-  if (stage.startsWith("Starting browsers")) return "starting_browsers";
-  const slug = stage
-    .trim()
+  const slug = base
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
@@ -1898,8 +1911,16 @@ function readOutputFootprint(outputPath: string): { fileSize: string; isDirector
   }
 }
 
+/** A render points to the desktop app; a batch row does not. Drafts do too: music-to-video delivers one. */
+export function wantsDesktopHint(options: Pick<RenderOptions, "desktopHint">): boolean {
+  return options.desktopHint !== false;
+}
+
 function printRenderComplete(input: {
   outputPath: string;
+  projectDir: string;
+  /** Print the desktop-app line: a delivered render, never a draft or a batch row. */
+  desktopHint: boolean;
   elapsedMs: number;
   quiet: boolean;
   format: RenderFormat;
@@ -1920,6 +1941,8 @@ function printRenderComplete(input: {
   console.log(c.success("\u25C7") + "  " + c.accent(outputPath));
   console.log("   " + c.bold(fileSize) + c.dim(" \u00B7 " + detail));
   if (perf) printRenderPipeline(perf, input.requestedGpuMode);
+  const hint = input.desktopHint ? desktopHint(input.projectDir) : null;
+  if (hint) console.log("   " + c.dim(hint));
 }
 
 function printRenderPipeline(

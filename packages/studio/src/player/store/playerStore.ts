@@ -21,6 +21,7 @@ import { createThumbnailSlice, type ThumbnailSlice } from "./thumbnailSlice";
 import { createPlaybackReadinessSlice } from "./readinessSlice";
 import { createRangeSelectionSlice, type RangeSelectionSlice } from "./rangeSelectionSlice";
 import { createTimelineResetState } from "./timelineResetState";
+import { patchElements, queueElementPatch } from "./elementPatchQueue";
 export type { KeyframeCacheEntry } from "./keyframeSlice";
 export { liveTime } from "./liveTime";
 import { liveTime } from "./liveTime";
@@ -83,6 +84,7 @@ interface PlayerState extends PlayerStoreSlices {
   zoomMode: ZoomMode;
   /** Timeline zoom percent relative to the fit width when in manual mode */
   manualZoomPercent: number;
+  userZoomCount: number;
   /**
    * Bumped on every live z-index edit (handleDomZIndexReorderCommit apply AND
    * rollback). Flashless z commits (skipReload) never reload the iframe or
@@ -256,10 +258,10 @@ interface BeatHistoryEntry {
 /** Selects like the marquee: the primary first, so its resets run, then the whole set. */
 function selectAroundPlayhead(
   state: PlayerState,
-  keep: (start: number, playhead: number) => boolean,
+  keep: (el: TimelineElement, playhead: number) => boolean,
 ): void {
   const playhead = state.isPlaying ? liveTime.latest() : state.currentTime;
-  const ids = state.elements.filter((el) => keep(el.start, playhead)).map((el) => el.key ?? el.id);
+  const ids = state.elements.filter((el) => keep(el, playhead)).map((el) => el.key ?? el.id);
   state.setSelectedElementId(ids[0] ?? null);
   state.setSelectedElementIds(new Set(ids));
 }
@@ -279,6 +281,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   loopEnabled: false,
   zoomMode: "fit",
   manualZoomPercent: 100,
+  userZoomCount: 0,
   zEditVersion: 0,
   timelinePps: 100,
   timelineFitPps: 100,
@@ -287,8 +290,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
 
   activeTool: "select",
   setActiveTool: (tool) => set({ activeTool: tool }),
-  selectLeftward: () => selectAroundPlayhead(get(), (start, playhead) => start < playhead),
-  selectRightward: () => selectAroundPlayhead(get(), (start, playhead) => start >= playhead),
+  selectLeftward: () => selectAroundPlayhead(get(), (el, t) => el.start < t),
+  selectRightward: () => selectAroundPlayhead(get(), (el, t) => el.start + el.duration > t),
 
   ...createKeyframeSlice(set, () => ({
     timelineProjectId: get().timelineProjectId,
@@ -545,12 +548,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
         focusedEaseSegment: id === s.selectedElementId ? s.focusedEaseSegment : null,
       };
     }),
-  updateElement: (elementId, updates) =>
-    set((state) => ({
-      elements: state.elements.map((el) =>
-        (el.key ?? el.id) === elementId ? { ...el, ...updates } : el,
-      ),
-    })),
+  updateElement: (elementId, updates) => {
+    if (queueElementPatch(elementId, updates)) return;
+    set((state) => ({ elements: patchElements(state.elements, new Map([[elementId, updates]])) }));
+  },
   // UI preferences intentionally survive reset. So do timelineSessionEpoch and
   // focusedEaseRequestNonce: the epoch advances only when project identity
   // changes, while a monotonic nonce prevents collisions with stale consumers.

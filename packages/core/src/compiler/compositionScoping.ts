@@ -1,4 +1,6 @@
+import { getSvgSelectorAliasesScript } from "../generated/svg-selector-aliases-inline";
 import postcss, { type AtRule, type Node, type Rule } from "postcss";
+import { escapeCssIdentifier, replaceSelectorIdTokens } from "./selectorIdTokens";
 import { SCENE_PARTS_META } from "../sceneParts";
 
 const AUTHORED_ROOT_ID_ATTR = "data-hf-authored-id";
@@ -12,20 +14,10 @@ function escapeCssAttributeValue(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
-function escapeCssIdentifier(value: string): string {
-  if (!value) return value;
-  const escaped = value.replace(/[^a-zA-Z0-9_-]/g, (char) => `\\${char}`);
-  return escaped.replace(/^-?\d/, (match) => `\\${match}`);
-}
-
 function getAuthoredRootIdSelectorForms(authoredRootId: string): string[] {
   const trimmed = authoredRootId.trim();
   if (!trimmed) return [];
   return Array.from(new Set([trimmed, escapeCssIdentifier(trimmed)])).filter(Boolean);
-}
-
-function isSelectorNameChar(char: string | undefined): boolean {
-  return !!char && /[\w-]/.test(char);
 }
 
 function replaceAuthoredRootIdSelectors(
@@ -33,59 +25,8 @@ function replaceAuthoredRootIdSelectors(
   authoredRootId: string,
   replacement: string,
 ): string {
-  const forms = getAuthoredRootIdSelectorForms(authoredRootId).sort((a, b) => b.length - a.length);
-  if (forms.length === 0) return selector;
-
-  let result = "";
-  let bracketDepth = 0;
-  let quote: '"' | "'" | null = null;
-
-  for (let index = 0; index < selector.length; index += 1) {
-    const char = selector[index];
-    const previousChar = index > 0 ? selector[index - 1] : "";
-
-    if (quote) {
-      result += char;
-      if (char === quote && previousChar !== "\\") {
-        quote = null;
-      }
-      continue;
-    }
-
-    if (char === '"' || char === "'") {
-      quote = char;
-      result += char;
-      continue;
-    }
-
-    if (char === "[") {
-      bracketDepth += 1;
-      result += char;
-      continue;
-    }
-
-    if (char === "]") {
-      bracketDepth = Math.max(0, bracketDepth - 1);
-      result += char;
-      continue;
-    }
-
-    if (char === "#" && bracketDepth === 0) {
-      const matchedForm = forms.find((form) => selector.startsWith(form, index + 1));
-      if (matchedForm) {
-        const nextChar = selector[index + 1 + matchedForm.length];
-        if (!isSelectorNameChar(nextChar)) {
-          result += replacement;
-          index += matchedForm.length;
-          continue;
-        }
-      }
-    }
-
-    result += char;
-  }
-
-  return result;
+  const forms = getAuthoredRootIdSelectorForms(authoredRootId);
+  return replaceSelectorIdTokens(selector, forms, () => replacement);
 }
 
 function normalizeAuthoredRootIdSelector(selector: string, authoredRootId?: string | null): string {
@@ -347,6 +288,7 @@ export function scopedModulePrelude(
   return `const __hyperframes = (function(__hfBaseHyperframes, __hfTimelineCompId, __hfCompositionSrc) {
   return ${SCOPED_HYPERFRAMES_EXPRESSION};
 })(window.__hyperframes, ${jsonScriptLiteral(timelineCompositionId)}, ${jsonScriptLiteral(compositionSrc?.trim() || null)});
+${wrapScopedCompositionScript("", timelineCompositionId)}
 `;
 }
 
@@ -371,10 +313,9 @@ export function wrapScopedCompositionScript(
   const timingSelectorPatternLiteral = jsonScriptLiteral(
     String.raw`\s*\[\s*data-(?:start|duration)\s*=\s*(?:"[^"]*"|'[^']*')\s*\]`,
   );
-  const authoredRootIdFormsLiteral = jsonScriptLiteral(
-    getAuthoredRootIdSelectorForms(authoredRootId?.trim() || ""),
-  );
+  const aliasInstallerOutsideAuthoredStrictness = `(function(){ ${getSvgSelectorAliasesScript()} })();`;
   return `(function(){
+  ${aliasInstallerOutsideAuthoredStrictness}
   var __hfCompId = ${compositionIdLiteral};
   var __hfTimelineCompId = ${timelineCompositionIdLiteral};
   var __hfErrorLabel = ${errorLabelLiteral};
@@ -390,76 +331,18 @@ export function wrapScopedCompositionScript(
   var __hfRoot = null;
   var __hfRootSelectorPattern = ${rootSelectorPatternLiteral};
   var __hfTimingSelectorPattern = ${timingSelectorPatternLiteral};
-  var __hfAuthoredRootIdForms = ${authoredRootIdFormsLiteral};
   var __hfAuthoredRootSelector = __hfAuthoredRootId
     ? "[" + __hfAuthoredRootAttr + '="' + __hfEscapeAttr(__hfAuthoredRootId) + '"]'
     : "";
-  var __hfIsSelectorNameChar = function(char) {
-    return !!char && /[\\w-]/.test(char);
-  };
-  var __hfReplaceAuthoredRootIdSelectors = function(selector) {
-    if (!__hfAuthoredRootSelector || !__hfAuthoredRootIdForms.length || typeof selector !== "string") {
-      return selector;
-    }
-    var result = "";
-    var bracketDepth = 0;
-    var quote = null;
-    for (var index = 0; index < selector.length; index += 1) {
-      var char = selector[index];
-      var previousChar = index > 0 ? selector[index - 1] : "";
-      if (quote) {
-        result += char;
-        if (char === quote && previousChar !== "\\\\") {
-          quote = null;
-        }
-        continue;
-      }
-      if (char === '"' || char === "'") {
-        quote = char;
-        result += char;
-        continue;
-      }
-      if (char === "[") {
-        bracketDepth += 1;
-        result += char;
-        continue;
-      }
-      if (char === "]") {
-        bracketDepth = Math.max(0, bracketDepth - 1);
-        result += char;
-        continue;
-      }
-      if (char === "#" && bracketDepth === 0) {
-        var matchedForm = null;
-        for (var formIndex = 0; formIndex < __hfAuthoredRootIdForms.length; formIndex += 1) {
-          var form = __hfAuthoredRootIdForms[formIndex];
-          if (selector.slice(index + 1, index + 1 + form.length) === form) {
-            matchedForm = form;
-            break;
-          }
-        }
-        if (matchedForm) {
-          var nextChar = selector[index + 1 + matchedForm.length];
-          if (!__hfIsSelectorNameChar(nextChar)) {
-            result += __hfAuthoredRootSelector;
-            index += matchedForm.length;
-            continue;
-          }
-        }
-      }
-      result += char;
-    }
-    return result;
-  };
+  var __hfAuthoredRootEntries = __hfAuthoredRootSelector
+    ? [{ id: __hfAuthoredRootId, replacement: __hfAuthoredRootSelector }]
+    : [];
   var __hfNormalizeSelector = function(selector) {
     if (!__hfCompId || typeof selector !== "string") return selector;
     var normalized = selector
       .replace(new RegExp(__hfRootSelectorPattern + '(?:' + __hfTimingSelectorPattern + ')+', 'g'), __hfRootSelector)
       .replace(new RegExp('(?:' + __hfTimingSelectorPattern + ')+' + __hfRootSelectorPattern, 'g'), __hfRootSelector);
-    if (__hfAuthoredRootSelector) {
-      normalized = __hfReplaceAuthoredRootIdSelectors(normalized);
-    }
-    return normalized;
+    return window.__hfSvgSelectorAliases.rewrite(normalized, __hfAuthoredRootEntries);
   };
   var __hfFindRoot = function() {
     if (!__hfRoot && __hfRootSelector) {
@@ -609,6 +492,7 @@ export function wrapScopedCompositionScript(
       resolved.push(item);
       return resolved;
     }, []);
+
   };
   var __hfScopeTimeline = function(timeline) {
     if (!timeline || timeline.__hfScopedCompositionRoot === __hfFindRoot()) return timeline;

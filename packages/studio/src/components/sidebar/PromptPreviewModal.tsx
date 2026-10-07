@@ -123,7 +123,7 @@ export function PromptPreviewModal({
           </span>
           <div className="flex gap-2">
             <button
-              className="px-4 py-1.5 rounded-lg text-xs font-medium bg-studio-accent text-neutral-950 transition-colors active:scale-[0.97]"
+              className="px-4 py-1.5 rounded-lg text-xs font-medium bg-accent text-on-accent hover:bg-accent-hover transition-colors active:scale-[0.97]"
               onClick={handleSend}
             >
               Create with Agent
@@ -131,10 +131,10 @@ export function PromptPreviewModal({
             <button
               className={`px-4 py-1.5 rounded-lg text-xs font-medium transition-colors active:scale-[0.97] ${
                 copyState === "copied"
-                  ? "bg-emerald-500 text-white"
+                  ? "bg-accent text-on-accent"
                   : copyState === "failed"
-                    ? "bg-red-500 text-white"
-                    : "bg-studio-accent/90 text-neutral-950 hover:bg-studio-accent"
+                    ? "bg-danger text-on-danger"
+                    : "bg-accent text-on-accent hover:bg-accent-hover"
               }`}
               onClick={handleCopy}
             >

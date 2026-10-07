@@ -1,4 +1,4 @@
-import { memo, useMemo } from "react";
+import { memo, useMemo, useState } from "react";
 import { useThumbnailLease } from "../../hooks/useThumbnailLease";
 import { useThumbnailStripSize } from "../../hooks/useThumbnailStripSize";
 import {
@@ -7,7 +7,13 @@ import {
   type ThumbnailSnapshot,
 } from "../lib/thumbnailScheduler";
 import { decodeVideoThumbnail } from "../lib/thumbnailVideoDecoder";
-import { computeThumbnailStrip, quantizeThumbnailFrameCount } from "./thumbnailUtils";
+import { ThumbnailTiles } from "./ThumbnailTiles";
+import {
+  computeThumbnailStrip,
+  quantizeThumbnailFrameCount,
+  thumbnailFrameForTile,
+} from "./thumbnailUtils";
+import { useValueAtRest } from "./timelineMotion";
 
 interface VideoThumbnailProps {
   videoSrc: string;
@@ -53,6 +59,7 @@ function createVideoThumbnailRequest(
       decodeVideoThumbnail(
         {
           source: videoSrc,
+          contentVersion: createThumbnailKey({ project: projectId, session: sessionEpoch }),
           sourceStart,
           sourceRangeDuration: sourceRangeDuration ?? duration,
           frameCount,
@@ -66,11 +73,29 @@ function createVideoThumbnailRequest(
 function selectThumbnailSnapshot(
   poster: ThumbnailSnapshot,
   rich: ThumbnailSnapshot,
+  shown: ThumbnailSnapshot,
 ): ThumbnailSnapshot {
   if (rich.status === "ready") return rich;
+  if (shown.status === "ready") return shown;
   if (poster.status === "ready") return poster;
   if (rich.status === "loading" || poster.status === "loading") return { status: "loading" };
   return poster;
+}
+
+type VideoThumbnailRequest = ReturnType<typeof createVideoThumbnailRequest>;
+
+function useVideoThumbnailSnapshot(
+  poster: VideoThumbnailRequest | null,
+  rich: VideoThumbnailRequest | null,
+  media: string,
+): ThumbnailSnapshot {
+  const posterSnapshot = useThumbnailLease(poster);
+  const richSnapshot = useThumbnailLease(rich);
+  const [shown, setShown] = useState({ media, request: rich });
+  const settled = richSnapshot.status === "ready" || rich === null;
+  if (settled && shown.request !== rich) setShown({ media, request: rich });
+  const shownSnapshot = useThumbnailLease(shown.media === media ? shown.request : null);
+  return selectThumbnailSnapshot(posterSnapshot, richSnapshot, shownSnapshot);
 }
 
 /** Sparse, bounded video frames supplied by the shared thumbnail scheduler. */
@@ -85,9 +110,11 @@ export const VideoThumbnail = memo(function VideoThumbnail({
   sessionEpoch = 0,
   priority = "visible",
 }: VideoThumbnailProps) {
-  const [container, setContainerRef] = useThumbnailStripSize();
-  const requestFrameCount = quantizeThumbnailFrameCount(
-    computeThumbnailStrip(container.width, 16 / 9, container.height).frameCount,
+  const [container, setContainerRef, watchGap] = useThumbnailStripSize();
+  const requestFrameCount = useValueAtRest(
+    quantizeThumbnailFrameCount(
+      computeThumbnailStrip(container.width, 16 / 9, container.height).frameCount,
+    ),
   );
   const requestProps = useMemo(
     () => ({
@@ -109,10 +136,12 @@ export const VideoThumbnail = memo(function VideoThumbnail({
     () => createVideoThumbnailRequest(requestProps, requestFrameCount, true),
     [requestFrameCount, requestProps],
   );
-  const measured = container.width > 0;
-  const posterSnapshot = useThumbnailLease(measured ? posterRequest : null);
-  const richSnapshot = useThumbnailLease(measured && requestFrameCount > 1 ? richRequest : null);
-  const snapshot = selectThumbnailSnapshot(posterSnapshot, richSnapshot);
+  const measured = useValueAtRest(container.width > 0);
+  const snapshot = useVideoThumbnailSnapshot(
+    measured ? posterRequest : null,
+    measured && requestFrameCount > 1 ? richRequest : null,
+    posterRequest.key,
+  );
   const value = snapshot.status === "ready" ? snapshot.value : null;
   const urls =
     value?.kind === "filmstrip" ? value.urls : value?.kind === "image" ? [value.url] : [];
@@ -122,9 +151,14 @@ export const VideoThumbnail = memo(function VideoThumbnail({
   return (
     <div ref={setContainerRef} className="absolute inset-0 overflow-hidden">
       {urls.length > 0 && (
-        <div className="absolute inset-0 flex">
-          {Array.from({ length: frameCount }, (_, index) => {
-            const src = urls[Math.round((index * (urls.length - 1)) / Math.max(1, frameCount - 1))];
+        <ThumbnailTiles
+          strip={container}
+          frameW={frameW}
+          frameCount={frameCount}
+          watchGap={watchGap}
+        >
+          {(index) => {
+            const src = urls[thumbnailFrameForTile(index, frameCount, urls.length)];
             return (
               <div
                 key={index}
@@ -139,8 +173,8 @@ export const VideoThumbnail = memo(function VideoThumbnail({
                 />
               </div>
             );
-          })}
-        </div>
+          }}
+        </ThumbnailTiles>
       )}
       {snapshot.status === "loading" && urls.length === 0 && (
         <div

@@ -3,12 +3,11 @@ import type { GsapAnimation } from "@hyperframes/core/gsap-parser";
 import type { DomEditSelection } from "../components/editor/domEditingTypes";
 import { dragEditOutcome, preflightGsapRotationIntercept } from "./gsapRuntimeBridge";
 import { preflightGsapResizeIntercept } from "./gsapResizePreflight";
-import { GSAP_EDIT_BLOCK_COPY, type GsapEditOutcome } from "./gsapEditOutcome";
+import { withTweenIndex } from "./gsapRuntimeTweenIndex";
+import { gsapEditBlockMessage, type GsapEditOutcome } from "./gsapEditOutcome";
 import { fetchParsedAnimations, parseCacheKey } from "./keyframeCacheAstLoad";
-import {
-  gsapSourceFileForSelection,
-  selectElementAnimationsOrRetry,
-} from "./useGsapAnimationFetchFallback";
+import { getAnimationsForElement } from "./gsapElementMatch";
+import { gsapSourceFileForSelection } from "./useGsapAnimationFetchFallback";
 
 interface CommitPreflight {
   offset: GsapEditOutcome;
@@ -23,13 +22,7 @@ function runCommitPreflights(
   group: boolean,
 ): CommitPreflight {
   const target = { id: selection.id ?? null, selector: selection.selector ?? null };
-  const matched = selectElementAnimationsOrRetry(
-    { animations: fileAnimations },
-    target,
-    selection.element,
-  );
-  // A file the server parsed with no tweens at all is a definitive answer here.
-  const animations = matched.kind === "resolved" ? matched.animations : [];
+  const animations = getAnimationsForElement(fileAnimations, target, selection.element);
   return {
     offset: dragEditOutcome(selection, animations, iframe, [], group),
     size: preflightGsapResizeIntercept(selection, animations, iframe),
@@ -39,6 +32,38 @@ function runCommitPreflights(
 
 // Studio can hand a narrowed copy back as a new selection; narrowing starts from the resolved one.
 const resolvedSelections = new WeakMap<DomEditSelection, DomEditSelection>();
+
+interface CheckInputs {
+  animations: GsapAnimation[];
+  iframe: HTMLIFrameElement | null;
+  group: boolean;
+  version: number;
+}
+
+interface Checked extends CheckInputs {
+  preflight: CommitPreflight;
+  narrowed?: DomEditSelection;
+}
+
+// A member whose selection, parse, preview and cache version are unchanged keeps its answer.
+const checkedSelections = new WeakMap<DomEditSelection, Checked>();
+
+function checkedPreflight(resolved: DomEditSelection, inputs: CheckInputs): Checked {
+  const known = checkedSelections.get(resolved);
+  const same =
+    known?.animations === inputs.animations &&
+    known.iframe === inputs.iframe &&
+    known.group === inputs.group &&
+    known.version === inputs.version;
+  if (same) return known;
+  const { animations, iframe, group } = inputs;
+  const checked = {
+    ...inputs,
+    preflight: runCommitPreflights(resolved, animations, iframe, group),
+  };
+  checkedSelections.set(resolved, checked);
+  return checked;
+}
 
 const resolvedOf = (selection: DomEditSelection) => resolvedSelections.get(selection) ?? selection;
 
@@ -51,8 +76,8 @@ const MANUAL_FLAGS = [
 /** Null when the commit would go through; "" while the check is still running. */
 function refusal(preflight: CommitPreflight | null, check: keyof CommitPreflight): string | null {
   const outcome = preflight?.[check];
-  if (outcome?.status === "persisted") return null;
-  return outcome ? GSAP_EDIT_BLOCK_COPY[outcome.reason] : "";
+  if (!outcome) return "";
+  return outcome.status === "blocked" ? gsapEditBlockMessage(outcome.reason, outcome.detail) : null;
 }
 
 /** Closes each manual flag whose commit Studio would refuse, and says why. */
@@ -131,17 +156,19 @@ export function useCommitPreflightCapabilities({
     void parseTick;
     if (!enabled || !projectId) return { selection, groupSelections };
     const group = groupSelections.length > 1;
+    const iframe = previewIframeRef.current;
     const narrow = (target: DomEditSelection) => {
       const file = gsapSourceFileForSelection(target);
       const animations = parsesRef.current.get(parseCacheKey(projectId, file))?.animations;
-      const preflight = animations
-        ? runCommitPreflights(resolvedOf(target), animations, previewIframeRef.current, group)
-        : null;
-      return narrowCapabilities(target, preflight);
+      if (!animations) return narrowCapabilities(target, null);
+      const inputs = { animations, iframe, group, version };
+      const checked = checkedPreflight(resolvedOf(target), inputs);
+      checked.narrowed ??= narrowCapabilities(target, checked.preflight);
+      return checked.narrowed;
     };
-    return {
+    return withTweenIndex(() => ({
       selection: selection && narrow(selection),
       groupSelections: groupSelections.map(narrow),
-    };
-  }, [enabled, projectId, selection, groupSelections, parseTick, previewIframeRef]);
+    }));
+  }, [enabled, projectId, selection, groupSelections, parseTick, previewIframeRef, version]);
 }

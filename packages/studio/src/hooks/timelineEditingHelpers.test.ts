@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  applyTimelineMoveAttributes,
   applyTimelineStackingReorder,
   buildTimelineMoveTimingPatch,
   buildTimelineResizeTimingPatch,
@@ -232,6 +233,28 @@ describe("extendRootDurationIfNeeded", () => {
   });
 });
 
+describe("buildTimelineMoveTimingPatch", () => {
+  it.each([
+    { root: ' data-duration="20"', length: 'data-composition-id="c" data-duration="8"' },
+    { root: "", length: 'data-composition-id="c">' },
+  ])(
+    "parses the saved file once to move a clip and sync the length (root$root)",
+    ({ root, length }) => {
+      const source = `<div data-composition-id="c"${root}><div id="a" class="clip" data-start="1" data-duration="3"></div></div>`;
+      const parse = vi.spyOn(DOMParser.prototype, "parseFromString");
+      try {
+        const patched = buildTimelineMoveTimingPatch(source, { id: "a" }, 5, 3);
+
+        expect(patched).toContain('data-start="5"');
+        expect(patched).toContain(length);
+        expect(parse).toHaveBeenCalledTimes(1);
+      } finally {
+        parse.mockRestore();
+      }
+    },
+  );
+});
+
 describe("buildTimelineResizeTimingPatch", () => {
   it("moves a source-only in-point by the caller's own start change", () => {
     const source = `<div id="root"><video id="a" class="clip" data-start="5" data-duration="3" data-media-start="0.337"></video></div>`;
@@ -314,6 +337,26 @@ describe("persistTimelineBatchEdit", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("syncs each file's root duration once, landing where per-member sync would", async () => {
+    const source = `<div id="root" data-composition-id="main" data-duration="4"><video id="a" class="clip" data-start="1" data-duration="1"></video><video id="b" class="clip" data-start="2" data-duration="1"></video><video id="c" class="clip" data-start="3" data-duration="1"></video></div>`;
+    const members = ["a", "b", "c"].map((id, i) => ({
+      element: el({ id, tag: "video", domId: id, start: i + 1, duration: 1 }),
+      buildPatches: (original: string, target: Parameters<typeof applyTimelineMoveAttributes>[1]) =>
+        applyTimelineMoveAttributes(original, target, i + 6, 1),
+    }));
+    stubReadFileContent(source);
+    const writes: Array<[string, string]> = [];
+    await persistTimelineBatchEdit(batchInput(members, writes));
+
+    const perMember = members.reduce(
+      (current, { element }, i) =>
+        buildTimelineMoveTimingPatch(current, { id: element.id }, i + 6, 1),
+      source,
+    );
+    expect(writes).toEqual([["index.html", perMember]]);
+    expect(perMember).toContain('data-duration="9"');
   });
 
   it("skips no-op members instead of aborting the batch (track-insert renumber)", async () => {

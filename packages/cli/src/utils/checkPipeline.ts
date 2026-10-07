@@ -215,8 +215,8 @@ interface GridSamples {
   contrastEntries: ContrastAuditEntry[];
   screenshots: CheckScreenshot[];
   contrastMs: number;
-  /** One geometry+opacity fingerprint per layout sample (#U10 frozen-sweep guard). */
-  geometrySignatures: { time: number; signature: string }[];
+  /** One visible-state fingerprint per layout sample (#U10 frozen-sweep guard). */
+  layoutStateSignatures: { time: number; signature: string }[];
   /** Every rotatable element's geometry at each layout sample; grouped by
    * selector after the run to detect rotation_pivot_drift. */
   rotationSamples: RotationSample[];
@@ -406,7 +406,7 @@ async function collectGridSamples(
     contrastEntries: [],
     screenshots: [],
     contrastMs: 0,
-    geometrySignatures: [],
+    layoutStateSignatures: [],
     rotationSamples: [],
     indicatorFrames: [],
   };
@@ -420,7 +420,10 @@ async function collectGridSamples(
       const layoutIssues = await driver.collectLayout(time, options.tolerance, options.layout);
       collected.layoutIssues.push(...layoutIssues);
       issuesAtTime.push(...layoutIssues);
-      collected.geometrySignatures.push({ time, signature: await driver.collectLayoutGeometry() });
+      collected.layoutStateSignatures.push({
+        time,
+        signature: await driver.collectLayoutGeometry(),
+      });
       collected.rotationSamples.push(...(await driver.collectRotationSample(time)));
       collected.indicatorFrames.push(await driver.collectOffPivotRotationSample(time));
     }
@@ -504,7 +507,7 @@ const ZERO_LAYOUT_RECT: LayoutRect = {
 
 /**
  * Frozen-sweep guard (#U10): if every layout-grid sample produced the exact
- * same geometry+opacity fingerprint (see layout-audit.browser.js), the seek
+ * same visible-state fingerprint (see motion-signature.browser.js), the seek
  * never actually advanced the composition's timeline — every other green
  * verdict from this run is meaningless, not just a missed defect. Skips
  * short (<3s) compositions, single-sample runs (nothing to compare), and
@@ -513,32 +516,47 @@ const ZERO_LAYOUT_RECT: LayoutRect = {
  */
 function detectSweepStatic(
   duration: number,
-  geometrySignatures: string[],
+  layoutStateSignatures: string[],
   motionIssues: AnchoredLayoutIssue[],
   hasNoTimelineDeclaration: boolean,
 ): AnchoredLayoutIssue[] {
   if (hasNoTimelineDeclaration) return [];
   if (duration < SWEEP_STATIC_MIN_DURATION_SEC) return [];
-  if (geometrySignatures.length < 2) return [];
+  if (layoutStateSignatures.length < 2) return [];
   if (motionIssues.some((issue) => issue.code === "motion_frozen")) return [];
-  const [first, ...rest] = geometrySignatures;
-  if (!first || rest.some((signature) => signature !== first)) return [];
-  return [
-    {
-      code: "sweep_static",
-      severity: "error",
-      time: 0,
-      selector: "[data-composition-id]",
-      dataAttributes: {},
-      sourceFile: "index.html",
-      bbox: ZERO_BBOX,
-      rect: ZERO_LAYOUT_RECT,
-      message:
-        "Timeline did not advance under seek; every green verdict on this run is unreliable.",
-      fixHint:
-        "Confirm the composition seeks a paused GSAP/CSS timeline under `data-*` timing attributes rather than only autoplaying.",
-    },
-  ];
+  if (allSame(layoutStateSignatures)) return [sweepStaticIssue("error")];
+  if (allSame(layoutStateSignatures.map(seenPart))) return [sweepStaticIssue("warning")];
+  return [];
+}
+
+// motion-signature.browser.js appends audio time after this; a signature without it is all "seen".
+const AUDIO_TIME_SEPARATOR = "\u001f";
+
+function seenPart(signature: string): string {
+  return signature.split(AUDIO_TIME_SEPARATOR)[0] ?? signature;
+}
+
+function allSame(values: string[]): boolean {
+  return values.every((value) => value === values[0]);
+}
+
+function sweepStaticIssue(severity: "error" | "warning"): AnchoredLayoutIssue {
+  return {
+    code: "sweep_static",
+    severity,
+    time: 0,
+    selector: "[data-composition-id]",
+    dataAttributes: {},
+    sourceFile: "index.html",
+    bbox: ZERO_BBOX,
+    rect: ZERO_LAYOUT_RECT,
+    message:
+      severity === "error"
+        ? "Timeline did not advance under seek; every green verdict on this run is unreliable."
+        : "Only the audio advanced under seek; nothing on screen moved.",
+    fixHint:
+      "If the composition is meant to be still, add `data-no-timeline` to the element with `data-composition-id`. Otherwise confirm it seeks a paused GSAP/CSS timeline under `data-*` timing attributes rather than only autoplaying.",
+  };
 }
 
 // rotation_pivot_drift: bbox center should stay fixed while the element spins.
@@ -1095,7 +1113,7 @@ export async function runAuditGrid(
   const userPicked = new Set(grid.userPickedSamples);
   const sweepFindings = detectSweepStatic(
     grid.duration,
-    collected.geometrySignatures
+    collected.layoutStateSignatures
       .filter((sample) => !userPicked.has(sample.time))
       .map((sample) => sample.signature),
     motionIssues,
@@ -1127,6 +1145,7 @@ export async function runAuditGrid(
     contrastPassed: contrast.passed,
     screenshots: collected.screenshots,
     timings: { launchSettleMs: 0, seekLoopMs, contrastMs: collected.contrastMs },
+    skipped: false,
   };
 }
 
@@ -1409,6 +1428,7 @@ function buildReport(
   const report: CheckReport = {
     ok: errorCount === 0 && (!options.strict || warningCount === 0),
     strict: options.strict,
+    browserSkipped: browser.skipped,
     lint,
     runtime,
     layout,
@@ -1534,6 +1554,7 @@ function emptyBrowserResult(): CheckBrowserResult {
     contrastPassed: 0,
     screenshots: [],
     timings: { launchSettleMs: 0, seekLoopMs: 0, contrastMs: 0 },
+    skipped: true,
   };
 }
 

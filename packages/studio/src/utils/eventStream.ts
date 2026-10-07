@@ -33,6 +33,8 @@ export interface EventStreamOptions {
   listeners: Record<string, (event: MessageEvent) => void>;
   /** Called at most once, when the stream is abandoned. Never after `close()`. */
   onGiveUp: (reason: StreamGiveUpReason) => void;
+  /** Called on every successful (re)connection. Never after `close()`. */
+  onOpen?: () => void;
   maxRetries?: number;
   /** Seam for tests; defaults to the global `EventSource`. */
   createSource?: (url: string) => EventSource;
@@ -63,6 +65,11 @@ export function openEventStream(options: EventStreamOptions): EventStreamHandle 
       listener(event);
     });
   }
+
+  source.addEventListener("open", () => {
+    if (done) return;
+    options.onOpen?.();
+  });
 
   source.addEventListener("error", () => {
     if (done) return;

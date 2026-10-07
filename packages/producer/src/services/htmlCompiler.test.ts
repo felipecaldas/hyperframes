@@ -315,6 +315,19 @@ describe("inlineExternalScripts", () => {
     expect(result).toBe(html);
   });
 
+  it("leaves a CDN runtime link for the file server to strip", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = mock(async () => new Response("window.__hyperframeRuntime = {};"));
+    globalThis.fetch = fetchMock as any;
+    try {
+      const html = `<html><head><script src="https://cdn.example.com/hyperframe.runtime.iife.js"></script></head><body></body></html>`;
+      expect(await inlineExternalScripts(html)).toBe(html);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("inlines a CDN script on successful fetch", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = mock(async () => new Response("var gsap = {};", { status: 200 })) as any;
@@ -821,6 +834,27 @@ describe("detectRenderModeHints", () => {
     await expect(
       compileForRender(projectDir, join(projectDir, "index.html"), projectDir),
     ).rejects.toThrow(/compositions\/intro\.html[\s\S]*compositions\/outro\.html/);
+  });
+
+  it("compileForRender aborts naming a data-composition-src that points at a folder", async () => {
+    const projectDir = makeSubCompProject(
+      "hf-folder-subcomp-",
+      [{ id: "intro", src: "compositions/intro" }],
+      {},
+    );
+    try {
+      mkdirSync(join(projectDir, "compositions", "intro"));
+      writeFileSync(
+        join(projectDir, "compositions", "intro", "index.html"),
+        validSubCompHtml("intro", "Intro"),
+      );
+
+      await expect(
+        compileForRender(projectDir, join(projectDir, "index.html"), projectDir),
+      ).rejects.toThrow(/compositions\/intro[\s\S]*a folder, not an HTML file/);
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
   });
 
   it("compileForRender aborts when a data-composition-src reference points at a missing file", async () => {
@@ -1652,7 +1686,7 @@ describe("crossorigin attribute stripping", () => {
 //
 // Tests run on localizeRemoteMediaSources directly (exported for testing) to
 // avoid invoking ffprobe / the full compileForRender pipeline. fetch is patched
-// in-process for success cases; real 404s from example.com cover fallback.
+// in-process for success cases; the unit lane's refused network covers fallback.
 
 describe("localizeRemoteMediaSources", () => {
   it("rewrites remote <video> src to _remote_media path when download succeeds", async () => {

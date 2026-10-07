@@ -102,6 +102,9 @@ export function createProjectSignatureCache({
   };
 }
 
+const isServableProjectId = (id: string) =>
+  isValidProjectId(id) && !(process.platform === "win32" && id.includes(":"));
+
 export function createViteAdapter(
   dataDir: string,
   server: ViteDevServer,
@@ -218,7 +221,7 @@ export function createViteAdapter(
       return readdirSync(dataDir, { withFileTypes: true })
         .filter(
           (d) =>
-            isValidProjectId(d.name) &&
+            isServableProjectId(d.name) &&
             (d.isDirectory() || d.isSymbolicLink()) &&
             (existsSync(join(dataDir, d.name, "index.html")) ||
               existsSync(join(dataDir, d.name, `${d.name}.html`))),
@@ -243,7 +246,7 @@ export function createViteAdapter(
 
     // fallow-ignore-next-line complexity
     resolveProject(id: string) {
-      if (!isValidProjectId(id)) return null;
+      if (!isServableProjectId(id)) return null;
       let projectDir = resolve(dataDir, id);
       if (!isPathWithin(dataDir, projectDir)) return null;
       if (!existsSync(projectDir)) {
@@ -253,7 +256,7 @@ export function createViteAdapter(
         if (existsSync(sessionFile)) {
           try {
             const session = JSON.parse(readFileSync(sessionFile, "utf-8"));
-            if (typeof session.projectId === "string" && isValidProjectId(session.projectId)) {
+            if (typeof session.projectId === "string" && isServableProjectId(session.projectId)) {
               projectDir = resolve(dataDir, session.projectId);
               if (!isPathWithin(dataDir, projectDir)) return null;
               if (existsSync(projectDir)) {
@@ -289,8 +292,8 @@ export function createViteAdapter(
     },
 
     async transformPreviewHtml({ html }) {
-      const producer = await import("../producer/src/services/deterministicFonts.js");
-      return producer.injectDeterministicFontFaces(html);
+      const fonts = await import("../core/src/fonts/deterministicFonts.js");
+      return fonts.injectDeterministicFontFaces(html);
     },
 
     getProjectSignature(projectDir: string): string {
@@ -376,12 +379,17 @@ export function createViteAdapter(
             removeCancelledOutput();
             return;
           }
+          if (job.audioLoweredDb !== undefined) state.audioLoweredDb = job.audioLoweredDb;
           state.status = "complete";
           state.progress = 100;
           const metaPath = opts.outputPath.replace(/\.(mp4|webm|mov)$/, ".meta.json");
           writeFileSync(
             metaPath,
-            JSON.stringify({ status: "complete", durationMs: Date.now() - startTime }),
+            JSON.stringify({
+              status: "complete",
+              durationMs: Date.now() - startTime,
+              ...(job.audioLoweredDb !== undefined ? { audioLoweredDb: job.audioLoweredDb } : {}),
+            }),
           );
         } catch (err) {
           if (abortController.signal.aborted) {

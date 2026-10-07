@@ -1,14 +1,16 @@
 // @vitest-environment happy-dom
 
 import React, { act } from "react";
-import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
+import { cleanupMounted, trackedRoot } from "../ui/mountHost.testHelpers";
 import { InlineTextToolbar, swatchBackground } from "./InlineTextToolbar";
 import type { InlineTextEditSession } from "../../hooks/useInlineTextEdit";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 afterEach(() => {
+  // Unmount before clearing the body: the bar is portaled there, so clearing first orphans React's node.
+  cleanupMounted();
   document.body.innerHTML = "";
 });
 
@@ -34,7 +36,7 @@ function scene(html: string) {
 function render(session: InlineTextEditSession | null, iframe: HTMLIFrameElement | null) {
   const host = document.createElement("div");
   document.body.append(host);
-  const root = createRoot(host);
+  const root = trackedRoot(host);
   act(() => root.render(<InlineTextToolbar session={session} iframe={iframe} />));
   return { host, root, rerender: () => act(() => root.render(<div />)) };
 }
@@ -50,8 +52,21 @@ function selectAll(element: HTMLElement) {
   });
 }
 
+function selectAt(element: HTMLElement, top: number) {
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  range.getBoundingClientRect = () =>
+    ({ left: 20, top, width: 100, height: 10 }) as unknown as DOMRect;
+  const selection = document.getSelection()!;
+  act(() => {
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  });
+}
+
 function toolbarIn(host: HTMLElement): HTMLElement | null {
-  return host.querySelector<HTMLElement>('[data-inline-text-toolbar="true"]');
+  return host.ownerDocument.querySelector<HTMLElement>('[data-inline-text-toolbar="true"]');
 }
 
 function renderSelected(html = "hello world") {
@@ -121,7 +136,7 @@ describe("InlineTextToolbar", () => {
     // these are the handlers that would deselect the element.
     const host = document.createElement("div");
     document.body.append(host);
-    const root = createRoot(host);
+    const root = trackedRoot(host);
     act(() =>
       root.render(
         <div
@@ -153,7 +168,7 @@ describe("InlineTextToolbar", () => {
     const { host } = render(session, iframe);
     selectAll(element);
 
-    const input = host.querySelector<HTMLInputElement>('input[type="color"]')!;
+    const input = host.ownerDocument.querySelector<HTMLInputElement>('input[type="color"]')!;
     expect(input.className).toContain("w-full");
     expect(input.className).toContain("h-full");
     expect(input.className).toContain("min-w-0");
@@ -162,14 +177,14 @@ describe("InlineTextToolbar", () => {
   it("styles the selected characters when a control is used", () => {
     const { element, host } = renderSelected();
 
-    act(() => host.querySelector<HTMLButtonElement>('[aria-label="Bold"]')!.click());
+    act(() => host.ownerDocument.querySelector<HTMLButtonElement>('[aria-label="Bold"]')!.click());
 
     expect(element.innerHTML).toBe('<span style="font-weight: 700">hello world</span>');
   });
 
   it("ignores a click when the selection disappeared before React hid the toolbar", () => {
     const { element, host } = renderSelected();
-    const bold = host.querySelector<HTMLButtonElement>('[aria-label="Bold"]')!;
+    const bold = host.ownerDocument.querySelector<HTMLButtonElement>('[aria-label="Bold"]')!;
 
     expect(() => {
       act(() => {
@@ -186,8 +201,12 @@ describe("InlineTextToolbar", () => {
 
     selectAll(element);
 
-    expect(host.querySelector('[aria-label="Italic"]')?.getAttribute("aria-pressed")).toBe("true");
-    expect(host.querySelector('[aria-label="Bold"]')?.getAttribute("aria-pressed")).toBe("false");
+    expect(
+      host.ownerDocument.querySelector('[aria-label="Italic"]')?.getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(
+      host.ownerDocument.querySelector('[aria-label="Bold"]')?.getAttribute("aria-pressed"),
+    ).toBe("false");
   });
 
   it("turns a style back off when the control is used again", () => {
@@ -195,7 +214,7 @@ describe("InlineTextToolbar", () => {
     const { host } = render(session, iframe);
     selectAll(element);
 
-    act(() => host.querySelector<HTMLButtonElement>('[aria-label="Bold"]')!.click());
+    act(() => host.ownerDocument.querySelector<HTMLButtonElement>('[aria-label="Bold"]')!.click());
 
     expect(element.innerHTML).toBe("words");
   });
@@ -203,16 +222,7 @@ describe("InlineTextToolbar", () => {
   it("places itself over the selection, mapped out of the scaled composition", () => {
     const { element, session, iframe } = scene("hello world");
     const { host } = render(session, iframe);
-    const range = document.createRange();
-    range.selectNodeContents(element);
-    range.getBoundingClientRect = () =>
-      ({ left: 20, top: 40, width: 100, height: 10 }) as unknown as DOMRect;
-    const selection = document.getSelection()!;
-    act(() => {
-      selection.removeAllRanges();
-      selection.addRange(range);
-      document.dispatchEvent(new Event("selectionchange"));
-    });
+    selectAt(element, 40);
 
     const toolbar = toolbarIn(host)!;
     // Frame at 100,50; scale 400/innerWidth; centre of the range, above it.
@@ -224,16 +234,7 @@ describe("InlineTextToolbar", () => {
     const { element, session, iframe } = scene("hello world");
     iframe.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400 }) as DOMRect;
     const { host } = render(session, iframe);
-    const range = document.createRange();
-    range.selectNodeContents(element);
-    range.getBoundingClientRect = () =>
-      ({ left: 20, top: 0, width: 100, height: 10 }) as unknown as DOMRect;
-    const selection = document.getSelection()!;
-    act(() => {
-      selection.removeAllRanges();
-      selection.addRange(range);
-      document.dispatchEvent(new Event("selectionchange"));
-    });
+    selectAt(element, 0);
 
     const toolbar = toolbarIn(host)!;
     const scale = 400 / window.innerWidth;
@@ -272,7 +273,9 @@ describe("InlineTextToolbar", () => {
 
     selectAll(element);
 
-    expect(host.querySelector<HTMLInputElement>('input[type="color"]')?.value).toBe("#ff0000");
+    expect(host.ownerDocument.querySelector<HTMLInputElement>('input[type="color"]')?.value).toBe(
+      "#ff0000",
+    );
   });
 });
 

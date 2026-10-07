@@ -128,7 +128,7 @@ export async function runHybridLayeredFrameLoop(input: HybridLoopInput): Promise
         cfg,
       );
       await initializeSession(s);
-      await initTransparentBackground(s.page);
+      await initTransparentBackground(s.page, { clearCompositionRoot: true });
       workerSessions.push(s);
     }
     const sessions: CaptureSession[] = [domSession, ...workerSessions];
@@ -194,7 +194,8 @@ export async function runHybridLayeredFrameLoop(input: HybridLoopInput): Promise
         `Layered composite frame ${framesWritten}/${job.totalFrames}`,
         Math.round(25 + (framesWritten / totalFrames) * 55),
         onProgress,
-        framesWritten === totalFrames,
+        framesWritten,
+        totalFrames,
       );
     };
     const poolRef = shaderPool;

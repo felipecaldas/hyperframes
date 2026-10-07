@@ -8,7 +8,8 @@
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { realpath } from "@hyperframes/core";
-import { existsSync, readFileSync, rmSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync, unlinkSync } from "node:fs";
+import { replaceFileAtomically } from "@hyperframes/core/atomic-file";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { resolve, join, basename, isAbsolute, relative, sep } from "node:path";
@@ -31,6 +32,7 @@ import {
   resolveCliTelemetryDistinctId,
 } from "./telemetryIdentity.js";
 import { emitStudioRenderComplete, emitStudioRenderError } from "./studioRenderTelemetry.js";
+import { mountDesktopRoutes } from "./desktopRoutes.js";
 import { isDevMode } from "../utils/env.js";
 import { runRenderSetupWorker } from "../utils/cancellableProcess.js";
 import type { ProjectLintResult } from "@hyperframes/lint";
@@ -79,7 +81,10 @@ import {
   receiptSessionId,
   type ReceiptWriter,
 } from "./studioReceipts.js";
-import { getElementScreenshotClip } from "@hyperframes/studio-server/screenshot-clip";
+import {
+  clearElementScreenshotIsolation,
+  getElementScreenshotClip,
+} from "@hyperframes/studio-server/screenshot-clip";
 import type { ScreenshotClip } from "@hyperframes/studio-server/screenshot-clip";
 import type { RenderJob } from "@hyperframes/producer";
 import { isWithinProjectRoot } from "@hyperframes/parsers/asset-resolution";
@@ -910,7 +915,7 @@ function rewriteWrittenToHostViewport(projectDir: string, written: string[]): vo
         return match;
       },
     );
-    writeFileSync(absPath, content, "utf-8");
+    replaceFileAtomically(absPath, content, statSync(absPath).mode);
   }
 }
 
@@ -943,7 +948,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
   }
   let cachedProjectSignature: string | null = null;
   watcher.addListener((changedPath) => {
-    if (affectsProjectSignature(projectDir, join(projectDir, changedPath))) {
+    if (changedPath === "." || affectsProjectSignature(projectDir, join(projectDir, changedPath))) {
       cachedProjectSignature = null;
     }
   });
@@ -954,17 +959,25 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
   };
 
   // Opened on first use, so a server that never serves Studio's history never writes one. A failed open stays off
-  // for this run; one another process was holding is tried again on the next request.
+  // for this run; one another process was holding is tried again on the next request, which no write waits for.
+  let ownerWaitMs: number | undefined;
   const histories = historyCache(() =>
     openProjectHistory({
       projectDir,
       historyRoot: options.historyRoot ?? DEFAULT_HISTORY_ROOT,
-    }).catch((error: unknown) => {
-      console.warn(`[studio] Project history is off: ${String(error)}`);
-      if (error instanceof HistoryBusyError || error instanceof HistoryClosedError)
-        histories.forget(projectDir);
-      return null;
-    }),
+      ownerWaitMs,
+    })
+      .then((history) => {
+        ownerWaitMs = undefined;
+        return history;
+      })
+      .catch((error: unknown) => {
+        console.warn(`[studio] Project history is off: ${String(error)}`);
+        if (error instanceof HistoryBusyError) ownerWaitMs = 0;
+        if (error instanceof HistoryBusyError || error instanceof HistoryClosedError)
+          histories.forget(projectDir);
+        return null;
+      }),
   );
   const projectHistory = () => histories.get(projectDir);
   watcher.addListener((changedPath) => {
@@ -1021,8 +1034,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
     },
 
     async transformPreviewHtml({ html, project }) {
-      const { injectDeterministicFontFaces } =
-        await import("../../../producer/src/services/deterministicFonts.js");
+      const { injectDeterministicFontFaces } = await import("@hyperframes/core/fonts/embed");
       const { prepareAnimatedGifInputs } =
         await import("../../../producer/src/services/animatedGifPrep.js");
       const { downloadToTemp, writeUrlDownloadTelemetry } =
@@ -1147,12 +1159,17 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
             removeCancelledOutput();
             return;
           }
+          if (job.audioLoweredDb !== undefined) state.audioLoweredDb = job.audioLoweredDb;
           state.status = "complete";
           state.progress = 100;
           const metaPath = opts.outputPath.replace(/\.(mp4|webm|mov)$/, ".meta.json");
           writeFileSync(
             metaPath,
-            JSON.stringify({ status: "complete", durationMs: Date.now() - startTime }),
+            JSON.stringify({
+              status: "complete",
+              durationMs: Date.now() - startTime,
+              ...(job.audioLoweredDb !== undefined ? { audioLoweredDb: job.audioLoweredDb } : {}),
+            }),
           );
           // Refreshed HERE, not just at render start: a render can run for
           // minutes, and `hyperframes telemetry disable` during one must be
@@ -1258,19 +1275,18 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
             await new Promise((r) => setTimeout(r, 200));
             await reapplyStudioManualEditsToThumbnailPage(page);
             if (opts.signal.aborted) return null;
-            let clip: ScreenshotClip | undefined;
-            if (opts.selector) {
-              clip = await page.evaluate(
-                getElementScreenshotClip,
-                opts.selector,
-                opts.selectorIndex,
-              );
+            try {
+              const clip: ScreenshotClip | undefined = opts.selector
+                ? await page.evaluate(getElementScreenshotClip, opts.selector, opts.selectorIndex)
+                : undefined;
+              return (await page.screenshot(
+                opts.format === "png"
+                  ? { type: "png", ...(clip ? { clip } : {}) }
+                  : { type: "jpeg", quality: 80, ...(clip ? { clip } : {}) },
+              )) as Buffer;
+            } finally {
+              if (opts.selector) await page.evaluate(clearElementScreenshotIsolation);
             }
-            return (await page.screenshot(
-              opts.format === "png"
-                ? { type: "png", ...(clip ? { clip } : {}) }
-                : { type: "jpeg", quality: 80, ...(clip ? { clip } : {}) },
-            )) as Buffer;
           },
         );
       } catch (err) {
@@ -1561,6 +1577,8 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
       command: getFFmpegInstallCommand(),
     });
   });
+
+  mountDesktopRoutes(app, projectDir);
 
   // ── Pre-flight checks for render ────────────────────────────────────────
   // Intercept render requests before they reach the shared API so we can

@@ -18,7 +18,7 @@
     "packages/producer/src/perf-gate.ts",
     "packages/producer/src/runtime-conformance.ts",
     "packages/producer/src/benchmark.ts",
-    "packages/producer/scripts/generate-font-data.ts",
+    "packages/core/scripts/generate-font-data.ts",
     "packages/producer/we-render.mjs",
     "packages/producer/scripts/validate-fast-video.ts",
     "packages/cli/scripts/generate-font-data.ts",
@@ -33,12 +33,15 @@
     // Same arrangement for the audio FX graph builders, bundled by
     // build-audio-fx-runtime.ts for the offline render page.
     "packages/core/stubs/audio-fx-runtime-entry.ts",
+    // And for the SVG selector alias installer compiled scene scripts carry.
+    "packages/core/stubs/svg-selector-aliases-entry.ts",
     // In-page audit scripts read as raw strings and injected via
     // page.addScriptTag (see layout.ts / validate.ts) — referenced by file
     // path, never imported, so they have no import-graph referrer.
     "packages/cli/src/commands/layout-audit.browser.js",
     "packages/cli/src/commands/contrast-audit.browser.js",
     "packages/cli/src/commands/motion-sample.browser.js",
+    "packages/cli/src/commands/motion-signature.browser.js",
     // Worker entry points loaded dynamically by their *Pool.ts companions.
     "packages/producer/src/services/pngDecodeBlitWorker.ts",
     "packages/producer/src/services/shaderTransitionWorker.ts",
@@ -62,9 +65,6 @@
     "packages/studio/src/components/nle/TimelineEditorNotice.tsx",
     // Zoom hook extracted for downstream razor-blade PRs (#1330, #1331).
     "packages/studio/src/player/components/useTimelineZoom.ts",
-    // Cached O(1) GSAP target lookup, replacing O(n²) inline checks.
-    // Consumers migrate in a follow-up once useDomGeometryCommits adopts it.
-    "packages/studio/src/hooks/gsapTargetCache.ts",
     // Preview helper consumed dynamically from the studio iframe bridge.
     "packages/studio/src/hooks/gsapRuntimePreview.ts",
     // Browser acceptance runners, invoked by path (`node packages/studio/tests/
@@ -150,7 +150,7 @@
     },
     {
       "file": "packages/studio/src/player/lib/timelineElementHelpers.ts",
-      "exports": ["furthestClipEndFromDocument", "furthestClipEndFromSource"],
+      "exports": ["furthestClipEndFromDocument"],
     },
     {
       "file": "packages/studio/src/components/sidebar/AssetContextMenu.tsx",
@@ -383,13 +383,6 @@
       "file": "packages/studio/src/player/lib/timelineDOM.ts",
       "exports": ["*"],
     },
-    // gsapTargetCache: cached O(1) GSAP target lookup, consumed by
-    // useDomEditCommits and intended to replace the local copy in
-    // useDomGeometryCommits once callers migrate.
-    {
-      "file": "packages/studio/src/hooks/gsapTargetCache.ts",
-      "exports": ["isElementGsapTargeted"],
-    },
     // Re-exports from useDomEditCommits: barrel-style re-exports
     // consumed by downstream studio code.
     {
@@ -516,6 +509,16 @@
       // new package makes fallow see it as a fresh finding; the underlying clone
       // predates this refactor.
       "packages/parsers/src/hfIds.ts",
+      // Font pipeline: pre-existing duplication moved from packages/producer/src/services/
+      // and producer/scripts/ to core/src/fonts/ and core/scripts/ (the generator mirrors
+      // CANONICAL_FONTS; the tests share arrange/act scaffolds).
+      "packages/core/scripts/generate-font-data.ts",
+      "packages/core/src/fonts/deterministicFonts-aliasSupplement.test.ts",
+      "packages/core/src/fonts/deterministicFonts-authoredResources.test.ts",
+      "packages/core/src/fonts/deterministicFonts-failClosed.test.ts",
+      "packages/core/src/fonts/deterministicFonts-googleSubsets.test.ts",
+      "packages/core/src/fonts/deterministicFonts-retries.test.ts",
+      "packages/core/src/fonts/fontCompression.test.ts",
       // Parser test files: parallel arrange/act/assert test cases — pre-existing
       // duplication moved from packages/core/src/parsers/.
       "packages/parsers/src/gsapParser.test.ts",
@@ -530,6 +533,20 @@
       "packages/studio-server/src/routes/files.test.ts",
       "packages/studio-server/src/routes/render.test.ts",
       "packages/studio-server/src/routes/lint.test.ts",
+      // Studio gesture tests: pre-existing parallel overlay-option setups and arrange/assert blocks.
+      "packages/studio/src/components/editor/domEditOverlayStartGesture.test.ts",
+      "packages/studio/src/components/editor/anchoredResizeCommitFeedsOffset.test.ts",
+      "packages/studio/src/components/editor/rotateInlineSave.test.ts",
+      // Waiting-press and drag tests: each case spells out its own press, reload and release; a shared
+      // helper would hide the sequence each one asserts.
+      "packages/studio/src/components/editor/domEditOverlayStartGesture.blocked.test.ts",
+      "packages/studio/src/components/editor/dragUndoPaint.test.ts",
+      "packages/studio/src/components/editor/manualOffsetDrag.test.ts",
+      "packages/studio/src/components/editor/gestureHoldsPreviewReload.test.tsx",
+      // Preview reload tests: each case spells out its own mount, reload and swap sequence.
+      "packages/studio/src/player/hooks/useTimelinePlayer.shadowReload.test.ts",
+      "packages/studio/src/components/nle/NLEContext.test.ts",
+      "packages/studio/src/hooks/useDomGeometryCommits.test.tsx",
       // extractionCache.test.ts: pre-existing parallel describe setup and publish-case arrange/assert blocks.
       "packages/engine/src/services/extractionCache.test.ts",
       "packages/studio-server/src/routes/preview.test.ts",
@@ -750,6 +767,9 @@
     // complexity pre-dates the computed-timeline work. Exempted at file level
     // rather than refactored as scope creep.
     "ignore": [
+      // generate-font-data.ts: the build-time font data generator moved from producer/scripts;
+      // its CRAP score is coverage-driven (a build script no unit test runs).
+      "packages/core/scripts/generate-font-data.ts",
       // audio-fx-runtime-entry.ts: the browser-side IIFE entry for the offline FX
       // render. It runs only inside the headless page the engine drives, so unit
       // coverage cannot reach it and its CRAP score is coverage-driven rather
@@ -942,7 +962,7 @@
       "packages/studio/src/player/components/TimelineClipDiamonds.tsx",
       // Sub-composition html/body scoping fix: these files carry pre-existing
       // CRITICAL/HIGH functions (inlineSubCompositions, bundleToSingleHtml,
-      // mountCompositionContent/loadExternalCompositions, scopeSelector/
+      // mountCompositionContent/loadCompositions, scopeSelector/
       // replaceAuthoredRootIdSelectors) that pre-date this PR. The change only
       // threads a scopeRootSelectors option through the existing scoping calls;
       // the line-shift fingerprint re-flags the inherited complexity.

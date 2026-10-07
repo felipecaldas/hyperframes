@@ -15,6 +15,7 @@ import { createReadStream, existsSync, mkdirSync, readFileSync } from "fs";
 import { join, dirname, resolve, basename, relative } from "path";
 import { parseHTML } from "linkedom";
 import {
+  COMPOSITION_SOURCE_URL,
   compileTimingAttrs,
   injectDurations,
   extractResolvedMedia,
@@ -34,26 +35,36 @@ import {
   type UnresolvedElement,
 } from "@hyperframes/core";
 import { MAX_AUDIO_GAIN } from "@hyperframes/core/audio-gain";
+import { gsapCdnDist } from "@hyperframes/core/gsap-cdn";
 import {
   assignBundledRuntimeCompositionIds,
   assignMediaRenderIds,
   type BundledHostCompositionIdentity,
   buildVariablesByCompScript,
   inlineSubCompositions as inlineSubCompositionsShared,
+  ensureExternalLinkTag,
   ensureExternalScriptTag,
+  deferScriptsUntilFonts,
   emitMountedModuleScripts,
+  isJavaScriptType,
   prepareFlattenedInnerRoot,
   emitRootCompositionVariableStyles,
   readDeclaredDefaults,
   parseHostVariableValues,
+  headStyleRuns,
   inlineScriptRuns,
+  styleElementsFor,
   insertBeforeCloseTag,
+  isRuntimeFileUrl,
 } from "@hyperframes/core/compiler";
 import {
   checkSubCompositionUsability,
   type ParsableDocumentLike,
 } from "@hyperframes/parsers/sub-composition-validity";
-import { isUnresolvedAssetPlaceholder } from "@hyperframes/parsers/asset-resolution";
+import {
+  isUnresolvedAssetPlaceholder,
+  readProjectFile,
+} from "@hyperframes/parsers/asset-resolution";
 import { extractMediaMetadata, extractAudioMetadata } from "../utils/ffprobe.js";
 import { isPathInside, toExternalAssetKey } from "../utils/paths.js";
 import { collectRenderMedia } from "./renderMediaCollector.js";
@@ -79,7 +90,7 @@ import type { Page } from "puppeteer-core";
 import {
   injectDeterministicFontFaces,
   normalizeSystemFontPrimaryFamilies,
-} from "./deterministicFonts.js";
+} from "@hyperframes/core/fonts/embed";
 import { prepareAnimatedGifInputs } from "./animatedGifPrep.js";
 import { createStudioPositionSeekReapplyScript } from "@hyperframes/studio-server/manual-edits-render-script";
 import { getPositionEditsRenderScript } from "@hyperframes/core/runtime/position-edits-render";
@@ -120,12 +131,32 @@ function parseSubCompHtmlForValidity(html: string): ParsableDocumentLike {
   return parseHTML(html).document as unknown as ParsableDocumentLike;
 }
 
+function endsWithSourceUrl(code: string): boolean {
+  const trimmed = code.trimEnd();
+  const lastLine = trimmed.slice(trimmed.lastIndexOf("\n") + 1).trimStart();
+  return lastLine.startsWith("//# sourceURL=") || lastLine.startsWith("//@ sourceURL=");
+}
+
+// One name for the composition's inline code lets a render keep its errors and not a widget's.
+function prepareCompositionScripts(html: string): string {
+  const { document } = parseHTML(html);
+  for (const el of document.querySelectorAll("script:not([src])")) {
+    const isModule = (el.getAttribute("type") || "").trim().toLowerCase() === "module";
+    const runsAsScript = isModule || isJavaScriptType(el as unknown as Element);
+    const code = el.textContent ?? "";
+    if (!runsAsScript || endsWithSourceUrl(code)) continue;
+    el.textContent = `${code}\n//# sourceURL=${COMPOSITION_SOURCE_URL}`;
+  }
+  deferScriptsUntilFonts(document as unknown as Document);
+  return document.toString();
+}
+
 export function injectSdkPositionEditsRenderScript(html: string): string {
   if (!html.includes("data-hf-edit-base-x") && !html.includes("data-hf-edit-base-y")) {
     return html;
   }
   const scriptBody = getPositionEditsRenderScript().replace(/<\/script/gi, "<\\/script");
-  const script = `<script>${scriptBody}</script>`;
+  const script = `<script>${scriptBody}\n//# sourceURL=hyperframes://position-edits</script>`;
   return insertBeforeCloseTag(html, "body", script) ?? `${html}${script}`;
 }
 
@@ -206,12 +237,17 @@ function assertSubCompositionsUsable(
     // silence here rather than pretend it surfaces an error somewhere else.
     if (visited.has(filePath)) continue;
 
-    if (!existsSync(filePath)) {
+    const read = readProjectFile(filePath);
+    if (read.kind === "missing") {
       problems.push({ srcPath, detail: "the file does not exist" });
       continue;
     }
+    if (read.kind === "folder") {
+      problems.push({ srcPath, detail: "it is a folder, not an HTML file" });
+      continue;
+    }
 
-    const fileHtml = readFileSync(filePath, "utf-8");
+    const fileHtml = read.text;
     const validity = checkSubCompositionUsability(fileHtml, parseSubCompHtmlForValidity);
     if (!validity.ok) {
       problems.push({
@@ -705,11 +741,12 @@ async function parseSubCompositions(
       continue;
     }
 
-    if (!existsSync(filePath)) {
+    const read = readProjectFile(filePath);
+    if (read.kind !== "file") {
       continue;
     }
 
-    const rawSubHtml = readFileSync(filePath, "utf-8");
+    const rawSubHtml = read.text;
     const nestedVisited = new Set(visited);
     nestedVisited.add(filePath);
 
@@ -854,8 +891,8 @@ class ProducerHostIdentityMap extends Map<Element, BundledHostCompositionIdentit
 }
 
 /**
- * Merge all `<head>` `<style>` blocks into a single tag with `@import` rules
- * at the top, and merge each run of adjacent inline `<body>` `<script>` blocks
+ * Merge each run of adjacent same-condition `<head>` `<style>` blocks into one, `@import`
+ * rules at its top, and merge each run of adjacent inline `<body>` `<script>` blocks
  * into one, without moving any of them past a `<script src>` or module script.
  *
  * Mirrors the bundler's `coalesceHeadStylesAndBodyScripts` to guarantee
@@ -870,13 +907,13 @@ function coalesceHeadStylesAndBodyScripts(html: string): string {
   if (!head) return html;
 
   const styleEls = Array.from(head.querySelectorAll("style"));
-  if (styleEls.length > 1) {
-    const importRe = /@import\s+url\([^)]*\)\s*;|@import\s+["'][^"']+["']\s*;/gi;
+  const importRe = /@import\s+url\([^)]*\)\s*;|@import\s+["'][^"']+["']\s*;/gi;
+  for (const run of styleEls.length > 1 ? headStyleRuns(styleEls) : []) {
     const imports: string[] = [];
     const cssParts: string[] = [];
     const seenImports = new Set<string>();
 
-    for (const el of styleEls) {
+    for (const el of run) {
       const raw = (el.textContent || "").trim();
       if (!raw) continue;
       const nonImportCss = raw.replace(importRe, (match) => {
@@ -892,14 +929,9 @@ function coalesceHeadStylesAndBodyScripts(html: string): string {
     }
 
     const mergedCss = [...imports, ...cssParts].join("\n\n").trim();
-    if (mergedCss) {
-      const firstStyleEl = styleEls[0];
-      if (firstStyleEl) firstStyleEl.textContent = mergedCss;
-      for (let i = 1; i < styleEls.length; i++) {
-        const el = styleEls[i];
-        if (el) el.remove();
-      }
-    }
+    if (!mergedCss) continue;
+    run[0]!.textContent = mergedCss;
+    for (const el of run.slice(1)) el.remove();
   }
 
   if (body) {
@@ -983,10 +1015,8 @@ function inlineSubCompositions(
       resolveHtml: (srcPath: string) => {
         let compHtml = subCompositions.get(srcPath) || null;
         if (!compHtml) {
-          const filePath = resolve(projectDir, srcPath);
-          if (existsSync(filePath)) {
-            compHtml = readFileSync(filePath, "utf-8");
-          }
+          const read = readProjectFile(resolve(projectDir, srcPath));
+          if (read.kind === "file") compHtml = read.text;
         }
         return compHtml;
       },
@@ -994,7 +1024,6 @@ function inlineSubCompositions(
       // Mirrors the preview bundler: a sub-composition's SIBLING assets resolve
       // against its own directory, project-root refs stay as authored.
       assetExists: (path: string) => existsSync(resolve(projectDir, path)),
-      scriptErrorLabel: "[Compiler] Composition script failed",
       // Preserve the authored root wrapper as a child of the host, matching
       // the preview bundler's shape (htmlBundler.ts's prepareFlattenedInnerRoot,
       // which the runtime compositionLoader mirrors with its own copy for the
@@ -1037,23 +1066,13 @@ function inlineSubCompositions(
     }
   }
 
-  if (result.externalLinks.length && head) {
-    for (const link of result.externalLinks) {
-      const escapedHref = link.href.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-      if (document.querySelector(`link[href="${escapedHref}"]`)) continue;
-      const el = document.createElement("link");
-      el.setAttribute("rel", link.rel);
-      el.setAttribute("href", link.href);
-      if (link.crossorigin != null) el.setAttribute("crossorigin", link.crossorigin);
-      head.appendChild(el);
-    }
-  }
+  if (head) for (const link of result.externalLinks) ensureExternalLinkTag(document, link);
 
   // Append collected styles to <head>
-  if (result.styles.length && head) {
-    const styleEl = document.createElement("style");
-    styleEl.textContent = result.styles.join("\n\n");
-    head.appendChild(styleEl);
+  if (head) {
+    for (const style of styleElementsFor(document, result.styles, (css) => css.join("\n\n"))) {
+      head.appendChild(style);
+    }
   }
 
   // CDN and integrity-pinned scripts go first so plugins (e.g. TextPlugin,
@@ -1205,7 +1224,7 @@ export async function inlineExternalScripts(html: string): Promise<string> {
 
   for (const el of scripts) {
     const src = (el.getAttribute("src") || "").trim();
-    if (src && isHttpUrl(src)) {
+    if (src && isHttpUrl(src) && !isRuntimeFileUrl(src)) {
       externalScripts.push({ el: el as unknown as Element, src });
     }
   }
@@ -1239,7 +1258,7 @@ export async function inlineExternalScripts(html: string): Promise<string> {
         if (attr.name.toLowerCase() === "src") continue;
         inlineScript.setAttribute(attr.name, attr.value);
       }
-      inlineScript.textContent = `/* inlined: ${src} */\n${safeText}\n`;
+      inlineScript.textContent = `/* inlined: ${src} */\n${safeText}\n//# sourceURL=${new URL(src).href}\n`;
       el.replaceWith(inlineScript);
       defaultLogger.info(`[Compiler] Inlined CDN script: ${src}`);
     } else {
@@ -1773,7 +1792,7 @@ async function readLocalFont(absPath: string): Promise<LocalFontRead> {
 
 // fallow-ignore-next-line complexity
 async function embedLocalFontFaces(html: string, projectDir: string): Promise<string> {
-  const { fontToDataUri: toDataUri } = await import("./fontCompression.js");
+  const { fontToDataUri: toDataUri } = await import("@hyperframes/core/fonts/embed");
   const styleBlockRe = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
   const fontFaceRe = /@font-face\s*\{([^}]*)\}/gi;
   let result = html;
@@ -1889,7 +1908,7 @@ export interface CompileForRenderOptions {
   variables?: Record<string, unknown>;
 }
 
-const GSAP_CDN_BASE = "https://cdn.jsdelivr.net/npm/gsap@3.15.0/dist/";
+const GSAP_CDN_BASE = gsapCdnDist();
 
 function rewriteUnresolvableGsapToCdn(html: string, projectDir: string): string {
   return html.replace(
@@ -2014,6 +2033,7 @@ export async function compileForRender(
   );
 
   const coalescedHtml = await injectDeterministicFontFaces(normalizedFontHtml, {
+    logger: defaultLogger,
     failClosedFontFetch: options.failClosedFontFetch === true,
     allowSystemFontCapture: options.allowSystemFontCapture,
     abortSignal: options.abortSignal,
@@ -2037,10 +2057,12 @@ export async function compileForRender(
     ? (insertBeforeCloseTag(
         assembledHtml,
         "body",
-        `<script>${createStudioPositionSeekReapplyScript()}</script>`,
+        `<script>${createStudioPositionSeekReapplyScript()}\n//# sourceURL=hyperframes://position-seek-reapply</script>`,
       ) ?? assembledHtml)
     : assembledHtml;
-  const htmlWithSdkPositionScript = injectSdkPositionEditsRenderScript(htmlWithPositionScript);
+  const htmlWithDeferredScripts = prepareCompositionScripts(
+    injectSdkPositionEditsRenderScript(htmlWithPositionScript),
+  );
 
   // Download remote <video> and <audio> sources to compiledDir and rewrite the
   // src attributes so the renderer reads from localhost. Remote S3 URLs cause
@@ -2048,7 +2070,7 @@ export async function compileForRender(
   // over the network; any that don't reach readyState >= 2 in time render as
   // blank black frames. Localising them eliminates the race.
   const { html: htmlWithLocalMedia, remoteMediaAssets } = await localizeRemoteMediaSources(
-    htmlWithSdkPositionScript,
+    htmlWithDeferredScripts,
     downloadDir,
   );
 

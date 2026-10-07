@@ -68,6 +68,10 @@ const ALLOWED_HOSTS = new Set([
   "openrouter.ai",
   // Test-only sentinels that are never fetched.
   "media.invalid",
+  // TAB-1225: studio/src/player/components/audioClipLink.ts parses relative media
+  // srcs against this base to compare asset identity. `.invalid` is reserved
+  // (RFC 6761) and the URL is only ever handed to `new URL`, never fetched.
+  "project.invalid",
   "studio.local",
   "host",
   "example.com",
@@ -170,6 +174,19 @@ describe("Tabario fork: customer-facing Studio does not egress to third parties"
     // so the CDN could serve a different build between renders.
     expect(hits.filter((h) => h.host.endsWith("jsdelivr.net"))).toEqual([]);
     expect(hits.filter((h) => h.host.endsWith("unpkg.com"))).toEqual([]);
+  });
+
+  it("keeps the customer-facing source off @hyperframes/core/gsap-cdn", () => {
+    // TAB-1225. Upstream v0.8.140 moved the jsdelivr URL into core/src/gsapCdn.ts
+    // and called it from studio and studio-server. The host scan above cannot see
+    // a URL that lives in another package and arrives through an import, so it
+    // would pass while the preview loaded GSAP from jsdelivr again.
+    const importers = SCANNED.flatMap((root) =>
+      sourceFiles(root).filter((file) =>
+        /["']@hyperframes\/core\/gsap-cdn["']|gsapCdn["']/.test(readFileSync(file, "utf8")),
+      ),
+    ).map((file) => relative(PACKAGES_DIR, file));
+    expect(importers).toEqual([]);
   });
 
   it("keeps the client off Google Fonts directly (server-side proxy only)", () => {

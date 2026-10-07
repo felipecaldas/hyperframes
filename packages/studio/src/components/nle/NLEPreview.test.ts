@@ -12,6 +12,12 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const playerMounts: string[] = [];
 let livePlayerProps: { onReadyToShowChange?: (ready: boolean) => void } = {};
 
+const measured = vi.hoisted(() => ({ size: null as { width: number; height: number } | null }));
+vi.mock("../../utils/previewCompositionSize", async (original) => ({
+  ...(await original<typeof import("../../utils/previewCompositionSize")>()),
+  readPreviewCompositionSize: () => measured.size,
+}));
+
 vi.mock("../../player", async () => {
   const React = await import("react");
 
@@ -81,7 +87,12 @@ function renderPreview(
   {
     box = { width: 800, height: 600 },
     fillBox,
-  }: { box?: { width: number; height: number }; fillBox?: boolean } = {},
+    compositionSizeHint,
+  }: {
+    box?: { width: number; height: number };
+    fillBox?: boolean;
+    compositionSizeHint?: { width: number; height: number };
+  } = {},
 ) {
   resizeCallbacks = [];
   const host = document.createElement("div");
@@ -103,6 +114,7 @@ function renderPreview(
           setShadowIframeNode: () => {},
           resetPreviewSlots: () => {},
           fillBox,
+          compositionSizeHint,
         }),
       );
     });
@@ -378,6 +390,37 @@ describe("NLEPreview", () => {
     filled.cleanup();
   });
 
+  it("takes the host's composition size as the stage's shape until the preview measures its own", () => {
+    const box = { width: 800, height: 600 };
+    const plain = renderPreview(undefined, { box });
+    expect([plain.stage.style.width, plain.stage.style.height]).toEqual(["784px", "441px"]);
+    plain.cleanup();
+
+    const hinted = renderPreview(undefined, {
+      box,
+      compositionSizeHint: { width: 1276, height: 1078 },
+    });
+    const shape = parseFloat(hinted.stage.style.width) / parseFloat(hinted.stage.style.height);
+    expect(shape).toBeCloseTo(1276 / 1078, 3);
+    expect(hinted.stage.style.height).toBe("584px");
+    hinted.cleanup();
+  });
+
+  it("lets the size the preview measures win over the host's hint", () => {
+    measured.size = { width: 1920, height: 1080 };
+    try {
+      const box = { width: 800, height: 600 };
+      const hinted = renderPreview(undefined, {
+        box,
+        compositionSizeHint: { width: 1276, height: 1078 },
+      });
+      expect([hinted.stage.style.width, hinted.stage.style.height]).toEqual(["784px", "441px"]);
+      hinted.cleanup();
+    } finally {
+      measured.size = null;
+    }
+  });
+
   it("clips a shadow reload so its own loading overlay cannot paint over the live frame", () => {
     const view = renderPreview([
       { gen: 0, role: "live" },
@@ -413,13 +456,14 @@ describe("NLEPreview", () => {
   describe("a missing poster", () => {
     const renderUrl =
       "/api/projects/timeline-edit-playground/thumbnail/index.html?t=0&output=source";
-    const fetchSpy = vi.fn(() => Promise.resolve(new Response()));
+    const fetchSpy = vi.fn((_url: string, _init?: RequestInit) => Promise.resolve(new Response()));
     beforeEach(() => {
       fetchSpy.mockClear();
       vi.stubGlobal("fetch", fetchSpy);
     });
     afterEach(() => vi.unstubAllGlobals());
 
+    const renders = () => fetchSpy.mock.calls.map(([url]) => url);
     const settle = (
       view: ReturnType<typeof renderPreview>,
       steps: Array<"ready" | "missing" | "loaded">,
@@ -437,7 +481,10 @@ describe("NLEPreview", () => {
     it("is rendered for the next open when the live frame is ready first", () => {
       const view = renderPreview();
       settle(view, ["ready", "missing"]);
-      expect(fetchSpy.mock.calls).toEqual([[renderUrl]]);
+      expect(renders()).toEqual([renderUrl]);
+      expect(fetchSpy.mock.calls[0]?.[1]?.signal, "rendered as scheduler work").toBeInstanceOf(
+        AbortSignal,
+      );
       expect(view.stage.querySelector('[data-testid="preview-poster"]')).toBeNull();
       view.cleanup();
     });
@@ -447,7 +494,7 @@ describe("NLEPreview", () => {
       settle(view, ["missing"]);
       expect(fetchSpy).not.toHaveBeenCalled();
       settle(view, ["ready", "ready"]);
-      expect(fetchSpy.mock.calls).toEqual([[renderUrl]]);
+      expect(renders()).toEqual([renderUrl]);
       view.cleanup();
     });
 
@@ -458,7 +505,7 @@ describe("NLEPreview", () => {
       settle(view, ["ready"]);
       view.render();
       settle(view, ["ready", "missing"]);
-      expect(fetchSpy.mock.calls).toEqual([[renderUrl]]);
+      expect(renders()).toEqual([renderUrl]);
       view.cleanup();
     });
   });

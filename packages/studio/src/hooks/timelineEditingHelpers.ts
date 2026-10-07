@@ -1,4 +1,6 @@
+import { isHtmlElement } from "@hyperframes/core/runtime/dom-realm";
 import { type TimelineElement, usePlayerStore } from "../player/store/playerStore";
+import { toAuthoredStart } from "../player/store/timelineElement";
 import {
   applyPatchByTarget,
   findTagByTarget,
@@ -13,7 +15,7 @@ import {
 } from "../player/components/timelineEditing";
 import { getElementZIndex } from "../player/lib/layerOrdering";
 import {
-  furthestClipEndFromSource,
+  furthestClipEndFromDocument,
   getTimelineElementIdentity,
   playbackStartAttributeForElement,
   readPlaybackStartAttributes,
@@ -27,6 +29,7 @@ import {
 import { serializeStudioFileMutations } from "../utils/studioFileMutationCoordinator";
 import type { TimelineZIndexReorderCommit } from "./useTimelineEditingTypes";
 import { setCompositionDurationToContent } from "../utils/timelineAssetDrop";
+import { rootCompositionDurationOf } from "../utils/rootDuration";
 import { readFileContent } from "./timelineTimingSync";
 import {
   findElementForSelection,
@@ -34,14 +37,6 @@ import {
 } from "../components/editor/domEditingElement";
 export { deleteSelectedKeyframes } from "./deleteSelectedKeyframes";
 export { readFileContent };
-function isHTMLElement(element: Element | null): element is HTMLElement {
-  if (!element) return false;
-  // Use the element's OWN realm's HTMLElement: timeline clips live in the preview
-  // iframe, and cross-realm `element instanceof HTMLElement` (main window) is
-  // always false — which silently dropped every timeline z-index commit.
-  const Ctor = element.ownerDocument?.defaultView?.HTMLElement ?? globalThis.HTMLElement;
-  return element instanceof Ctor;
-}
 /**
  * Resolve a timeline vertical move to a z-index stacking reorder and commit it
  * through the shared layers-panel reorder path. Reads live sibling z-index from
@@ -95,7 +90,7 @@ export function applyTimelineStackingReorder(input: {
           input.activeCompPath,
         )
       : null;
-    if (!isHTMLElement(element)) return Promise.resolve();
+    if (!isHtmlElement(element)) return Promise.resolve();
     if (getElementZIndex(element) === change.zIndex) continue;
     commitEntries.push({
       element,
@@ -231,16 +226,17 @@ function resolveResizePlaybackStart(
   };
 }
 
-export function buildTimelineMoveTimingPatch(
+export function applyTimelineMoveAttributes(
   original: string,
   target: PatchTarget,
   start: number,
   duration: number,
   track?: number,
+  audioGroup?: null,
 ): string {
   if (!Number.isFinite(start) || !Number.isFinite(duration)) {
     console.warn(
-      `[Timeline] buildTimelineMoveTimingPatch: non-finite timing (start=${start}, duration=${duration}) — patch skipped`,
+      `[Timeline] applyTimelineMoveAttributes: non-finite timing (start=${start}, duration=${duration}) — patch skipped`,
     );
     return original;
   }
@@ -256,15 +252,52 @@ export function buildTimelineMoveTimingPatch(
       value: formatTimelineAttributeNumber(track),
     });
   }
-  // Content-driven duration: sync data-duration to the furthest clip end read
-  // from the PATCHED SOURCE (raw data-duration), so it grows if a clip moved
-  // past the end and shrinks if the furthest clip moved left. Measured from the
-  // source, NOT the store — store durations are runtime-truncated to the current
-  // comp length, which would ratchet the duration down every move.
-  return setCompositionDurationToContent(patched, furthestClipEndFromSource(patched));
+  if (audioGroup === null)
+    patched = applyPatchByTarget(patched, target, {
+      type: "attribute",
+      property: "data-audio-group",
+      value: null,
+    });
+  return patched;
 }
 
-export function buildTimelineResizeTimingPatch(
+// Root data-duration follows the furthest clip end in the source; the store's durations are
+// truncated to the current length, so reading them would ratchet the duration down every edit.
+export function syncCompositionDurationToContent(source: string): string {
+  return syncCompositionDurationWithEnd(source).source;
+}
+
+/** The synced source and the clip end it was synced to, from one parse of the source. */
+export function syncCompositionDurationWithEnd(source: string): {
+  source: string;
+  contentEnd: number;
+} {
+  const doc = new DOMParser().parseFromString(source, "text/html");
+  const contentEnd = furthestClipEndFromDocument(doc);
+  const synced = setCompositionDurationToContent(
+    source,
+    contentEnd,
+    rootCompositionDurationOf(doc),
+  );
+  return { source: synced, contentEnd };
+}
+
+export function buildTimelineMoveTimingPatch(
+  original: string,
+  target: PatchTarget,
+  start: number,
+  duration: number,
+  track?: number,
+  audioGroup?: null,
+): string {
+  const patched = applyTimelineMoveAttributes(original, target, start, duration, track, audioGroup);
+  // A non-finite timing skips the patch above; skip the duration sync with it.
+  return !(Number.isFinite(start) && Number.isFinite(duration))
+    ? patched
+    : syncCompositionDurationToContent(patched);
+}
+
+export function applyTimelineResizeAttributes(
   original: string,
   target: PatchTarget,
   element: TimelineElement,
@@ -274,7 +307,7 @@ export function buildTimelineResizeTimingPatch(
   let patched = applyPatchByTarget(original, target, {
     type: "attribute",
     property: "start",
-    value: formatTimelineAttributeNumber(updates.start),
+    value: formatTimelineAttributeNumber(toAuthoredStart(element, updates.start)),
   });
   patched = applyPatchByTarget(patched, target, {
     type: "attribute",
@@ -288,10 +321,13 @@ export function buildTimelineResizeTimingPatch(
       value: formatTimelineMediaOffset(pbs.value),
     });
   }
-  // Content-driven duration from the PATCHED SOURCE (raw data-duration) —
-  // grows/shrinks to the furthest clip end. Not from the store, whose
-  // durations are runtime-truncated.
-  return setCompositionDurationToContent(patched, furthestClipEndFromSource(patched));
+  return patched;
+}
+
+export function buildTimelineResizeTimingPatch(
+  ...args: Parameters<typeof applyTimelineResizeAttributes>
+): string {
+  return syncCompositionDurationToContent(applyTimelineResizeAttributes(...args));
 }
 
 export interface PersistTimelineEditInput {
@@ -304,6 +340,7 @@ export interface PersistTimelineEditInput {
   recordEdit: (input: RecordEditInput) => Promise<void>;
   pendingTimelineEditPathRef: React.MutableRefObject<Set<string>>;
   coalesceKey?: string;
+  coalesceMs?: number;
 }
 
 export async function persistTimelineEdit(input: PersistTimelineEditInput): Promise<void> {
@@ -318,6 +355,7 @@ export async function persistTimelineEdit(input: PersistTimelineEditInput): Prom
     projectId: input.projectId,
     label: input.label,
     coalesceKey: input.coalesceKey,
+    coalesceMs: input.coalesceMs,
     files: {
       [targetPath]: (current) => {
         const patched = input.buildPatches(current, patchTarget);
@@ -390,7 +428,12 @@ export async function persistTimelineBatchEdit(
     changesByPath.set(targetPath, [...(changesByPath.get(targetPath) ?? []), change]);
   }
   const buildFile = (targetPath: string) => (original: string) => {
-    const next = patchTimelineChangesInSource(original, targetPath, changesByPath.get(targetPath)!);
+    const patched = patchTimelineChangesInSource(
+      original,
+      targetPath,
+      changesByPath.get(targetPath)!,
+    );
+    const next = syncCompositionDurationToContent(patched);
     if (next !== original) input.pendingTimelineEditPathRef.current.add(targetPath);
     return next;
   };

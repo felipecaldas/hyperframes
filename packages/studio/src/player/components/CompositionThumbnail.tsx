@@ -1,9 +1,15 @@
 import { memo, useMemo, type CSSProperties } from "react";
 import { useThumbnailLease } from "../../hooks/useThumbnailLease";
 import { useThumbnailStripSize } from "../../hooks/useThumbnailStripSize";
-import { createThumbnailKey, type ThumbnailPriority } from "../lib/thumbnailScheduler";
+import {
+  createThumbnailKey,
+  type ThumbnailPriority,
+  type ThumbnailRequest,
+} from "../lib/thumbnailScheduler";
 import { TIMELINE_VIEWPORT_BUDGETS } from "../lib/timelineViewportBudgets";
+import { ThumbnailTiles } from "./ThumbnailTiles";
 import { computeThumbnailStrip, probeImageAspect } from "./thumbnailUtils";
+import { studioApiFetch } from "../../utils/studioApiFetch";
 
 interface CompositionThumbnailProps {
   previewUrl: string;
@@ -85,8 +91,24 @@ export function compositionPathOfPreviewUrl(previewUrl: string): string {
   return match?.[1] ? decodeURIComponent(match[1]) : "index.html";
 }
 
+export function compositionThumbnailRequest(
+  url: string,
+  projectId: string,
+  { sessionEpoch = 0, priority = "visible", rich = false }: Partial<ThumbnailRequest> = {},
+): ThumbnailRequest {
+  return {
+    key: createThumbnailKey({ kind: "composition", url }),
+    projectId,
+    sessionEpoch,
+    kind: "composition",
+    priority,
+    rich,
+    load: (signal: AbortSignal) => loadCompositionImage(url, signal),
+  };
+}
+
 async function loadCompositionImage(url: string, signal: AbortSignal) {
-  const response = await fetch(url, { signal });
+  const response = await studioApiFetch(url, { signal });
   if (!response.ok) throw new Error(`Composition thumbnail failed (${response.status})`);
   const blob = await response.blob();
   if (signal.aborted) throw new DOMException("Aborted", "AbortError");
@@ -121,7 +143,7 @@ export const CompositionThumbnail = memo(function CompositionThumbnail({
   contentRevision = 0,
   priority = "visible",
 }: CompositionThumbnailProps) {
-  const [container, setContainerRef] = useThumbnailStripSize();
+  const [container, setContainerRef, watchGap] = useThumbnailStripSize();
   const url = buildCompositionThumbnailUrl({
     previewUrl,
     seekTime,
@@ -132,15 +154,7 @@ export const CompositionThumbnail = memo(function CompositionThumbnail({
     contentRevision,
   });
   const request = useMemo(
-    () => ({
-      key: createThumbnailKey({ kind: "composition", url }),
-      projectId,
-      sessionEpoch,
-      kind: "composition" as const,
-      priority,
-      rich: true,
-      load: (signal: AbortSignal) => loadCompositionImage(url, signal),
-    }),
+    () => compositionThumbnailRequest(url, projectId, { sessionEpoch, priority, rich: true }),
     [priority, projectId, sessionEpoch, url],
   );
   const snapshot = useThumbnailLease(request);
@@ -156,15 +170,18 @@ export const CompositionThumbnail = memo(function CompositionThumbnail({
   return (
     <div ref={setContainerRef} className="absolute inset-0 overflow-hidden">
       {value && (
-        <div
-          className="absolute inset-0 flex"
+        <ThumbnailTiles
+          strip={container}
+          frameW={frameW}
+          frameCount={frameCount}
+          watchGap={watchGap}
           style={{
             animation: "hf-thumb-fade 200ms ease-out",
             mixBlendMode:
               "var(--timeline-composition-thumbnail-blend)" as CSSProperties["mixBlendMode"],
           }}
         >
-          {Array.from({ length: frameCount }, (_, index) => (
+          {(index) => (
             <div
               key={index}
               className="relative h-full shrink-0 overflow-hidden"
@@ -178,11 +195,11 @@ export const CompositionThumbnail = memo(function CompositionThumbnail({
                 style={{ opacity: "var(--timeline-composition-thumbnail-opacity)" }}
               />
             </div>
-          ))}
-        </div>
+          )}
+        </ThumbnailTiles>
       )}
       {snapshot.status === "loading" && (
-        <div className="absolute inset-0 animate-pulse bg-white/[0.035]" />
+        <div className="absolute inset-0 animate-pulse bg-text-0/[0.035]" />
       )}
       {label && (
         <div className="absolute inset-y-0 left-3 z-10 flex items-center">

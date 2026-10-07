@@ -9,6 +9,7 @@ import { __resetForTests } from "../../utils/canvasNudgeGate";
 import { PreviewReadOnlyProvider } from "./previewReadOnlyContext";
 import "./domEditOverlayTestMocks";
 import { DomEditOverlay } from "./DomEditOverlay";
+import { UNREADABLE_TRANSLATE } from "./plainTranslate";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -104,7 +105,14 @@ function fixture(
 }
 
 const fire = (target: Element, type: string, init: MouseEventInit = {}) => {
-  const event = new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, ...init });
+  const buttons = type === "pointerdown" || type === "pointermove" ? 1 : 0;
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+    buttons,
+    ...init,
+  });
   act(() => {
     target.dispatchEvent(event);
   });
@@ -303,7 +311,7 @@ describe("DomEditOverlay with canvasInput host", () => {
     expect(fixture(HOST).overlay.className).toContain("pointer-events-none");
   });
 
-  it("draws no hover box", () => {
+  it("draws the hover box for the selection the host hovers, and none without one", () => {
     layout.hover = RECT;
     const hovered = (props = {}) => {
       const { overlay } = fixture(props);
@@ -313,7 +321,8 @@ describe("DomEditOverlay with canvasInput host", () => {
     };
     const selection = makeSelection("Hover", textElement("hover"));
     expect(hovered({ hoverSelection: selection })).not.toBeNull();
-    expect(hovered({ ...HOST, hoverSelection: selection })).toBeNull();
+    expect(hovered({ ...HOST, hoverSelection: selection })).not.toBeNull();
+    expect(hovered({ ...HOST, hoverSelection: null })).toBeNull();
   });
 
   it("starts no marquee and makes no selection from a press on empty canvas", () => {
@@ -473,5 +482,34 @@ describe("DomEditOverlay onTextEditingChange", () => {
       previousHtml: "Title",
     });
     expect(spies.onTextEditingChange.mock.calls).toEqual([[true], [false]]);
+  });
+});
+
+describe("DomEditOverlay on a layer whose translate Studio can't read", () => {
+  it("refuses a drag and an arrow nudge out loud, and commits nothing", () => {
+    const { spies, overlay, selection } = fixture();
+    selection.element.style.setProperty("translate", "abs(10% - 50px) 0px");
+    fire(overlay.querySelector(BOX)!, "pointerdown");
+    const presses = [false, true, true].map(
+      (repeat) =>
+        new KeyboardEvent("keydown", {
+          key: "ArrowRight",
+          bubbles: true,
+          cancelable: true,
+          repeat,
+        }),
+    );
+    act(() => {
+      for (const press of presses) window.dispatchEvent(press);
+      vi.advanceTimersByTime(CANVAS_NUDGE_COMMIT_DEBOUNCE_MS + 10);
+    });
+    // One toast for the drag and one for the whole held arrow, whose every press is swallowed.
+    expect(spies.onBlockedMove.mock.calls).toEqual([
+      [selection, UNREADABLE_TRANSLATE],
+      [selection, UNREADABLE_TRANSLATE],
+    ]);
+    expect(presses.map((press) => press.defaultPrevented)).toEqual([true, true, true]);
+    expect(spies.onPathOffsetCommit).not.toHaveBeenCalled();
+    expect(selection.element.style.getPropertyValue("translate")).toBe("abs(10% - 50px) 0px");
   });
 });

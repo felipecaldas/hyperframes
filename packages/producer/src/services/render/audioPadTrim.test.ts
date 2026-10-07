@@ -307,6 +307,7 @@ describe("padOrTrimAudioToVideoFrameCount", () => {
 
     expect(result.success).toBe(true);
     expect(captured.args).toHaveLength(1);
+    expect(result).not.toHaveProperty("audioLoweredDb");
   });
 
   it("limits the duration-normalized artifact without auto-gain or lookahead delay", async () => {
@@ -368,6 +369,7 @@ describe("padOrTrimAudioToVideoFrameCount", () => {
           `alimiter=limit=${(10 ** (ceiling / 20)).toFixed(9)}:level=false:latency=true`,
         );
       }
+      expect(result.audioLoweredDb).toBe(2.9);
       expect(readFileSync(input.outputPath, "utf8")).toBe("candidate-4");
       expect(readdirSync(dir)).toEqual(["audio.m4a"]);
     } finally {

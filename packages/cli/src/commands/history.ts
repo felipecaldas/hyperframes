@@ -11,13 +11,14 @@ import {
   type HistoryListItem,
   type HistoryResult,
   type HistoryWho,
-} from "@hyperframes/studio-server";
+} from "@hyperframes/studio-server/history";
 import type { Example } from "./_examples.js";
 import { trackHistoryAction } from "../telemetry/events.js";
 import { setCommandExitCode } from "../utils/commandResult.js";
 import {
   Refusal,
   endTurn,
+  historyDeps,
   lastTurnParts,
   withOwner as withHistoryOwner,
   writeTurn,
@@ -103,7 +104,7 @@ function since(entries: HistoryListItem[], ref: string, who: HistoryWho): Histor
 }
 
 function ago(at: number): string {
-  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+  const seconds = Math.max(0, Math.round((historyDeps.now() - at) / 1000));
   if (seconds < 60) return `${seconds}s ago`;
   if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
   if (seconds < 86_400) return `${Math.round(seconds / 3600)}h ago`;
