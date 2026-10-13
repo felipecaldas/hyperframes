@@ -1,6 +1,9 @@
+import type { CheckDeadline } from "./checkDeadline.js";
+import { BrowserCleanupError, closeManagedBrowser } from "../browser/launch.js";
+import { checkSnapshotDirectory } from "./checkSnapshotDirectory.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { Page } from "puppeteer-core";
+import type { Browser, Page } from "puppeteer-core";
 import {
   AUDIT_SEEK_OPTIONS,
   DENSE_GEOMETRY_SEEK_OPTIONS,
@@ -23,6 +26,7 @@ import { normalizeErrorMessage } from "./errorMessage.js";
 import { ambiguousIssue, type MotionFrame } from "./motionAudit.js";
 import type { LayoutIssue, LayoutIssueCode, LayoutRect } from "./layoutAudit.js";
 import { serveStaticProjectHtml } from "./staticProjectServer.js";
+import { collectTweenRecords, findTweenTails, tweenTailMessage } from "./gsapTweenTails.js";
 import { resolveAutoProxy } from "./projectConfig.js";
 import {
   decideMediaProxyEligibility,
@@ -189,6 +193,7 @@ export async function runBrowserCheck(
   options: CheckOptions,
   motion: MotionSpecResolution,
   runGrid: RunAuditGrid,
+  deadline?: CheckDeadline,
 ): Promise<CheckBrowserResult> {
   const { bundleWithLocalizedFonts } = await import("./bundleWithLocalizedFonts.js");
   const html = await bundleWithLocalizedFonts(project.dir);
@@ -205,6 +210,7 @@ export async function runBrowserCheck(
     options.autoProxy,
   );
   let currentTime = 0;
+  let failure: { kind: "none" } | { kind: "failed"; error: unknown } = { kind: "none" };
   let chromeBrowser: import("puppeteer-core").Browser | undefined;
 
   try {
@@ -214,7 +220,13 @@ export async function runBrowserCheck(
       renderReadyTimeoutMs: options.timeout,
       renderReadyWarningSuffix: "checking the current page state",
       browserGpuMode: options.browserGpuMode ?? resolveCliChromeGpuMode(),
-      beforeNavigate: (page) => wireRuntimeListeners(page, drafts, () => currentTime),
+      signal: deadline?.signal,
+      onBrowser: deadline?.ownBrowser,
+      onBrowserReady: deadline?.start,
+      beforeNavigate: async (page) => {
+        wireRuntimeListeners(page, drafts, () => currentTime);
+        await deadline?.preparePage(page);
+      },
     });
     chromeBrowser = session.browser;
     const page = session.page;
@@ -231,6 +243,10 @@ export async function runBrowserCheck(
     for (const entry of await auditClipDurations(page, analyzeClipMediaFit, options.timeout)) {
       drafts.push({ code: "clip_media_fit", severity: entry.level, message: entry.text, time: 0 });
     }
+    for (const tail of findTweenTails((await page.evaluate(collectTweenRecords)) ?? [])) {
+      const message = tweenTailMessage(tail);
+      drafts.push({ code: "gsap_tween_tail", severity: "warning", message, time: tail.later.end });
+    }
     const driver = createPageDriver(page, (time) => {
       currentTime = time;
     });
@@ -244,9 +260,11 @@ export async function runBrowserCheck(
         failedPaths,
       ).map((draft) => runtimeFinding(draft, rootAnchor)),
     };
+  } catch (error) {
+    failure = { kind: "failed", error };
+    throw error;
   } finally {
-    await chromeBrowser?.close().catch(() => undefined);
-    await server.close();
+    await closeCheckResources(chromeBrowser, server, failure);
   }
 }
 
@@ -260,6 +278,7 @@ export async function captureFindingCrops(
   project: ProjectDir,
   options: CheckOptions,
   requests: CheckFindingCropRequest[],
+  deadline?: CheckDeadline,
 ): Promise<string[]> {
   if (requests.length === 0) return [];
   const { bundleWithLocalizedFonts } = await import("./bundleWithLocalizedFonts.js");
@@ -273,18 +292,23 @@ export async function captureFindingCrops(
   );
   let chromeBrowser: import("puppeteer-core").Browser | undefined;
   const written: string[] = [];
+  let failure: { kind: "none" } | { kind: "failed"; error: unknown } = { kind: "none" };
   try {
     const session = await openSettledCompositionPage(html, server.url, {
       navigationTimeoutMs: options.timeout,
       renderReadyTimeoutMs: options.timeout,
       renderReadyWarningSuffix: "capturing finding crops",
+      signal: deadline?.signal,
+      onBrowser: deadline?.ownBrowser,
+      onBrowserReady: deadline?.start,
+      beforeNavigate: (page) => deadline?.preparePage(page),
       browserGpuMode: options.browserGpuMode ?? resolveCliChromeGpuMode(),
     });
     chromeBrowser = session.browser;
     const page = session.page;
     await waitForPreferredSeekTarget(page);
 
-    const snapshotDir = join(project.dir, "snapshots");
+    const snapshotDir = checkSnapshotDirectory(project.dir);
     mkdirSync(snapshotDir, { recursive: true });
     for (const request of requests) {
       await seekCompositionTimeline(page, request.time, AUDIT_SEEK_OPTIONS);
@@ -295,13 +319,32 @@ export async function captureFindingCrops(
       const region = padCropRegion(request.bbox, canvas, DEFAULT_ZOOM_PADDING_PX);
       const buffer = await captureRegionCrop(page, region, DEFAULT_ZOOM_SCALE);
       writeFileSync(join(snapshotDir, request.filename), buffer);
-      written.push(join("snapshots", request.filename));
+      written.push(join(snapshotDir, request.filename));
     }
     return written;
+  } catch (error) {
+    failure = { kind: "failed", error };
+    throw error;
   } finally {
-    await chromeBrowser?.close().catch(() => undefined);
-    await server.close();
+    await closeCheckResources(chromeBrowser, server, failure);
   }
+}
+
+async function closeCheckResources(
+  browser: Browser | undefined,
+  server: { close(): Promise<void> },
+  failure: { kind: "none" } | { kind: "failed"; error: unknown },
+): Promise<void> {
+  const cleanup = await Promise.allSettled([
+    browser ? closeManagedBrowser(browser) : Promise.resolve(),
+    server.close(),
+  ]);
+  const errors = cleanup
+    .filter((entry) => entry.status === "rejected")
+    .map((entry) => entry.reason);
+  if (errors.length === 0) return;
+  if (failure.kind === "failed") errors.unshift(failure.error);
+  throw new BrowserCleanupError(errors, errors.map(normalizeErrorMessage).join("; "));
 }
 
 // `swapToProxy` / `emitUnavailableDiagnostic` (packages/core/src/runtime/
@@ -522,6 +565,8 @@ function wireNetworkListeners(page: Page, drafts: RuntimeDraft[], currentTime: (
 function createPageDriver(page: Page, setTime: (time: number) => void): CheckAuditDriver {
   return {
     initialize: (contrast) => injectAuditScripts(page, contrast),
+    matchComponents: (components, findings) =>
+      page.evaluate(matchComponentFindings, { components, findings }),
     getDuration: () => getCompositionDuration(page),
     hasNoTimelineDeclaration: () => hasNoTimelineDeclaration(page),
     getTransitionBoundaries: () => collectTweenBoundaries(page),
@@ -1474,4 +1519,35 @@ function urlPath(url: string): string {
   } catch {
     return url;
   }
+}
+
+export function matchComponentFindings({
+  components,
+  findings,
+}: {
+  components: string[];
+  findings: CheckFinding[];
+}): boolean[] {
+  const roots = components.flatMap((selector) => {
+    const matches = [...document.querySelectorAll(selector)];
+    if (!matches.length) throw new Error(`Component selector matched nothing: ${selector}`);
+    return matches;
+  });
+  function matchesSelector(selector: string): boolean | null {
+    try {
+      const elements = [...document.querySelectorAll(selector)];
+      if (!elements.length) return null;
+      return elements.some((el) => roots.some((root) => root.contains(el)));
+    } catch {
+      return null;
+    }
+  }
+  return findings.map((finding) => {
+    if (!finding.selector || finding.selector === "[data-composition-id]") return true;
+    const container = Reflect.get(finding, "containerSelector");
+    return (
+      matchesSelector(finding.selector) !== false ||
+      (typeof container === "string" && matchesSelector(container) !== false)
+    );
+  });
 }

@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/core",
-  "version": "0.8.150",
+  "version": "0.8.154",
   "description": "",
   "repository": {
     "type": "git",
@@ -68,6 +68,12 @@
       "import": "./src/atomicFile.ts",
       "types": "./src/atomicFile.ts"
     },
+    "./project-folders": {
+      "bun": "./src/projectFolders.ts",
+      "node": "./dist/projectFolders.js",
+      "import": "./src/projectFolders.ts",
+      "types": "./src/projectFolders.ts"
+    },
     "./asset-paths": {
       "bun": "./src/compiler/rewriteSubCompPaths.ts",
       "node": "./dist/compiler/rewriteSubCompPaths.js",
@@ -97,6 +103,12 @@
       "node": "./dist/studioPreviewMark.js",
       "import": "./src/studioPreviewMark.ts",
       "types": "./src/studioPreviewMark.ts"
+    },
+    "./keyframe-defaults": {
+      "bun": "./src/keyframeDefaults.ts",
+      "node": "./dist/keyframeDefaults.js",
+      "import": "./src/keyframeDefaults.ts",
+      "types": "./src/keyframeDefaults.ts"
     },
     "./gsap-cdn": {
       "bun": "./src/gsapCdn.ts",
@@ -558,6 +570,10 @@
         "import": "./dist/atomicFile.js",
         "types": "./dist/atomicFile.d.ts"
       },
+      "./project-folders": {
+        "import": "./dist/projectFolders.js",
+        "types": "./dist/projectFolders.d.ts"
+      },
       "./asset-paths": {
         "import": "./dist/compiler/rewriteSubCompPaths.js",
         "types": "./dist/compiler/rewriteSubCompPaths.d.ts"
@@ -577,6 +593,10 @@
       "./studio-preview-mark": {
         "import": "./dist/studioPreviewMark.js",
         "types": "./dist/studioPreviewMark.d.ts"
+      },
+      "./keyframe-defaults": {
+        "import": "./dist/keyframeDefaults.js",
+        "types": "./dist/keyframeDefaults.d.ts"
       },
       "./gsap-cdn": {
         "import": "./dist/gsapCdn.js",

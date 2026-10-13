@@ -927,6 +927,26 @@ describe("runProbeStage — render variable threading", () => {
   });
 });
 
+describe("runProbeStage — capture jpeg quality", () => {
+  // A sequential disk render reuses this session for every frame, so its quality is the render's.
+  for (const [preset, expected] of [
+    ["draft", 80],
+    ["standard", 100],
+    ["high", 100],
+  ] as const) {
+    it(`captures ${preset} renders at jpeg quality ${expected}`, async () => {
+      capturedOptions.length = 0;
+      const { runProbeStage } = await import("./probeStage.js");
+      const input = makeProbeInput({ stageForceScreenshot: false });
+      input.job.config.quality = preset;
+
+      await runProbeStage(input);
+
+      expect(capturedOptions[0]).toMatchObject({ format: "jpeg", quality: expected });
+    });
+  }
+});
+
 describe("runProbeStage — decimal duration frame count", () => {
   it("reproduces all 14 cumulative final-frame indices from the field report", async () => {
     const { runProbeStage } = await import("./probeStage.js");

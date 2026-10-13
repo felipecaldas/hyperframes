@@ -196,6 +196,14 @@ function renderSetupError(error: unknown): unknown {
   return reason ? new Error(reason, { cause: error }) : error;
 }
 
+function tsxLoaderFromCliInstall(): string {
+  try {
+    return import.meta.resolve("tsx");
+  } catch {
+    return "tsx";
+  }
+}
+
 export async function runRenderSetupWorker<T>(
   mode: "browser" | "lint" | "orphan-cleanup",
   input: unknown,
@@ -206,7 +214,8 @@ export async function runRenderSetupWorker<T>(
     sourceMode ? "../renderSetupWorker.ts" : "./renderSetupWorker.js",
     import.meta.url,
   );
-  const execArgv = sourceMode ? ["--import", "tsx"] : [];
+  const execArgv =
+    sourceMode && !process.versions.bun ? ["--import", tsxLoaderFromCliInstall()] : [];
   let result: CancellableProcessResult;
   try {
     result = await runCancellableProcess(

@@ -452,6 +452,29 @@ describe("history routes", () => {
     expect(readFileSync(clip).equals(original)).toBe(true);
   });
 
+  it("validates DOM targets and stores only targets of changed files", async () => {
+    const { projectDir, call } = await demoProject();
+    writeFileSync(join(projectDir, "index.html"), "B");
+    await call("/claim", {
+      label: "Title",
+      paths: ["index.html"],
+      targets: [
+        { file: "index.html", id: "title", selector: ".title", selectorIndex: 0, junk: "ignored" },
+        { file: "../outside.html", id: "outside" },
+        { file: "unchanged.html", id: "other" },
+        { file: "index.html", selector: ".word", selectorIndex: -1 },
+        { file: "index.html" },
+        null,
+        "bad",
+      ],
+    });
+    const { entries } = await (await call("")).json();
+    expect(entries[0].targets).toEqual([
+      { file: "index.html", id: "title", selector: ".title", selectorIndex: 0 },
+      { file: "index.html", selector: ".word" },
+    ]);
+  });
+
   it("end a window given idleMs by itself once its writes stop", async () => {
     const { projectDir, call } = await demoProject();
 
@@ -498,4 +521,22 @@ describe("history routes", () => {
     const call = apiFor(tempDir("hf-history-routes-none-"));
     expect((await call("")).status).toBe(404);
   });
+});
+
+it("checkpoints pending writes without closing an agent window", async () => {
+  const { projectDir, history, call } = await demoProject();
+  const who = { kind: "agent", name: "test-agent" } as const;
+  const window = await history.beginWindow(who, "Edit video");
+  writeFileSync(join(projectDir, "index.html"), "B");
+  const response = await call("/checkpoint", {});
+  expect(response.status).toBe(200);
+  const first = history.list().at(-1)!;
+  expect(first.who).toEqual(who);
+  expect(history.peek(first.id)?.["index.html"]).toBeTruthy();
+  await call("/checkpoint", {});
+  expect(history.list()).toHaveLength(1);
+  writeFileSync(join(projectDir, "index.html"), "C");
+  await window.close();
+  expect(history.list()).toHaveLength(2);
+  expect(history.list().at(-1)?.who).toEqual(who);
 });

@@ -841,7 +841,7 @@
               },
               {
                 "group": "Surfaces",
-                "tag": "25",
+                "tag": "26",
                 "expanded": false,
                 "pages": [
                   {
@@ -867,9 +867,10 @@
                   },
                   {
                     "group": "HTML-in-Canvas",
-                    "tag": "11",
+                    "tag": "12",
                     "expanded": false,
                     "pages": [
+                      "catalog/components/filmed-screen",
                       "catalog/blocks/ios26-liquid-glass",
                       "catalog/blocks/liquid-glass-notification",
                       "catalog/blocks/liquid-glass-widgets",
@@ -959,6 +960,7 @@
               "developers/cli",
               "packages/cli",
               "developers/catalog-search",
+              "developers/harness-tool-context",
               "packages/lint"
             ]
           },
@@ -1008,7 +1010,8 @@
               "reference/html-schema",
               "reference/color-grading",
               "reference/audio-effects",
-              "reference/speed-ramps"
+              "reference/speed-ramps",
+              "reference/lint-rules"
             ]
           },
           {

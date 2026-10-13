@@ -50,7 +50,9 @@ export function createRuntimeStartTimeResolver(params: {
     const byId = doc.getElementById(refId);
     if (byId) return byId;
     return (
-      (doc.querySelector(`[data-composition-id="${CSS.escape(refId)}"]`) as Element | null) ?? null
+      Array.from(doc.querySelectorAll("[data-composition-id]")).find(
+        (element) => element.getAttribute("data-composition-id") === refId,
+      ) ?? null
     );
   };
 

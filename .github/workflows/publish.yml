@@ -153,6 +153,7 @@ jobs:
           publish_pkg "@hyperframes/lint" "@hyperframes/lint"
           publish_pkg "@hyperframes/studio-server" "@hyperframes/studio-server"
           publish_pkg "@hyperframes/core" "@hyperframes/core"
+          publish_pkg "@hyperframes/inspector" "@hyperframes/inspector"
           publish_pkg "@hyperframes/sdk" "@hyperframes/sdk"
           publish_pkg "@hyperframes/engine" "@hyperframes/engine"
           publish_pkg "@hyperframes/player" "@hyperframes/player"

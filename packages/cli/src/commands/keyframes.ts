@@ -2,7 +2,11 @@ import { defineCommand } from "citty";
 import { existsSync, readFileSync } from "node:fs";
 import { readProjectFile } from "@hyperframes/parsers/asset-resolution";
 import { resolve, dirname, basename, join, relative, sep } from "node:path";
-import { parseGsapScript, type GsapAnimation } from "@hyperframes/core/gsap-parser";
+import {
+  parseGsapScript,
+  GSAP_DEFAULT_DURATION,
+  type GsapAnimation,
+} from "@hyperframes/core/gsap-parser";
 import type { Example } from "./_examples.js";
 import { c } from "../ui/colors.js";
 import { ensureDOMParser } from "../utils/dom.js";
@@ -23,7 +27,7 @@ interface KeyframePoint {
   /** Tween-relative percentage (0–100). */
   pct: number;
   /** Absolute timeline time (seconds) = tweenStart + pct/100 * duration. */
-  time: number;
+  time: number | null;
   properties: Record<string, number | string>;
 }
 
@@ -32,11 +36,16 @@ interface SurfacedTween {
   target: string;
   method: string;
   group?: string;
-  start: number;
-  duration: number;
-  end: number;
+  start: number | null;
+  duration: number | null;
+  end: number | null;
   /** "keyframes" (array/object form), "flat" (to/from), or "motionPath". */
   shape: "keyframes" | "flat" | "motionPath";
+  unresolved: string[];
+  keyframeBasis: "authored-stops" | "tween-endpoints";
+  position: number | string;
+  ease?: string;
+  totalDuration: number | null;
   keyframes: KeyframePoint[];
   /** x/y position points (gsap offsets) when this tween animates position. */
   path: Array<{ x: number; y: number }> | null;
@@ -49,8 +58,8 @@ interface SurfacedTween {
 /** One drawn stroke of a multi-stroke trace — a single position tween. */
 interface TraceStroke {
   id: string;
-  start: number;
-  end: number;
+  start: number | null;
+  end: number | null;
   keyframes: KeyframePoint[];
   points: Array<{ x: number; y: number }>;
 }
@@ -132,7 +141,7 @@ function inlineStyleText(html: string): string {
 function num(v: number | string | undefined): number | null {
   if (typeof v === "number") return v;
   if (typeof v === "string") {
-    const n = Number.parseFloat(v);
+    const n = Number(v);
     return Number.isFinite(n) ? n : null;
   }
   return null;
@@ -147,41 +156,13 @@ function isPositionTween(anim: GsapAnimation): boolean {
   );
 }
 
-// The rest-state value for an animated property (what GSAP animates to/from when
-// the other endpoint is the element's natural pose): 1 for scale/opacity, 0 for
-// translate/rotation.
-function baseProps(props: Record<string, number | string>): Record<string, number | string> {
-  const base: Record<string, number | string> = {};
-  for (const k of Object.keys(props)) {
-    if (k === "ease") continue;
-    base[k] = k === "opacity" || k.startsWith("scale") ? 1 : 0;
-  }
-  return base;
-}
-
-// Flat tweens carry no explicit keyframes — synthesize a 0%/100% pair against the
-// element's rest pose so the surfaced keyframes are uniform. `from()` goes
-// fromProperties → base; `to()` goes base → properties.
 function flatKeyframes(anim: GsapAnimation): KeyframePoint[] {
-  if (anim.method === "fromTo") {
-    return [
-      { pct: 0, time: 0, properties: anim.fromProperties ?? {} },
-      { pct: 100, time: 0, properties: anim.properties ?? {} },
-    ];
-  }
-  // to()/from() vars both live in anim.properties; from() plays them in reverse
-  // against the element's rest pose.
   const vars = anim.properties ?? {};
-  const base = baseProps(vars);
-  return anim.method === "from"
-    ? [
-        { pct: 0, time: 0, properties: vars },
-        { pct: 100, time: 0, properties: base },
-      ]
-    : [
-        { pct: 0, time: 0, properties: base },
-        { pct: 100, time: 0, properties: vars },
-      ];
+  if (anim.method === "set") return [{ pct: 100, time: 0, properties: vars }];
+  return [
+    { pct: 0, time: 0, properties: anim.method === "from" ? vars : (anim.fromProperties ?? {}) },
+    { pct: 100, time: 0, properties: anim.method === "from" ? {} : vars },
+  ];
 }
 
 // Studio-internal markers that aren't user motion: the position-hold `set` GSAP
@@ -200,38 +181,149 @@ function cleanProps(props: Record<string, number | string>): Record<string, numb
   return out;
 }
 
-function surfaceTween(anim: GsapAnimation): SurfacedTween {
-  const start =
-    typeof anim.resolvedStart === "number" ? anim.resolvedStart : (num(anim.position) ?? 0);
-  const duration = anim.duration ?? 0;
+function round(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
 
-  let shape: SurfacedTween["shape"];
-  let rawKfs: Array<{ percentage: number; properties: Record<string, number | string> }>;
-  if (anim.keyframes?.keyframes?.length) {
-    shape = "keyframes";
-    rawKfs = anim.keyframes.keyframes;
-  } else if (anim.arcPath?.enabled) {
-    shape = "motionPath";
-    rawKfs = [];
-  } else {
-    shape = "flat";
-    rawKfs = flatKeyframes(anim).map((k) => ({ percentage: k.pct, properties: k.properties }));
+type InspectionTiming = NonNullable<GsapAnimation["inspectionTiming"]>;
+type StaggerTiming = NonNullable<InspectionTiming["stagger"]>;
+type RawKeyframe = { percentage: number; properties: Record<string, number | string> };
+
+function knownRepeatCycle(
+  timing: InspectionTiming,
+): { repeat: number; repeatDelay: number; stagger: StaggerTiming } | null {
+  const { repeat, repeatDelay, stagger } = timing;
+  if (repeat === null || repeat < 0 || repeatDelay === null || stagger === null) return null;
+  return { repeat, repeatDelay, stagger };
+}
+
+function targetCount(html: string, selector: string): number | null {
+  try {
+    return queryIncludingTemplates(html, selector).length;
+  } catch {
+    return null;
   }
+}
 
+function staggerSpread(html: string, selector: string, stagger: StaggerTiming): number | null {
+  const count = targetCount(html, selector);
+  if (!count) return null;
+  if ("amount" in stagger) return count > 1 ? Math.abs(stagger.amount) : 0;
+  return Math.abs(stagger.each) * (count - 1);
+}
+
+function tweenSpan(anim: GsapAnimation, duration: number | null, html: string): number | null {
+  if (duration === null) return null;
+  if (!anim.inspectionTiming) return duration;
+  const cycle = knownRepeatCycle(anim.inspectionTiming);
+  if (!cycle) return null;
+  const spread =
+    anim.extras?.stagger === undefined
+      ? 0
+      : staggerSpread(html, anim.targetSelector, cycle.stagger);
+  if (spread === null) return null;
+  return round((duration + spread) * (cycle.repeat + 1) + cycle.repeatDelay * cycle.repeat);
+}
+
+function tweenStart(anim: GsapAnimation): number | null {
+  if (followsTimelineCursor(anim) && typeof anim.resolvedStart !== "number") return null;
+  const position = typeof anim.resolvedStart === "number" ? anim.resolvedStart : num(anim.position);
+  const delay = anim.inspectionTiming ? anim.inspectionTiming.delay : 0;
+  return position === null || delay === null ? null : position + delay;
+}
+
+function tweenDuration(anim: GsapAnimation): number | null {
+  if (anim.method === "set") return 0;
+  if (anim.durationUnresolved) return null;
+  return anim.duration ?? GSAP_DEFAULT_DURATION;
+}
+
+function syntheticStaggerStops(anim: GsapAnimation): boolean {
+  const stops = anim.keyframes?.keyframes ?? [];
+  return stops.length > 0 && stops.every((stop) => "stagger" in stop.properties);
+}
+
+function tweenShape(anim: GsapAnimation): { shape: SurfacedTween["shape"]; rawKfs: RawKeyframe[] } {
+  if (anim.hasUnresolvedKeyframes) return { shape: "keyframes", rawKfs: [] };
+  if (anim.keyframes?.keyframes?.length && !syntheticStaggerStops(anim))
+    return { shape: "keyframes", rawKfs: anim.keyframes.keyframes };
+  if (anim.arcPath?.enabled) return { shape: "motionPath", rawKfs: [] };
+  return {
+    shape: "flat",
+    rawKfs: flatKeyframes(anim).map((k) => ({ percentage: k.pct, properties: k.properties })),
+  };
+}
+
+function keyframeTime(start: number | null, duration: number | null, pct: number): number | null {
+  if (start === null || duration === null) return null;
+  return round(start + (pct / 100) * duration);
+}
+
+function missesEndpointProperties(anim: GsapAnimation, keyframes: KeyframePoint[]): boolean {
+  if (anim.method === "set") return false;
+  const authored = Object.keys(anim.properties).filter((p) => p !== "ease" && p !== "data");
+  return keyframes.some((k) => authored.some((p) => !(p in k.properties)));
+}
+
+function hasRawExpressions(keyframes: KeyframePoint[]): boolean {
+  return keyframes.some((k) =>
+    Object.values(k.properties).some((v) => typeof v === "string" && v.startsWith("__raw:")),
+  );
+}
+
+function hasNoProperties(anim: GsapAnimation): boolean {
+  return !Object.keys(anim.properties).length && !anim.keyframes;
+}
+
+function unresolvedFields(
+  anim: GsapAnimation,
+  timing: { start: number | null; duration: number | null; totalDuration: number | null },
+  keyframes: KeyframePoint[],
+): string[] {
+  const checks: Array<[string, boolean]> = [
+    ["start", timing.start === null],
+    ["duration", timing.duration === null],
+    ["target", anim.hasUnresolvedSelector === true],
+    ["keyframes", anim.hasUnresolvedKeyframes === true],
+    ["properties", hasNoProperties(anim)],
+    ["totalDuration", timing.totalDuration === null],
+    ["endpointProperties", missesEndpointProperties(anim, keyframes)],
+    ["propertyExpressions", hasRawExpressions(keyframes)],
+  ];
+  return checks.filter(([, isUnresolved]) => isUnresolved).map(([field]) => field);
+}
+
+function keyframeBasis(
+  shape: SurfacedTween["shape"],
+  anim: GsapAnimation,
+): SurfacedTween["keyframeBasis"] {
+  const staggered = anim.keyframes?.keyframes.some((k) => "stagger" in k.properties);
+  return shape === "flat" || staggered ? "tween-endpoints" : "authored-stops";
+}
+
+function surfaceTween(anim: GsapAnimation, html: string): SurfacedTween {
+  const start = tweenStart(anim);
+  const duration = tweenDuration(anim);
+  const totalDuration = tweenSpan(anim, duration, html);
+  const { shape, rawKfs } = tweenShape(anim);
   const keyframes: KeyframePoint[] = rawKfs.map((kf) => ({
     pct: kf.percentage,
-    time: Math.round((start + (kf.percentage / 100) * duration) * 1000) / 1000,
+    time: keyframeTime(start, duration, kf.percentage),
     properties: cleanProps(kf.properties),
   }));
-
   return {
     id: anim.id,
     target: anim.targetSelector,
     method: anim.method,
     group: anim.propertyGroup,
-    start: Math.round(start * 1000) / 1000,
+    start: start === null ? null : round(start),
     duration,
-    end: Math.round((start + duration) * 1000) / 1000,
+    end: start === null || totalDuration === null ? null : round(start + totalDuration),
+    totalDuration,
+    position: anim.position,
+    ease: anim.ease,
+    unresolved: unresolvedFields(anim, { start, duration, totalDuration }, keyframes),
+    keyframeBasis: keyframeBasis(shape, anim),
     shape,
     keyframes,
     path: isPositionTween(anim) ? positionPath(keyframes) : null,
@@ -241,7 +333,11 @@ function surfaceTween(anim: GsapAnimation): SurfacedTween {
 // Carry x/y forward across keyframes that only set one axis, so the path is
 // continuous (GSAP holds the last value for an unspecified property).
 function positionPath(keyframes: KeyframePoint[]): Array<{ x: number; y: number }> | null {
-  if (keyframes.length === 0) return null;
+  if (
+    keyframes.length === 0 ||
+    !keyframes.every((k) => num(k.properties.x) !== null && num(k.properties.y) !== null)
+  )
+    return null;
   let lastX = 0;
   let lastY = 0;
   return keyframes.map((kf) => {
@@ -255,6 +351,24 @@ function positionPath(keyframes: KeyframePoint[]): Array<{ x: number; y: number 
 
 // ── Composition surfacing ────────────────────────────────────────────────────
 
+function followsTimelineCursor(anim: GsapAnimation): boolean {
+  return !anim.global && (anim.implicitPosition === true || typeof anim.position !== "number");
+}
+
+function movesCursorUnpredictably(anim: GsapAnimation, tween: SurfacedTween): boolean {
+  if (anim.global) return false;
+  const delay = anim.inspectionTiming?.delay;
+  const delayUnknown = delay === null || (typeof delay === "number" && delay !== 0);
+  return tween.totalDuration === null || tween.totalDuration !== tween.duration || delayUnknown;
+}
+
+function forgetStart(tween: SurfacedTween): void {
+  tween.start = null;
+  tween.end = null;
+  for (const point of tween.keyframes) point.time = null;
+  if (!tween.unresolved.includes("start")) tween.unresolved.push("start");
+}
+
 export function surfaceComposition(
   html: string,
   label: string,
@@ -267,7 +381,15 @@ export function surfaceComposition(
   } catch {
     animations = [];
   }
-  const tweens = animations.filter((a) => !isHoldMarker(a)).map(surfaceTween);
+  let cursorChanged = false;
+  const tweens = animations
+    .filter((a) => !isHoldMarker(a))
+    .map((anim) => {
+      const tween = surfaceTween(anim, html);
+      if (cursorChanged && followsTimelineCursor(anim)) forgetStart(tween);
+      if (movesCursorUnpredictably(anim, tween)) cursorChanged = true;
+      return tween;
+    });
   attachComposedAncestors(tweens, html);
   return {
     composition: label,
@@ -307,7 +429,7 @@ function parseDeclarations(body: string): string[] {
 function stripRanges(text: string, ranges: Array<{ start: number; end: number }>): string {
   let out = "";
   let cursor = 0;
-  for (const range of [...ranges].sort((a, b) => a.start - b.start)) {
+  for (const range of [...ranges].sort((a, b) => (a.start ?? 0) - (b.start ?? 0))) {
     out += text.slice(cursor, range.start);
     cursor = range.end;
   }
@@ -520,9 +642,11 @@ function summarizeMotion(tweens: SurfacedTween[], sel: string): string {
     }
   }
   const varying = [...ranges.entries()]
-    .filter(([, r]) => r.max - r.min > 0.5)
-    .map(([k, r]) => `${k} ${Math.round(r.min)}..${Math.round(r.max)}`);
-  return varying.length ? varying.join(", ") : "(static)";
+    .filter(([, r]) => r.max - r.min > 1e-6)
+    .map(([k, r]) => `${k} ${round(r.min)}..${round(r.max)}`);
+  return varying.length
+    ? varying.join(", ")
+    : "(no resolved variation; runtime verification required)";
 }
 
 function bumpRange(ranges: Map<string, { min: number; max: number }>, k: string, n: number): void {
@@ -543,35 +667,38 @@ function pathTravels(points: Array<{ x: number; y: number }>): boolean {
   return points.some((p) => Math.abs(p.x - first.x) > 0.5 || Math.abs(p.y - first.y) > 0.5);
 }
 
+function isDrawnStroke(t: SurfacedTween): boolean {
+  if (t.method === "set" || t.start === null || t.end === null) return false;
+  return !!t.path && t.path.length >= 2 && pathTravels(t.path); // in-place tween (e.g. opacity carrying a static y) is not a drawn stroke
+}
+
+function traceOf(target: string, list: SurfacedTween[]): SurfacedTrace {
+  const strokes = [...list]
+    .sort((a, b) => (a.start ?? 0) - (b.start ?? 0))
+    .map((t) => ({
+      id: t.id,
+      start: t.start,
+      end: t.end,
+      keyframes: t.keyframes,
+      points: t.path!,
+    }));
+  return { target, strokes };
+}
+
 // Group an element's DRAWN position strokes (to/from/fromTo/keyframes that carry
 // a path) into one ordered trace. A `set` with x/y is a pen-up jump — excluded
 // (not drawn). Only targets with ≥2 strokes become a composited trace; a single
 // stroke stays on the normal per-tween path so existing output is unchanged.
 function groupTraces(tweens: SurfacedTween[]): SurfacedTrace[] {
   const byTarget = new Map<string, SurfacedTween[]>();
-  for (const t of tweens) {
-    if (t.method === "set") continue;
-    if (!t.path || t.path.length < 2) continue;
-    if (!pathTravels(t.path)) continue; // in-place tween (e.g. opacity carrying a static y) is not a drawn stroke
+  for (const t of tweens.filter(isDrawnStroke)) {
     const list = byTarget.get(t.target);
     if (list) list.push(t);
     else byTarget.set(t.target, [t]);
   }
-  const traces: SurfacedTrace[] = [];
-  for (const [target, list] of byTarget) {
-    if (list.length < 2) continue;
-    const strokes = [...list]
-      .sort((a, b) => a.start - b.start)
-      .map((t) => ({
-        id: t.id,
-        start: t.start,
-        end: t.end,
-        keyframes: t.keyframes,
-        points: t.path!,
-      }));
-    traces.push({ target, strokes });
-  }
-  return traces;
+  return [...byTarget]
+    .filter(([, list]) => list.length >= 2)
+    .map(([target, list]) => traceOf(target, list));
 }
 
 export function collectCompositions(indexPath: string): SurfacedComposition[] {
@@ -607,8 +734,14 @@ function fmtProps(props: Record<string, number | string>): string {
     .join(" ");
 }
 
+function formatSeconds(value: number | null): string {
+  return value === null ? "unresolved" : `${value}s`;
+}
+
 function printTween(t: SurfacedTween): void {
-  const timing = c.dim(`@${t.start}s→${t.end}s (${t.duration}s)`);
+  const timing = c.dim(
+    `@${formatSeconds(t.start)}→${formatSeconds(t.end)} (${formatSeconds(t.duration)})`,
+  );
   const group = t.group ? c.dim(` ${t.group}`) : "";
   console.log(`  ${c.accent(t.target)}${group}  ${c.dim(t.method)}/${t.shape}  ${timing}`);
   if (t.shape === "motionPath") {
@@ -617,6 +750,7 @@ function printTween(t: SurfacedTween): void {
     const kfLine = t.keyframes.map((k) => `${k.pct}% {${fmtProps(k.properties)}}`).join("  ");
     console.log(`    ${c.dim(kfLine)}`);
   }
+  if (t.unresolved.length) console.log(c.dim(`    unresolved: ${t.unresolved.join(", ")}`));
   if (t.composedWith?.length) {
     for (const a of t.composedWith) {
       console.log(c.dim(`    ↑ composed with ${c.accent(a.selector)}${c.dim(": " + a.summary)}`));
@@ -626,8 +760,8 @@ function printTween(t: SurfacedTween): void {
 }
 
 function printTrace(tr: SurfacedTrace): void {
-  const start = Math.min(...tr.strokes.map((s) => s.start));
-  const end = Math.max(...tr.strokes.map((s) => s.end));
+  const start = Math.min(...tr.strokes.flatMap((s) => (s.start === null ? [] : [s.start])));
+  const end = Math.max(...tr.strokes.flatMap((s) => (s.end === null ? [] : [s.end])));
   const n = tr.strokes.length;
   console.log(
     `  ${c.accent(tr.target)}${c.dim(" position")}  ${c.dim("trace")}  ${c.dim(`${n} strokes`)} ${c.dim(`@${start}s→${end}s`)}`,

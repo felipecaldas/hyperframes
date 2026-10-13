@@ -56,6 +56,12 @@
       "types": "./dist/atomicFile.d.ts",
       "environments": ["bun", "node"]
     },
+    "./project-folders": {
+      "source": "./src/projectFolders.ts",
+      "runtime": "./dist/projectFolders.js",
+      "types": "./dist/projectFolders.d.ts",
+      "environments": ["bun", "node"]
+    },
     "./asset-paths": {
       "source": "./src/compiler/rewriteSubCompPaths.ts",
       "runtime": "./dist/compiler/rewriteSubCompPaths.js",
@@ -84,6 +90,12 @@
       "source": "./src/studioPreviewMark.ts",
       "runtime": "./dist/studioPreviewMark.js",
       "types": "./dist/studioPreviewMark.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./keyframe-defaults": {
+      "source": "./src/keyframeDefaults.ts",
+      "runtime": "./dist/keyframeDefaults.js",
+      "types": "./dist/keyframeDefaults.d.ts",
       "environments": ["browser", "bun", "node"]
     },
     "./gsap-cdn": {

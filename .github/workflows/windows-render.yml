@@ -44,6 +44,9 @@ jobs:
     name: Detect changes
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    permissions:
+      actions: read
+      contents: read
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
@@ -53,6 +56,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+      - name: Check whether this commit already passed before a title or body edit
+        id: edit
+        uses: ./.github/actions/edit-already-passed
       # HEAD is the PR merge ref; its first parent is the current base tip, unlike the payload's
       # base.sha, which goes stale and would count the base's newer commits as the PR's changes.
       - name: Find the pull request's current base
@@ -64,6 +70,7 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         id: filter
+        if: steps.edit.outputs.passed != 'true'
         with:
           token: ""
           base: ${{ steps.base.outputs.sha }}
@@ -486,6 +493,11 @@ jobs:
         run: |
           bun run --filter '@hyperframes/{parsers,lint,studio-server}' build
           bun run --cwd packages/core build
+
+      - name: Prepare browser for process tests
+        if: matrix.lane == 'engine-cli'
+        shell: pwsh
+        run: node --import tsx packages/cli/scripts/prepare-process-test-browser.mjs
 
       - name: Run Studio shard ${{ matrix.studio_shard }}
         if: matrix.studio_shard

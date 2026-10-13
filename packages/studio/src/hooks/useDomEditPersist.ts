@@ -22,12 +22,8 @@ import { reseekPreviewRuntime } from "./timelineTrackVisibility";
 import { serializeStudioFileMutations } from "../utils/studioFileMutationCoordinator";
 import { readProjectFileContent } from "../utils/studioFileHistory";
 
-export interface RecordEditInput {
-  label: string;
-  coalesceKey?: string;
-  coalesceMs?: number;
-  files: Record<string, { before: string; after: string }>;
-}
+import type { RecordEditInput } from "../utils/studioFileHistory";
+export type { RecordEditInput } from "../utils/studioFileHistory";
 
 export interface UseDomEditPersistParams {
   activeCompPath: string | null;
@@ -164,6 +160,17 @@ export function useDomEditPersist({
 
         await editHistory.recordEdit({
           ...history,
+          targets: [
+            {
+              file: targetPath,
+              ...(selection.id && { id: selection.id }),
+              ...(selection.hfId && { hfId: selection.hfId }),
+              ...(selection.selector && { selector: selection.selector }),
+              ...(selection.selectorIndex !== undefined && {
+                selectorIndex: selection.selectorIndex,
+              }),
+            },
+          ],
           files: { [targetPath]: { before: originalContent, after: finalContent } },
         });
         return { patchData, patchedContent, finalContent };

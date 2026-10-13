@@ -79,7 +79,7 @@ const UNRESOLVED_TARGET = "__unresolved__";
 function targetHasNoStableIdentity(selector: string, identity?: string): boolean {
   if (identity) return false;
   return (
-    selector === UNRESOLVED_TARGET || selector === "dwell/hold" || selector.startsWith("proxy → ")
+    selector === UNRESOLVED_TARGET || selector === "dwell/hold" || selector.startsWith("proxy ")
   );
 }
 

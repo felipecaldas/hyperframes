@@ -1,6 +1,6 @@
 // fallow-ignore-file code-duplication
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -1206,6 +1206,32 @@ describe("renderLocal browser GPU config", () => {
 
     vi.advanceTimersByTime(100);
     expect(consumeCommandResult().exitCode).toBe(0);
+  });
+
+  it("still completes the render when the output registry cannot be written", async () => {
+    const project = mkdtempSync(join(tmpdir(), "hf-render-unrecorded-"));
+    mkdirSync(join(project, ".hyperframes"));
+    writeFileSync(join(project, ".hyperframes", "render-outputs.json"), "{");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await renderLocal(project, join(project, "out.mp4"), {
+        fps: { num: 30, den: 1 },
+        quality: "standard",
+        format: "mp4",
+        gpu: false,
+        browserGpuMode: "hardware",
+        hdrMode: "auto",
+        quiet: true,
+      });
+      expect(
+        warn.mock.calls.some((call) =>
+          String(call[0]).includes("Render output was not registered"),
+        ),
+      ).toBe(true);
+    } finally {
+      warn.mockRestore();
+      rmSync(project, { recursive: true, force: true });
+    }
   });
 });
 

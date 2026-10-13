@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { defineCommand } from "citty";
 import {
   EXTRACT_CACHE_MIN_AGE_MS,
@@ -26,7 +26,7 @@ import { withMeta } from "../utils/updateCheck.js";
 export const examples: Example[] = [
   ["See what HyperFrames left on disk, remove nothing", "hyperframes clean --dry-run"],
   ["Remove it", "hyperframes clean"],
-  ["Also remove snapshot folders", "hyperframes clean --snapshots"],
+  ["Also remove snapshots and saved check reports", "hyperframes clean --snapshots"],
   ["For agents", "hyperframes clean --json"],
 ];
 
@@ -128,16 +128,35 @@ function sweepProxies(sweep: Sweep, project: string): void {
   });
 }
 
+const SNAPSHOT_FOLDERS = [
+  { what: "Snapshots", path: ["snapshots"] },
+  { what: "Snapshots", path: [".hyperframes", "artifacts", "snapshots"] },
+  { what: "Check reports", path: [".hyperframes", "artifacts", "checks"] },
+];
+
+function staysUnderArtifacts(project: string, path: string, folder: readonly string[]): boolean {
+  try {
+    const allowed = join(realpathSync(project), ...folder);
+    const target = realpathSync(path);
+    const fromAllowed = relative(allowed, target);
+    return fromAllowed === "" || (!fromAllowed.startsWith("..") && !isAbsolute(fromAllowed));
+  } catch {
+    return false;
+  }
+}
+
 function sweepSnapshots(sweep: Sweep, project: string, remove: boolean): void {
-  const snapshots = join(project, "snapshots");
-  if (!existsSync(snapshots)) return;
-  if (remove) drop(sweep, "Snapshots", snapshots);
-  else
-    sweep.result.alsoReclaimable.push({
-      what: "Snapshots",
-      path: snapshots,
-      bytes: directorySizeBytes(snapshots),
-    });
+  for (const folder of SNAPSHOT_FOLDERS) {
+    const path = join(project, ...folder.path);
+    if (!existsSync(path) || !staysUnderArtifacts(project, path, folder.path)) continue;
+    if (remove) drop(sweep, folder.what, path);
+    else
+      sweep.result.alsoReclaimable.push({
+        what: folder.what,
+        path,
+        bytes: directorySizeBytes(path),
+      });
+  }
 }
 
 async function sweepHistories(sweep: Sweep, historyRoot: string, tempDir: string): Promise<void> {
@@ -233,7 +252,11 @@ export default defineCommand({
       description: "List what would be removed, remove nothing",
       default: false,
     },
-    snapshots: { type: "boolean", description: "Also remove snapshots/ folders", default: false },
+    snapshots: {
+      type: "boolean",
+      description: "Also remove snapshots/ and .hyperframes/artifacts/{snapshots,checks}/ folders",
+      default: false,
+    },
     json: { type: "boolean", description: "Output as JSON", default: false },
   },
   async run({ args }) {

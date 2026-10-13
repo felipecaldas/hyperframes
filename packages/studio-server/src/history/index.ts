@@ -26,7 +26,24 @@ export {
 export {
   START as HISTORY_START,
   type HistoryEntry,
+  type HistoryTarget,
   type HistoryEntrySide,
   type HistoryFileChange,
   type HistoryWho,
 } from "./historyLog.js";
+
+export {
+  beginArtifactCapture,
+  forgetRecordedArtifacts,
+  recordArtifact,
+  recordArtifacts,
+  artifactDirectory,
+  type ArtifactCapture,
+  type ArtifactInput,
+  type ArtifactRecord,
+  type VideoState,
+  recordRenderSuccess,
+  type RenderRecord,
+} from "./videoState.js";
+
+export { registerRenderOutput } from "../helpers/renderOutputs.js";

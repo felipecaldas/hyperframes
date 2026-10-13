@@ -438,6 +438,21 @@ describe("documentRef", () => {
     expect(resolver.resolveStartForElement(outro)).toBe(6);
   });
 
+  it("resolves a composition reference without the browser CSS namespace", () => {
+    const doc = document.implementation.createHTMLDocument("t");
+    doc.body.innerHTML =
+      '<div data-composition-id="intro" data-start="1" data-duration="4"></div>' +
+      '<div id="outro" data-start="intro + 2"></div>';
+    const css = globalThis.CSS;
+    Reflect.deleteProperty(globalThis, "CSS");
+    try {
+      const resolver = createRuntimeStartTimeResolver({ documentRef: doc });
+      expect(resolver.resolveStartForElement(doc.getElementById("outro")!)).toBe(7);
+    } finally {
+      globalThis.CSS = css;
+    }
+  });
+
   it("defaults to the global document when documentRef is omitted", () => {
     const el = document.createElement("div");
     el.id = "ref-a";

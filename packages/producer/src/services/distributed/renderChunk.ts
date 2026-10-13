@@ -69,6 +69,7 @@ import { applyRenderWarningPolicy } from "../renderOrchestrator.js";
 import { runEncodeStage } from "../render/stages/encodeStage.js";
 import { runCaptureStage } from "../render/stages/captureStage.js";
 import { resolveVideoCaptureBeyondViewport } from "../render/captureBeyondViewport.js";
+import { resolveCaptureJpegQuality } from "../render/captureImageFormat.js";
 import { createCapturePlan } from "../render/capturePlan.js";
 import {
   type ChunkSliceJson,
@@ -819,7 +820,10 @@ export async function renderChunk(
       height: plan.dimensions.height,
       fps: { num: plan.dimensions.fpsNum, den: plan.dimensions.fpsDen },
       format: plan.dimensions.format === "mp4" ? "jpeg" : "png",
-      quality: plan.dimensions.format === "mp4" ? 80 : undefined,
+      quality:
+        plan.dimensions.format === "mp4"
+          ? resolveCaptureJpegQuality(job.config.quality)
+          : undefined,
       deviceScaleFactor: encoder.deviceScaleFactor,
       // Re-inject the controller's snapshotted variables so the chunk's
       // first capture sees the same `window.__hfVariables` the in-process

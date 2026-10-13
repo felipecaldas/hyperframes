@@ -11,6 +11,38 @@ import {
 } from "./compositionScoping";
 
 describe("composition scoping", () => {
+  it("reports the child source before authored code and finishes after a thrown script", () => {
+    const { document } = parseHTML('<main data-composition-id="scene"></main>');
+    const events: string[] = [];
+    const fakeWindow = {
+      document,
+      __timelines: {},
+      events,
+      __hfScriptState: (phase: string, source: string) => events.push(`${phase}:${source}`),
+    };
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const wrapped = wrapScopedCompositionScript(
+        'window.events.push("body"); throw new Error("authored failure");',
+        "scene",
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        "compositions/scene.html",
+      );
+      new Function("window", wrapped)(fakeWindow);
+      expect(events).toEqual([
+        "start:compositions/scene.html",
+        "body",
+        "finish:compositions/scene.html",
+      ]);
+      expect(error).toHaveBeenCalledOnce();
+    } finally {
+      error.mockRestore();
+    }
+  });
+
   it("scopes regular selectors while preserving global at-rules", () => {
     const scoped = scopeCssToComposition(
       `

@@ -482,3 +482,52 @@ describe("re-rendering leaves the rest as the seek left it", () => {
     expect(timeline.duration()).toBe(20);
   });
 });
+
+describe("gsap adapter just after a tween's start", () => {
+  // Starts 0.5 ms before a frame, so the redraw's step down to 1 ms below that frame crosses its start.
+  it("keeps a fromTo's from-only opacity on every frame of a sweep that a later set hides", () => {
+    const bar = document.body.appendChild(document.createElement("div"));
+    bar.style.opacity = "0";
+    const timeline = gsap.timeline({ paused: true });
+    timeline.fromTo(
+      bar,
+      { x: 1920, opacity: 1 },
+      { x: -320, duration: 0.34, ease: "power2.inOut", immediateRender: false },
+      0.4995,
+    );
+    timeline.set(bar, { opacity: 0 }, 0.85);
+    timeline.set({}, {}, 2);
+    const adapter = createGsapAdapter({
+      getTimeline: () => timeline as unknown as RuntimeTimelineLike,
+    });
+    const shown: string[] = [];
+    for (let frame = 0; frame <= 60; frame++) {
+      adapter.seek({ time: frame / 30 });
+      if (frame / 30 > 0.49 && frame / 30 < 0.84) shown.push(bar.style.opacity);
+    }
+    expect(new Set(shown)).toEqual(new Set(["1"]));
+    expect(bar.style.opacity).toBe("0");
+  });
+
+  // A slow drift with a short move on the same property inside it: the drift resumes after the move, as in playback.
+  it("renders overlapping tweens on one property as playback does", () => {
+    const film = () => {
+      const box = { y: 0 };
+      const timeline = gsap.timeline({ paused: true });
+      timeline.to(box, { y: 100, duration: 4, ease: "none" }, 0);
+      timeline.to(box, { y: 300, duration: 0.5, ease: "none" }, 1);
+      timeline.set({}, {}, 5);
+      return { box, timeline };
+    };
+    const played = film();
+    const seeked = film();
+    const adapter = createGsapAdapter({
+      getTimeline: () => seeked.timeline as unknown as RuntimeTimelineLike,
+    });
+    for (let frame = 0; frame <= 150; frame++) {
+      played.timeline.totalTime(frame / 30);
+      adapter.seek({ time: frame / 30 });
+      expect(seeked.box.y, `frame ${frame}`).toBeCloseTo(played.box.y, 6);
+    }
+  });
+});

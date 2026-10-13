@@ -65,6 +65,10 @@ jobs:
     name: Detect changes
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
     outputs:
       code: ${{ (github.event_name == 'workflow_dispatch' && inputs.catalog_publish) && 'true' || steps.filter.outputs.code }}
       docs_catalog: ${{ steps.filter.outputs.docs_catalog }}
@@ -83,6 +87,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+      - name: Check whether this commit already passed before a title or body edit
+        id: edit
+        uses: ./.github/actions/edit-already-passed
       - name: Reject accidental file deletions
         if: github.event_name == 'pull_request'
         run: node scripts/check-no-main-deletions.mjs --base origin/main
@@ -102,6 +109,7 @@ jobs:
         run: sh scripts/check-large-files.sh --range "$BASE_SHA" HEAD
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         id: filter
+        if: steps.edit.outputs.passed != 'true'
         with:
           token: ""
           base: ${{ steps.base.outputs.sha }}
@@ -380,6 +388,11 @@ jobs:
           node-version: 22
       - uses: ./.github/actions/prepare-ffmpeg-bin
       - run: bash scripts/ci/install-workspace-dependencies.sh
+      - name: Build generated inspector inputs
+        run: |
+          bun run --filter '@hyperframes/{parsers,lint}' build
+          bun run build:hyperframes-runtime
+          bun run --filter @hyperframes/inspector build
       - name: Run fallow audit
         id: audit
         # `bun install` above made `bunx fallow` resolve from node_modules, so
@@ -469,7 +482,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -541,7 +554,7 @@ jobs:
       - run: bun run test:scripts
         env:
           HYPERFRAMES_BROWSER_PATH: ${{ steps.catalog-chrome.outputs.chrome-path }}
-      - run: bun run --filter '@hyperframes/{lint,parsers,studio-server,sdk,player,aws-lambda,gcp-cloud-run,sdk-playground,shader-transitions}' test
+      - run: bun run --filter '@hyperframes/{lint,parsers,studio-server,sdk,player,aws-lambda,gcp-cloud-run,sdk-playground,shader-transitions,inspector}' test
 
   test:
     name: Test

@@ -9,6 +9,12 @@
     "packages/aws-lambda/src/**/*.test.ts",
     "packages/gcp-cloud-run/src/**/*.test.ts",
     "packages/gcp-cloud-run/terraform/*.test.ts",
+    // Inspector is a private Bun service with CLI-driven browser contract
+    // scripts; its runtime module is bundled by file path into the page.
+    "packages/inspector/src/{service,server,mcp}.ts",
+    "packages/inspector/src/liveRuntime.ts",
+    "packages/inspector/tests/*.ts",
+    "packages/core/src/runtime/inspection.ts",
     "packages/producer/src/regression-harness.ts",
     "packages/producer/src/regression-harness-distributed.test.ts",
     "packages/producer/src/regression-harness-lambda-local.ts",
@@ -120,6 +126,12 @@
     "packages/cli/bin/**",
   ],
   "ignoreExports": [
+    // Browser helper public API, paired with elementMap.d.ts and consumed by
+    // external harnesses rather than another workspace package.
+    {
+      "file": "packages/inspector/src/elementMap.js",
+      "exports": ["createElementMap"],
+    },
     // Public player-state types are consumed by package users outside this
     // workspace. Keep the barrel stable even when no in-repo import needs it.
     {
@@ -454,6 +466,8 @@
     "@hyperframes/core",
     "@hyperframes/studio",
     "@hyperframes/producer",
+    // Inspector's published declarations import it through the core sources they bundle.
+    "@hyperframes/parsers",
     "@fontsource/archivo-black",
     "@fontsource/eb-garamond",
     "@fontsource/ibm-plex-mono",
@@ -765,6 +779,13 @@
       "packages/studio/src/components/editor/propertyPanelFlatTextSection.test.tsx",
       "packages/studio/src/components/editor/propertyPanelFlatToggle.test.tsx",
       "packages/studio/src/components/editor/propertyPanelFxSection.test.tsx",
+      // Inspector browser contracts intentionally repeat setup at the script
+      // boundary, while htmlBundler keeps parallel module/classic-script paths.
+      "packages/inspector/tests/browser.ts",
+      "packages/inspector/tests/film.ts",
+      "packages/inspector/tests/timeline.ts",
+      "packages/inspector/tests/timelineCompositions.ts",
+      "packages/core/src/compiler/htmlBundler.ts",
     ],
   },
   "health": {
@@ -1042,6 +1063,26 @@
       // via a small writePayload helper instead of dropping the payload, but at
       // the same branch count — its flagged 14-branch CRAP score predates this PR.
       "scripts/generate-catalog-payloads.ts",
+      // The inspector service and injected runtime are orchestration boundaries:
+      // protocol validation, browser lifecycle, and source mapping are kept
+      // together so cleanup and generation checks remain auditable.
+      "packages/inspector/src/service.ts",
+      "packages/inspector/src/sources.ts",
+      "packages/inspector/src/server.ts",
+      "packages/core/src/runtime/inspection.ts",
+      "packages/inspector/tests/film.ts",
+      "packages/inspector/src/mapInspection.ts",
+      "packages/inspector/src/live.ts",
+      "packages/inspector/src/elementMap.js",
+      "packages/inspector/src/sourceDependencies.ts",
+      "packages/core/src/runtime/timelineInspection.ts",
+      "packages/cli/src/commands/timeline.ts",
+      // Protocol validators and deterministic report formatters enumerate wire
+      // variants explicitly; splitting those branches would scatter one contract.
+      "packages/inspector/src/requests.ts",
+      "packages/inspector/src/timelineReport.ts",
+      "packages/inspector/src/pageQueries.ts",
+      "packages/core/src/runtime/timelineValues.ts",
     ],
   },
 }

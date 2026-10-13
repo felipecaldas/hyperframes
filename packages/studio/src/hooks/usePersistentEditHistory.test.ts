@@ -700,3 +700,23 @@ it("an undo taken before the view caught up with the edit still reports the prev
     files: { "index.html": { previous: "B", restored: "A" } },
   });
 });
+
+it("stores DOM targets in existing history and retains them through undo and redo", async () => {
+  const { hook, save, readFile, history } = await studio();
+  save("B");
+  const targets = [{ file: "index.html", id: "title", selector: ".title", selectorIndex: 1 }];
+  await act(() =>
+    hook().recordEdit({
+      label: "Title",
+      targets,
+      files: { "index.html": { before: "A", after: "B" } },
+    }),
+  );
+  expect(history.list().at(-1)?.targets).toEqual(targets);
+  await vi.waitFor(() => expect(hook().canUndo).toBe(true));
+  await act(() => hook().undo({ readFile }));
+  expect(history.list().at(-1)?.targets).toEqual(targets);
+  await vi.waitFor(() => expect(hook().canRedo).toBe(true));
+  await act(() => hook().redo({ readFile }));
+  expect(history.list().at(-1)?.targets).toEqual(targets);
+});

@@ -25,6 +25,10 @@ if (process.platform === "win32") {
 export default defineConfig({
   resolve: {
     alias: [
+      {
+        find: /^@hyperframes\/studio-server\/history$/,
+        replacement: resolve(__dirname, "../studio-server/src/history/index.ts"),
+      },
       // Resolve the bare @hyperframes/core entry to TypeScript source, not built
       // dist. The published dist intentionally omits runtime/entry.ts, so the
       // dist build of loadHyperframeRuntimeSource() returns null — which makes

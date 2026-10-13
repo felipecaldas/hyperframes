@@ -178,6 +178,19 @@ export function useDomEditCommits({
                   coalesceKey: options.coalesceKey,
                   coalesceMs: options.coalesceMs,
                   files,
+                  targets: batches
+                    .filter((batch) => Object.hasOwn(files, batch.sourceFile))
+                    .flatMap((batch) =>
+                      batch.patches.map(({ target }) => ({
+                        file: batch.sourceFile,
+                        ...(target.id && { id: target.id }),
+                        ...(target.hfId && { hfId: target.hfId }),
+                        ...(target.selector && { selector: target.selector }),
+                        ...(target.selectorIndex !== undefined && {
+                          selectorIndex: target.selectorIndex,
+                        }),
+                      })),
+                    ),
                 });
               }
               return {

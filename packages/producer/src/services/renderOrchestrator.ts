@@ -211,7 +211,10 @@ import { runCaptureHdrStage } from "./render/stages/captureHdrStage.js";
 import { runEncodeStage } from "./render/stages/encodeStage.js";
 import { runAssembleStage } from "./render/stages/assembleStage.js";
 import { shouldUseLayeredComposite } from "./hdrCompositor.js";
-import { resolveCaptureImageFormat } from "./render/captureImageFormat.js";
+import {
+  resolveCaptureImageFormat,
+  resolveCaptureJpegQuality,
+} from "./render/captureImageFormat.js";
 import { assertMotionBlurSupported } from "./render/motionBlurRoute.js";
 
 export function sampleDirectoryBytes(dir: string): number {
@@ -3471,7 +3474,8 @@ async function executeRenderPipeline(input: {
       height,
       fps: job.config.fps,
       format: captureImageFormat,
-      quality: captureImageFormat === "png" ? undefined : job.config.quality === "draft" ? 80 : 95,
+      quality:
+        captureImageFormat === "png" ? undefined : resolveCaptureJpegQuality(job.config.quality),
       variables: job.config.variables,
       deviceScaleFactor,
       motionBlur: job.config.motionBlur,
@@ -4438,6 +4442,7 @@ async function executeRenderPipeline(input: {
           outputWidth: captureCompositionWidth ?? width,
           outputHeight: captureCompositionHeight ?? height,
           motionBlur: job.config.motionBlur ? JSON.stringify(job.config.motionBlur) : "",
+          captureQuality: captureOptions.quality,
         });
         const segmentDir = segmentDirFor(join(projectDir, "renders"), segmentPlanHash);
         let completedSegments: ReadonlySet<number> = new Set<number>();

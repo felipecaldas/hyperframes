@@ -7,7 +7,7 @@ import {
   type HistoryWindow,
   type ProjectHistory,
 } from "../history/projectHistory.js";
-import type { HistoryWho } from "../history/historyLog.js";
+import type { HistoryWho, HistoryTarget } from "../history/historyLog.js";
 
 const YOU: HistoryWho = { kind: "person", name: "You" };
 
@@ -53,6 +53,36 @@ function versionsOf(value: unknown): Record<string, string> | undefined {
   return pairs.length ? Object.fromEntries(pairs) : undefined;
 }
 
+function targetsOf(value: unknown): HistoryTarget[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const targets = value.flatMap((item) => targetOf(item) ?? []);
+  return targets.length ? targets : undefined;
+}
+
+function targetOf(item: unknown): HistoryTarget | null {
+  if (!item || typeof item !== "object") return null;
+  const fields = item as Record<string, unknown>;
+  if (typeof fields.file !== "string") return null;
+  const target: HistoryTarget = { file: fields.file, ...identityOf(fields) };
+  if (!target.id && !target.hfId && !target.selector) return null;
+  if (isSelectorIndex(fields.selectorIndex)) target.selectorIndex = fields.selectorIndex;
+  return target;
+}
+
+function identityOf(
+  fields: Record<string, unknown>,
+): Pick<HistoryTarget, "id" | "hfId" | "selector"> {
+  const identity: Pick<HistoryTarget, "id" | "hfId" | "selector"> = {};
+  for (const key of ["id", "hfId", "selector"] as const) {
+    const field = fields[key];
+    if (typeof field === "string" && field) identity[key] = field;
+  }
+  return identity;
+}
+
+const isSelectorIndex = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
 /** What Cmd+Z or Cmd+Shift+Z would revert next, so Studio can name it on its buttons. */
 function nextStep(history: ProjectHistory, direction: "back" | "forward") {
   const target = history.next(direction, YOU);
@@ -86,6 +116,12 @@ export function registerHistoryRoutes(api: Hono, adapter: StudioApiAdapter): voi
     withHistory(adapter, c, (history) => {
       const entries = history.list();
       return { entries, back: nextStep(history, "back"), forward: nextStep(history, "forward") };
+    }),
+  );
+  api.post(`${base}/checkpoint`, (c) =>
+    withHistory(adapter, c, async (history) => {
+      await history.checkpoint();
+      return { ok: true };
     }),
   );
   api.post(`${base}/step`, (c) =>
@@ -128,9 +164,11 @@ export function registerHistoryRoutes(api: Hono, adapter: StudioApiAdapter): voi
       const paths = Array.isArray(body.paths) ? body.paths.filter((path) => text(path)) : [];
       const coalesceKey = text(body.coalesceKey) ?? undefined;
       const overwrote = versionsOf(body.overwrote);
+      const targets = targetsOf(body.targets);
       const claimed = await history.claim(YOU, text(body.label) ?? "Edited in Studio", paths, {
         ...(coalesceKey && { coalesceKey, idleMs: idleOf(body) ?? Infinity }),
         ...(overwrote && { overwrote }),
+        ...(targets && { targets }),
       });
       return { claimed };
     }),
@@ -141,7 +179,10 @@ export function registerHistoryRoutes(api: Hono, adapter: StudioApiAdapter): voi
       const window = await history.beginWindow(
         whoOf(body),
         text(body.label) ?? "Edited in Studio",
-        idleMs ? { idleMs } : undefined,
+        {
+          ...(idleMs ? { idleMs } : {}),
+          ...(body.exclusive === true && { exclusive: true }),
+        },
       );
       windows.set(window.id, { history, window });
       // The window's id is its last entry's id, unless nothing was left after its last part.

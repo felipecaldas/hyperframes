@@ -1,10 +1,14 @@
+import type { HistoryTarget } from "@hyperframes/studio-server";
 import { buildProjectApiPath } from "./projectRouting";
 import type { MutableRefObject } from "react";
 import { serializeStudioFileMutations } from "./studioFileMutationCoordinator";
 import { createStudioSaveHttpError } from "./studioSaveDiagnostics";
 import { studioApiFetch } from "./studioApiFetch";
 
+export type EditContextTarget = HistoryTarget;
+
 export interface RecordEditInput {
+  targets?: EditContextTarget[];
   label: string;
   coalesceKey?: string;
   coalesceMs?: number;

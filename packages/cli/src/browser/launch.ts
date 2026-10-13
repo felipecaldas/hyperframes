@@ -4,9 +4,13 @@ import {
   type BrowserGpuMode,
   type ResolvedBrowserGpuMode,
 } from "./gpuPolicy.js";
+import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { requestCliExit } from "../utils/commandResult.js";
 
+export class BrowserCleanupError extends AggregateError {}
+
 const browsers = new Set<Browser>();
+const closing = new WeakMap<Browser, Promise<void>>();
 const pending = new Map<Promise<Browser>, AbortController>();
 const CLOSE_GRACE_MS = 1_000;
 let listening = false;
@@ -36,9 +40,22 @@ function ownSignals(): void {
 export async function resolveManagedGpuMode(
   requestedMode: BrowserGpuMode,
   chromePath?: string,
+  context: { signal?: AbortSignal; onBrowser?: (browser: Browser) => void } = {},
 ): Promise<ResolvedBrowserGpuMode> {
   ownSignals();
-  return resolveCaptureBrowserGpuMode(requestedMode, chromePath);
+  return resolveCaptureBrowserGpuMode(requestedMode, chromePath, {
+    launch: async (puppeteer, options) => {
+      context.signal?.throwIfAborted();
+      const browser = await launchManagedBrowser(puppeteer, { ...options, signal: context.signal });
+      try {
+        context.onBrowser?.(browser);
+      } catch (error) {
+        return rethrowAfterBrowserCleanup(browser, error);
+      }
+      return browser;
+    },
+    close: closeManagedBrowser,
+  });
 }
 
 /** One owner for every CLI browser, including a launch cancelled before its connection is ready. */
@@ -73,7 +90,33 @@ export async function launchManagedBrowser(
 async function closeManagedBrowsers(): Promise<void> {
   for (const abort of pending.values()) abort.abort();
   await Promise.allSettled(pending.keys());
-  await Promise.all([...browsers].map(closeBrowser));
+  await Promise.all([...browsers].map(closeManagedBrowser));
+}
+
+/** Manual teardown and signal teardown share the same bounded close, exactly once. */
+export function closeManagedBrowser(browser: Browser): Promise<void> {
+  const existing = closing.get(browser);
+  if (existing) return existing;
+  const close = closeBrowser(browser);
+  closing.set(browser, close);
+  return close;
+}
+
+export async function rethrowAfterBrowserCleanup(
+  browser: Browser | undefined,
+  error: unknown,
+): Promise<never> {
+  if (browser) {
+    try {
+      await closeManagedBrowser(browser);
+    } catch (cleanupError) {
+      throw new BrowserCleanupError(
+        [error, cleanupError],
+        `${normalizeErrorMessage(error)}; browser cleanup failed: ${normalizeErrorMessage(cleanupError)}`,
+      );
+    }
+  }
+  throw error;
 }
 
 async function closeBrowser(browser: Browser): Promise<void> {
@@ -91,7 +134,14 @@ async function closeBrowser(browser: Browser): Promise<void> {
       grace,
     ]);
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-    await exited;
+    clearTimeout(timer);
+    const exitLimit = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error("Browser process did not exit after forced shutdown.")),
+        CLOSE_GRACE_MS,
+      );
+    });
+    await Promise.race([exited, exitLimit]);
   } finally {
     clearTimeout(timer);
   }

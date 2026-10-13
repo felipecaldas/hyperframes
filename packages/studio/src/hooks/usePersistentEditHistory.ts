@@ -240,13 +240,14 @@ export function usePersistentEditHistory({ projectId }: UsePersistentEditHistory
   }, [own]);
 
   const recordEdit = useCallback(
-    async ({ label, coalesceKey, coalesceMs, files, created = [] }: RecordEditInput) => {
+    async ({ label, coalesceKey, coalesceMs, files, targets, created = [] }: RecordEditInput) => {
       if (!projectId) return;
       const paths = [...Object.keys(files), ...created];
       own.overtake();
       const reply = await post(historyUrl(projectId, "/claim"), {
         label,
         paths,
+        ...(targets?.length && { targets }),
         overwrote: await overwroteVersions(files),
         ...(coalesceKey && {
           coalesceKey: claimKey(coalesceKey),

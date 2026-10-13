@@ -32,7 +32,7 @@ function ownerOf(file: string): number | null {
 
 /** Takes `file` if nobody holds it: written aside and linked in, so a reader never sees it without its pid. */
 function claim(file: string): boolean {
-  const draft = `${file}-${randomUUID()}.tmp`;
+  const draft = `${file}-${process.pid}-${randomUUID()}.tmp`;
   writeFileSync(draft, String(process.pid));
   try {
     linkSync(draft, file);

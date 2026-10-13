@@ -57,6 +57,26 @@ test("optedOut respects DO_NOT_TRACK / HYPERFRAMES_NO_TELEMETRY / CI", () => {
   }
 });
 
+test("optedOut honors telemetryEnabled: false from the shared config", () => {
+  const savedEnv = { ...process.env };
+  const { root, home } = sandbox();
+  try {
+    withoutTelemetryOptOut();
+    const configPath = join(home, ".hyperframes", "config.json");
+    assert.equal(optedOut(), false, "no config: tracking allowed");
+    mkdirSync(join(home, ".hyperframes"), { recursive: true });
+    writeFileSync(configPath, JSON.stringify({ telemetryEnabled: false }));
+    assert.equal(optedOut(), true, "telemetryEnabled: false opts out");
+    writeFileSync(configPath, JSON.stringify({ telemetryEnabled: true }));
+    assert.equal(optedOut(), false, "telemetryEnabled: true allows tracking");
+    writeFileSync(configPath, "{not json");
+    assert.equal(optedOut(), false, "unreadable config: tracking allowed");
+  } finally {
+    restoreEnv(savedEnv);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("track is a no-op (no network, resolves) when opted out", async () => {
   const savedEnv = { ...process.env };
   const originalFetch = globalThis.fetch;

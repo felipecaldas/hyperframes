@@ -571,12 +571,16 @@ export function wrapScopedCompositionScript(
   var __hfBaseHyperframes = window.__hyperframes;
   var __hfScopedHyperframes = ${SCOPED_HYPERFRAMES_EXPRESSION};
   var __hfRun = function() {
+    var report = window.__hfScriptState;
+    if (typeof report === "function") report("start", __hfCompositionSrc || "index.html");
     try {
       (function(document, gsap, window, __hyperframes) {
 ${source.replace(/<\/(script)/gi, "<\\/$1")}
       }).call(window, __hfScopedDocument, __hfScopedGsap, __hfScopedWindow, __hfScopedHyperframes);
     } catch (_err) {
       console.error(__hfErrorLabel, __hfCompId, _err);
+    } finally {
+      if (typeof report === "function") report("finish", __hfCompositionSrc || "index.html");
     }
   };
   // What the script started on the global gsap timeline, by any route, for a scene swap to revert.

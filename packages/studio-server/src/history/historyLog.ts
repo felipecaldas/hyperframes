@@ -17,7 +17,16 @@ export interface HistoryFileChange {
 
 export type HistoryEntrySide = "before" | "after";
 
+export interface HistoryTarget {
+  file: string;
+  id?: string;
+  hfId?: string;
+  selector?: string;
+  selectorIndex?: number;
+}
+
 export interface HistoryEntry {
+  targets?: HistoryTarget[];
   id: string;
   who: HistoryWho;
   label: string;

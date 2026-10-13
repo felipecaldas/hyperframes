@@ -379,6 +379,21 @@ describe("resolveBrowserGpuMode", () => {
     _resetAutoBrowserGpuModeCacheForTests();
   });
 
+  it("lets a host own GPU probe launch and cleanup", async () => {
+    const { launch } = setMockWebGlProbe({ hasWebGL: true, vendor: "NVIDIA", renderer: "NVIDIA" });
+    const close = vi.fn(async (browser: Browser) => {
+      await browser.close();
+    });
+    const managedLaunch = vi.fn(
+      async (ppt: PuppeteerNode, options: Parameters<PuppeteerNode["launch"]>[0]) =>
+        ppt.launch(options),
+    );
+    await resolveBrowserGpuMode("auto", { probeLifecycle: { launch: managedLaunch, close } });
+    expect(managedLaunch).toHaveBeenCalledOnce();
+    expect(launch).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it("passes 'software' through unchanged without probing", async () => {
     const mode = await resolveBrowserGpuMode("software");
     expect(mode).toBe("software");

@@ -7,7 +7,7 @@
  */
 
 import { scanHtmlOpeningTags } from "@hyperframes/parsers/html-attribute-spans";
-import type { Browser, Page, PuppeteerNode } from "puppeteer-core";
+import type { Browser, LaunchOptions, Page, PuppeteerNode } from "puppeteer-core";
 import { execSync } from "child_process";
 import { existsSync, readdirSync, statSync } from "fs";
 import { join } from "path";
@@ -73,6 +73,18 @@ async function getPuppeteer(): Promise<PuppeteerNode> {
   return _puppeteer;
 }
 
+export interface GpuProbeLifecycle {
+  launch(puppeteer: PuppeteerNode, options: LaunchOptions): Promise<Browser>;
+  close(browser: Browser): Promise<void>;
+}
+
+interface GpuProbeOptions {
+  chromePath?: string;
+  browserTimeout?: number;
+  platform?: NodeJS.Platform;
+  probeLifecycle?: GpuProbeLifecycle;
+}
+
 const GPU_PROBE_TIMEOUT_MS = 15_000;
 
 async function probeHardwareWebGlInfo(
@@ -81,11 +93,12 @@ async function probeHardwareWebGlInfo(
     args: string[];
     browserTimeout: number;
     executablePath: string | undefined;
+    probeLifecycle?: GpuProbeLifecycle;
   },
 ): Promise<WebGlProbeInfo> {
   let probeBrowser: Browser | undefined;
   try {
-    probeBrowser = await ppt.launch({
+    const launchOptions: LaunchOptions = {
       ...sigintLaunchOptions(),
       headless: true,
       args: options.args,
@@ -93,14 +106,20 @@ async function probeHardwareWebGlInfo(
       executablePath: options.executablePath,
       timeout: options.browserTimeout,
       waitForInitialPage: false,
-    });
+    };
+    probeBrowser = options.probeLifecycle
+      ? await options.probeLifecycle.launch(ppt, launchOptions)
+      : await ppt.launch(launchOptions);
     return await rejectAfter(
       readWebGlInfo(probeBrowser),
       GPU_PROBE_TIMEOUT_MS,
       `GPU probe page did not answer within ${GPU_PROBE_TIMEOUT_MS}ms`,
     );
   } finally {
-    if (probeBrowser) await closeBrowserAfterFailedProbe(probeBrowser);
+    if (probeBrowser) {
+      if (options.probeLifecycle) await options.probeLifecycle.close(probeBrowser);
+      else await closeBrowserAfterFailedProbe(probeBrowser);
+    }
   }
 }
 
@@ -531,11 +550,7 @@ function formatProbeFailure(err: unknown): string {
   return `probe failed (${err instanceof Error ? err.message : String(err)})`;
 }
 
-async function probeAutoBrowserGpuMode(options: {
-  chromePath?: string;
-  browserTimeout?: number;
-  platform?: NodeJS.Platform;
-}): Promise<GpuProbeOutcome> {
+async function probeAutoBrowserGpuMode(options: GpuProbeOptions): Promise<GpuProbeOutcome> {
   const platform = options.platform ?? process.platform;
   const browserTimeout = options.browserTimeout ?? DEFAULT_CONFIG.browserTimeout;
   const executablePath = options.chromePath ?? resolveHeadlessShellPath({});
@@ -551,6 +566,7 @@ async function probeAutoBrowserGpuMode(options: {
       args: getHardwareGpuProbeArgs(platform),
       browserTimeout,
       executablePath,
+      probeLifecycle: options.probeLifecycle,
     });
     const resolved = resolveWebGlProbeMode(info);
     logResolvedBrowserGpuMode(resolved, describeWebGlProbe(info));
@@ -589,11 +605,7 @@ async function probeAutoBrowserGpuMode(options: {
  */
 export function resolveBrowserGpuMode(
   mode: EngineConfig["browserGpuMode"],
-  options: {
-    chromePath?: string;
-    browserTimeout?: number;
-    platform?: NodeJS.Platform;
-  } = {},
+  options: GpuProbeOptions = {},
 ): Promise<"software" | "hardware"> {
   if (mode === "software") return Promise.resolve(mode);
 

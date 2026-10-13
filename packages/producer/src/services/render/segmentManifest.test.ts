@@ -31,6 +31,7 @@ const hashInput: SegmentPlanHashInput = {
   outputWidth: 1920,
   outputHeight: 1080,
   motionBlur: "",
+  captureQuality: 80,
 };
 
 describe("computeSegmentPlanHash", () => {
@@ -68,6 +69,7 @@ describe("computeSegmentPlanHash", () => {
     expect(computeSegmentPlanHash({ ...hashInput, motionBlur: '{"samplesPerFrame":32}' })).not.toBe(
       a,
     );
+    expect(computeSegmentPlanHash({ ...hashInput, captureQuality: 100 })).not.toBe(a);
   });
 
   it("does not collide across adjacent field boundaries", () => {

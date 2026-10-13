@@ -66,6 +66,12 @@ export interface GsapAnimation {
   ease?: string;
   /** Non-editable GSAP config (stagger, yoyo, repeat, etc.) preserved for round-trips. */
   extras?: Record<string, unknown>;
+  inspectionTiming?: {
+    repeat: number | null;
+    repeatDelay: number | null;
+    delay: number | null;
+    stagger: { each: number } | { amount: number } | null;
+  };
   /** Native GSAP keyframes data — present when the tween uses keyframes: { ... }. */
   keyframes?: GsapKeyframesData;
   /** Arc motion path config — present when the tween uses motionPath for curved position interpolation. */

@@ -71,7 +71,7 @@ import {
 import type { RenderJob } from "../../renderOrchestrator.js";
 import { isActionableProbeFailure } from "./probeFailures.js";
 import { preflightCompositionAssetMediaTypes } from "../../assetMediaType.js";
-import { resolveCaptureImageFormat } from "../captureImageFormat.js";
+import { resolveCaptureImageFormat, resolveCaptureJpegQuality } from "../captureImageFormat.js";
 
 export interface ProbeStageInput {
   projectDir: string;
@@ -379,7 +379,8 @@ export async function runProbeStage(input: ProbeStageInput): Promise<ProbeStageR
         height,
         fps: job.config.fps,
         format: captureFormat,
-        quality: captureFormat === "png" ? undefined : 80,
+        quality:
+          captureFormat === "png" ? undefined : resolveCaptureJpegQuality(job.config.quality),
         variables: job.config.variables,
         deviceScaleFactor,
         motionBlur,

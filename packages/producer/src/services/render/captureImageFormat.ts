@@ -1,4 +1,4 @@
-import type { MotionBlurOptions } from "@hyperframes/engine";
+import type { EngineConfig, MotionBlurOptions } from "@hyperframes/engine";
 
 /**
  * The format a render captures its frames in.
@@ -18,4 +18,12 @@ export function resolveCaptureImageFormat(input: {
   motionBlur: MotionBlurOptions | undefined;
 }): "jpeg" | "png" {
   return input.needsAlpha || input.motionBlur ? "png" : "jpeg";
+}
+
+/**
+ * Below 100, Chrome's JPEG turns graded colour and grain into 8x8 chroma blotches that survive
+ * the final encode. Draft keeps the smaller, faster frames.
+ */
+export function resolveCaptureJpegQuality(quality: EngineConfig["quality"]): number {
+  return quality === "draft" ? 80 : 100;
 }

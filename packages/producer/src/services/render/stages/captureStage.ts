@@ -142,8 +142,10 @@ export function shouldAllowAdaptiveCaptureRetry(
   return workerCount > 1;
 }
 
-/** Jpeg frames are far smaller than raw pixels; this divisor is a conservative bound. */
+/** Jpeg frames are far smaller than raw pixels; these divisors are conservative bounds. */
 const JPEG_RAW_RGBA_DIVISOR = 8;
+/** Above draft's quality 80; quality-100 jpeg of grainy 4K footage measures about 1/6 of raw RGBA. */
+const HIGH_QUALITY_JPEG_RAW_RGBA_DIVISOR = 4;
 /** Frames captured before the measured projection replaces the static estimate. */
 const DISK_PROJECTION_SAMPLE_FRAMES = 10;
 
@@ -156,7 +158,12 @@ export function estimateDiskCaptureBytes(
   const outputHeight = Math.ceil(captureOptions.height * scale);
   const rawBytes = Math.ceil(totalFrames) * outputWidth * outputHeight * 4;
   return frameFileExtension(captureOptions.format) === "jpg"
-    ? Math.ceil(rawBytes / JPEG_RAW_RGBA_DIVISOR)
+    ? Math.ceil(
+        rawBytes /
+          ((captureOptions.quality ?? 80) > 80
+            ? HIGH_QUALITY_JPEG_RAW_RGBA_DIVISOR
+            : JPEG_RAW_RGBA_DIVISOR),
+      )
     : rawBytes;
 }
 

@@ -59,7 +59,15 @@ export function isPrivateProjectFile(projectDir: string, filePath: string): bool
  * file checked here even if a link on the way is retargeted before the write.
  */
 export function pinWithinProject(base: string, relativePath: string): string | null {
-  const checked = resolveWithinProject(base, relativePath);
+  return pinResolved(base, resolveWithinProject(base, relativePath));
+}
+
+/** `pinWithinProject` for the app's and the CLI's own records under `.hyperframes/`, which no route serves. */
+export function pinProjectRecord(base: string, relativePath: string): string | null {
+  return pinResolved(base, resolveInProject(base, relativePath));
+}
+
+function pinResolved(base: string, checked: string | null): string | null {
   if (!checked) return null;
   const inside = relative(realFilePath(base), realFilePath(checked));
   const escapes = inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside);

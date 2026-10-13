@@ -21,6 +21,7 @@
     "dogs-captions": 524,
     "font-variant-numeric": 7,
     "gsap-letters-render-compat": 9,
+    "gsap-redraw-start-and-overlap": 6,
     "hdr-hlg-regression": 125,
     "hdr-regression": 207,
     "iframe-render-compat": 11,

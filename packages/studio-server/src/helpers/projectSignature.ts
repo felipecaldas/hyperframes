@@ -1,7 +1,9 @@
+import { readRenderOutputsOrNone, isRenderOutput } from "./renderOutputs.js";
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, readdirSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, type Stats } from "node:fs";
 import { extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { isAtomicTempPath } from "@hyperframes/core/atomic-file";
+import { PREVIEW_IGNORED_DIRS } from "@hyperframes/core/project-folders";
 import type { ResolvedProject, StudioApiAdapter } from "../types.js";
 
 const SIGNATURE_TEXT_EXTENSIONS = new Set([
@@ -15,22 +17,6 @@ const SIGNATURE_TEXT_EXTENSIONS = new Set([
   ".svg",
   ".ts",
   ".tsx",
-]);
-const SIGNATURE_EXCLUDED_DIRS = new Set([
-  ".cache",
-  ".git",
-  ".hyperframes",
-  ".next",
-  ".thumbnails",
-  ".transcode-cache",
-  ".vite",
-  ".waveform-cache",
-  "build",
-  "coverage",
-  "dist",
-  "node_modules",
-  "outputs",
-  "renders",
 ]);
 const MAX_SIGNATURE_TEXT_BYTES = 2_000_000;
 export const STUDIO_SIGNATURE_MANIFEST_PATHS = [
@@ -68,9 +54,10 @@ export function affectsProjectSignature(projectDir: string, changedPath: string)
   ) {
     return false;
   }
+  if (isRenderOutput(projectDir, changedPath, readRenderOutputsOrNone(projectDir))) return false;
   const segments = relativePath.split(sep);
   if (STUDIO_SIGNATURE_MANIFEST_PATHS.includes(segments.join("/") as never)) return true;
-  return !segments.some((segment) => SIGNATURE_EXCLUDED_DIRS.has(segment));
+  return !segments.some((segment) => PREVIEW_IGNORED_DIRS.has(segment));
 }
 
 interface ProjectSignatureFile {
@@ -104,12 +91,29 @@ function isTextContentEligible(file: string, size: number): boolean {
 }
 
 const isSkippedEntry = (entry: string) =>
-  SIGNATURE_EXCLUDED_DIRS.has(entry) || isAtomicTempPath(entry);
+  PREVIEW_IGNORED_DIRS.has(entry) || isAtomicTempPath(entry);
+
+function signatureEntryStat(
+  projectDir: string,
+  entry: string,
+  file: string,
+  outputs: readonly string[],
+): Stats | null {
+  if (isSkippedEntry(entry) || !isPathWithin(projectDir, file)) return null;
+  if (isRenderOutput(projectDir, file, outputs)) return null;
+  try {
+    const stat = lstatSync(file);
+    return stat.isSymbolicLink() ? null : stat;
+  } catch {
+    return null;
+  }
+}
 
 function collectProjectSignatureFiles(
   projectDir: string,
   dir: string,
   files: ProjectSignatureFile[],
+  outputs = readRenderOutputsOrNone(projectDir),
 ): void {
   let entries: string[];
   try {
@@ -119,18 +123,11 @@ function collectProjectSignatureFiles(
   }
 
   for (const entry of entries) {
-    if (isSkippedEntry(entry)) continue;
     const file = resolve(dir, entry);
-    if (!isPathWithin(projectDir, file)) continue;
-    let stat: ReturnType<typeof lstatSync>;
-    try {
-      stat = lstatSync(file);
-    } catch {
-      continue;
-    }
-    if (stat.isSymbolicLink()) continue;
+    const stat = signatureEntryStat(projectDir, entry, file, outputs);
+    if (!stat) continue;
     if (stat.isDirectory()) {
-      collectProjectSignatureFiles(projectDir, file, files);
+      collectProjectSignatureFiles(projectDir, file, files, outputs);
     } else if (stat.isFile()) {
       files.push({
         file,

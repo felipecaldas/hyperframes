@@ -174,6 +174,19 @@ export async function sampleMarkerOnionElements(
           y: matrix.b * point.x + matrix.d * point.y + matrix.f,
         }));
       } else {
+        const w = rig.el.offsetWidth;
+        const h = rig.el.offsetHeight;
+        const local = [
+          [0, 0],
+          [w, 0],
+          [w, h],
+          [0, h],
+          [w / 2, h / 2],
+        ];
+        rig.markers!.forEach((marker, i) => {
+          marker.style.left = `${local[i]![0]! - rig.el.clientLeft + rig.el.scrollLeft}px`;
+          marker.style.top = `${local[i]![1]! - rig.el.clientTop + rig.el.scrollTop}px`;
+        });
         points = rig.markers!.map((marker) => {
           const rect = marker.getBoundingClientRect();
           return { x: rect.left, y: rect.top };

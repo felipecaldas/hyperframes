@@ -1,5 +1,6 @@
 import type { RuntimeDeterministicAdapter } from "../types";
 import { swallow } from "../diagnostics";
+import { holdAnimationAt } from "./_holdAnimationAt";
 
 export function createWaapiAdapter(): RuntimeDeterministicAdapter {
   let didDiscover = false;
@@ -162,18 +163,12 @@ export function createWaapiAdapter(): RuntimeDeterministicAdapter {
           : ensureBaseline(animation, 0);
         const localTimeMs =
           baseline.animationTimeMs + Math.max(0, timeMs - baseline.compositionTimeMs);
-        try {
-          animation.currentTime = localTimeMs;
-        } catch (err) {
-          // ignore animations that reject currentTime writes
-          swallow("runtime.adapters.waapi.site1", err);
-        }
-        try {
-          animation.pause();
-        } catch (err) {
-          // infinite unresolved animations can throw here until currentTime resolves
-          swallow("runtime.adapters.waapi.site2", err);
-        }
+        holdAnimationAt(
+          animation,
+          localTimeMs,
+          "runtime.adapters.waapi.site1",
+          "runtime.adapters.waapi.site2",
+        );
       }
     },
     pause: (ctx) => {

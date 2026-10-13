@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   compositionStyle,
   cssStyleMergeKey,
@@ -732,7 +733,10 @@ function pushRun<T>(runs: PartRun<T>[], scene: string | undefined, chunk: T): vo
   else runs.push({ scene, chunks: [chunk] });
 }
 
-function coalesceHeadStylesAndBodyScripts(document: Document): void {
+function coalesceHeadStylesAndBodyScripts(
+  document: Document,
+  provenance?: BundleOptions["scriptProvenance"],
+): void {
   const allHeadStyles = [...document.querySelectorAll("head style")];
   const isScenePart = (el: Element) => el.hasAttribute(SCENE_PART_ATTR);
   for (const run of allHeadStyles.length > 1 ? headStyleRuns(allHeadStyles, isScenePart) : []) {
@@ -751,13 +755,14 @@ function coalesceHeadStylesAndBodyScripts(document: Document): void {
   )) {
     const mergedJs = joinJsChunks(members.map((el) => el.textContent || ""));
     if (mergedJs && !parsesAsScript(mergedJs)) {
-      for (const el of members) el.textContent = inlineScriptSource(el.textContent || "");
+      for (const el of members)
+        el.textContent = inlineScriptSource(el.textContent || "", provenance);
       continue;
     }
     for (const el of members) el.remove();
     if (!mergedJs) continue;
     const inlineScript = document.createElement("script");
-    inlineScript.textContent = inlineScriptSource(mergedJs);
+    inlineScript.textContent = inlineScriptSource(mergedJs, provenance);
     if (anchor) anchor.before(inlineScript);
     else document.body.appendChild(inlineScript);
   }
@@ -820,21 +825,45 @@ export function parsesAsScript(source: string): boolean {
   }
 }
 
-function stripJsCommentsParserSafe(source: string): string {
+function stripJsCommentsParserSafe(
+  source: string,
+  provenance?: BundleOptions["scriptProvenance"],
+): string {
   if (!source) return source;
   try {
-    const result = transformSync(source, { loader: "js", minify: false, legalComments: "none" });
+    const result = transformSync(source, {
+      loader: "js",
+      minify: false,
+      legalComments: "none",
+      ...(provenance
+        ? { sourcemap: "external" as const, sourcefile: "hf-authored-bundle.js" }
+        : {}),
+    });
+    if (provenance) {
+      const sourceURL = `hf-inspect-${createHash("sha256").update(source).digest("hex")}.js`;
+      provenance({ input: source, output: result.code.trim(), sourceMap: result.map, sourceURL });
+      return `${result.code.trim()}\n//# sourceURL=${sourceURL}`;
+    }
     return result.code.trim();
   } catch {
     return source;
   }
 }
 
-function inlineScriptSource(js: string): string {
-  return escapeInlineScriptSource(stripJsCommentsParserSafe(js));
+function inlineScriptSource(js: string, provenance?: BundleOptions["scriptProvenance"]): string {
+  return escapeInlineScriptSource(stripJsCommentsParserSafe(js, provenance));
+}
+
+export interface BundleScriptProvenance {
+  input: string;
+  output: string;
+  sourceMap: string;
+  sourceURL?: string;
 }
 
 export interface BundleOptions {
+  /** Optional source mapping for inspection; does not alter bundled HTML. */
+  scriptProvenance?: (script: BundleScriptProvenance) => void;
   /** Project-relative HTML entry to bundle. Defaults to `index.html`. */
   entryFile?: string;
   stampHfIds?: boolean;
@@ -1330,7 +1359,9 @@ async function bundleProject(projectDir: string, options?: BundleOptions): Promi
     for (const text of parsesAsScript(joined) ? [joined] : texts.filter(Boolean)) {
       const script = document.createElement("script");
       if (scene) script.setAttribute(SCENE_PART_ATTR, scene);
-      script.textContent = skipsRunMerge ? inlineScriptSource(text) : text;
+      script.textContent = skipsRunMerge
+        ? inlineScriptSource(text, options?.scriptProvenance)
+        : text;
       document.body.appendChild(script);
     }
   }
@@ -1340,11 +1371,11 @@ async function bundleProject(projectDir: string, options?: BundleOptions): Promi
 
   enforceCompositionPixelSizing(document);
   autoHealMissingCompositionIds(document);
-  coalesceHeadStylesAndBodyScripts(document);
+  coalesceHeadStylesAndBodyScripts(document, options?.scriptProvenance);
   for (const el of document.querySelectorAll(`script[${INLINED_FILE_ATTR}]`)) {
     const js = el.textContent ?? "";
     el.textContent = escapeInlineScriptSource(
-      isJavaScriptType(el) ? stripJsCommentsParserSafe(js) : js,
+      isJavaScriptType(el) ? stripJsCommentsParserSafe(js, options?.scriptProvenance) : js,
     );
   }
   deferScriptsUntilFonts(document, (el) => el.hasAttribute(RUNTIME_BOOTSTRAP_ATTR));

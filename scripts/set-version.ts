@@ -25,6 +25,7 @@ const PACKAGES = [
   "packages/lint",
   "packages/studio-server",
   "packages/core",
+  "packages/inspector",
   "packages/engine",
   "packages/player",
   "packages/producer",

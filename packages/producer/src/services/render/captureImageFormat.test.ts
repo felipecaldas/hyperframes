@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { frameFileExtension } from "@hyperframes/engine";
-import { resolveCaptureImageFormat } from "./captureImageFormat.js";
+import { resolveCaptureImageFormat, resolveCaptureJpegQuality } from "./captureImageFormat.js";
 
 describe("resolveCaptureImageFormat", () => {
   it("captures JPEG for an ordinary opaque render", () => {
@@ -25,5 +25,16 @@ describe("resolveCaptureImageFormat", () => {
         expect(frameFileExtension(format)).toBe(format === "png" ? "png" : "jpg");
       }
     }
+  });
+});
+
+describe("resolveCaptureJpegQuality", () => {
+  it("captures standard and high renders at quality 100 so graded colour survives", () => {
+    expect(resolveCaptureJpegQuality("standard")).toBe(100);
+    expect(resolveCaptureJpegQuality("high")).toBe(100);
+  });
+
+  it("keeps draft renders on the smaller, faster frames", () => {
+    expect(resolveCaptureJpegQuality("draft")).toBe(80);
   });
 });
