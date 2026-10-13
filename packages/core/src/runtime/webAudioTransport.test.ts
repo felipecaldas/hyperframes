@@ -500,6 +500,16 @@ describe("WebAudioTransport", () => {
       expect(mock.startFn).toHaveBeenCalledWith(108, 1.5, 4);
     });
 
+    it("holds a clip whose head an in-point cut until its window opens, at that point's source", async () => {
+      const { transport, mock, gen } = setupTransport(100);
+      // The clip's own t=0 is 1, its window opens at 2 and ends at 5: from comp time 0, wait 2 s, then
+      // play source 1 to 4; from comp time 1.5, the same.
+      await transport.schedulePlayback(mockEl, mockBuffer, 1, 0, () => 0, 1, gen, 1, 4, 2);
+      expect(mock.startFn).toHaveBeenLastCalledWith(102, 1, 3);
+      await transport.schedulePlayback(mockEl, mockBuffer, 1, 0, () => 1.5, 1, gen, 1, 4, 2);
+      expect(mock.startFn).toHaveBeenLastCalledWith(100.5, 1, 3);
+    });
+
     it("does not schedule a clip whose window has already elapsed", async () => {
       const { transport, mock, gen } = setupTransport(100);
       // elapsed=15 > clipDuration=10 → nothing to play
@@ -1101,6 +1111,92 @@ describe("WebAudioTransport", () => {
       fader.gain.cancelScheduledValues = vi.fn();
       await scheduleGrouped(transport, gen2, "b", "vo");
       expect(fader.gain.value).toBeCloseTo(0.5, 6);
+    });
+
+    describe("master bus", () => {
+      const GAIN_CHAIN = JSON.stringify({
+        version: 1,
+        nodes: [{ type: "gain", id: "g", params: { gain: -6 } }],
+      });
+
+      function withBusOut(setup: ReturnType<typeof setupGroupTransport>) {
+        const busOut = { gain: { value: 1 }, connect: vi.fn(), disconnect: vi.fn() };
+        (setup.transport as unknown as { _busOut: unknown })._busOut = busOut;
+        return busOut;
+      }
+
+      it("splices the root's chain between the sum and the monitor", async () => {
+        document.body.innerHTML = `<div id="root" data-composition-id="main"></div>`;
+        document.getElementById("root")!.setAttribute("data-fx-chain", GAIN_CHAIN);
+        const setup = setupGroupTransport();
+        const busOut = withBusOut(setup);
+
+        await scheduleGrouped(setup.transport, setup.gen, "a");
+
+        const { masterGain } = setup.mock;
+        expect(masterGain.disconnect).toHaveBeenCalledWith(busOut);
+        // Wired into the chain's input, not straight to the bus output.
+        expect(masterGain.connect).toHaveBeenCalledTimes(1);
+        expect(masterGain.connect).not.toHaveBeenCalledWith(busOut);
+      });
+
+      it("feeds grouped members through the same master bus", async () => {
+        document.body.innerHTML = `<div id="root" data-composition-id="main" data-fx-chain='${GAIN_CHAIN}'></div>`;
+        const setup = setupGroupTransport();
+        const busOut = withBusOut(setup);
+
+        await scheduleGrouped(setup.transport, setup.gen, "a", "vo");
+
+        expect(setup.mock.masterGain.disconnect).toHaveBeenCalledWith(busOut);
+        expect(setup.mock.masterGain.connect).not.toHaveBeenCalledWith(busOut);
+      });
+
+      it("limits a plain video at unity played from its media element", async () => {
+        document.body.innerHTML = `<div id="root" data-composition-id="main" data-fx-chain='${GAIN_CHAIN}'><video id="talk" data-has-audio="true"></video></div>`;
+        const setup = setupGroupTransport();
+        const busOut = withBusOut(setup);
+        const video = document.getElementById("talk") as unknown as HTMLMediaElement;
+
+        await setup.transport.scheduleMediaElementPlayback(video, 0, 0, 0, 1, setup.gen, 1);
+
+        expect(setup.mock.gainNodes[0]!.connect).toHaveBeenCalledWith(setup.mock.masterGain);
+        expect(setup.mock.masterGain.disconnect).toHaveBeenCalledWith(busOut);
+        expect(setup.mock.masterGain.connect).not.toHaveBeenCalledWith(busOut);
+      });
+
+      it("leaves the sum wired straight through when the root has no chain", async () => {
+        document.body.innerHTML = `<div id="root" data-composition-id="main"></div>`;
+        const setup = setupGroupTransport();
+        const busOut = withBusOut(setup);
+
+        await scheduleGrouped(setup.transport, setup.gen, "a");
+
+        expect(setup.mock.masterGain.connect).toHaveBeenLastCalledWith(busOut);
+      });
+
+      it("ignores a chain on a sub-composition's root", async () => {
+        document.body.innerHTML = `<div id="root" data-composition-id="main"><div data-composition-id="inner" data-fx-chain='${GAIN_CHAIN}'></div></div>`;
+        const setup = setupGroupTransport();
+        const busOut = withBusOut(setup);
+
+        await scheduleGrouped(setup.transport, setup.gen, "a");
+
+        expect(setup.mock.masterGain.connect).toHaveBeenLastCalledWith(busOut);
+      });
+
+      it("is built once for the session, not once per member", async () => {
+        document.body.innerHTML = `<div id="root" data-composition-id="main" data-fx-chain='${GAIN_CHAIN}'></div>`;
+        const setup = setupGroupTransport();
+        withBusOut(setup);
+
+        await scheduleGrouped(setup.transport, setup.gen, "a");
+        const nodesAfterFirst = setup.mock.gainNodes.length;
+        await scheduleGrouped(setup.transport, setup.gen, "b");
+
+        // The second member adds its own element gain and nothing else.
+        expect(setup.mock.gainNodes.length).toBe(nodesAfterFirst + 1);
+        expect(setup.mock.masterGain.disconnect).toHaveBeenCalledTimes(1);
+      });
     });
 
     describe("group mute (B5)", () => {

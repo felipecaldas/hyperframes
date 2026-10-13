@@ -561,7 +561,9 @@ it("a claim the server refused is logged, and the write stays undoable as a chan
       files: { "index.html": { before: "A", after: "B" } },
     }),
   );
-  expect(logged).toHaveBeenCalledWith('"Moved Title" was not recorded as your edit: disk full');
+  expect(logged).toHaveBeenCalledWith(
+    '[history] 500: "Moved Title" was not recorded as your edit: disk full',
+  );
   restoreFetch();
   expect(await act(() => hook().undo({ readFile }))).toMatchObject({
     ok: true,
@@ -569,6 +571,46 @@ it("a claim the server refused is logged, and the write stays undoable as a chan
   });
   expect(file()).toBe("A");
 });
+
+it.each([
+  [
+    "the server refused",
+    409,
+    () => answer("/history/claim", 409, { error: "newer edit" }),
+    "newer edit",
+  ],
+  [
+    "could not reach the server",
+    0,
+    () => {
+      const real = globalThis.fetch;
+      vi.stubGlobal("fetch", (url: string, init?: RequestInit) =>
+        url.endsWith("/history/claim")
+          ? Promise.reject(new TypeError("fetch failed"))
+          : real(url, init),
+      );
+    },
+    "Studio could not reach its server.",
+  ],
+] as const)(
+  "a claim that %s logs under [history] with its status",
+  async (_, status, stub, reason) => {
+    const { hook, save } = await studio();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    cleanup.push(() => logged.mockRestore());
+    stub();
+    save("B");
+    await act(() =>
+      hook().recordEdit({
+        label: "Moved Title",
+        files: { "index.html": { before: "A", after: "B" } },
+      }),
+    );
+    expect(logged).toHaveBeenCalledWith(
+      `[history] ${status}: "Moved Title" was not recorded as your edit: ${reason}`,
+    );
+  },
+);
 
 it("a step whose reply cannot be read says so, instead of throwing", async () => {
   const { hook, readFile } = await studio();

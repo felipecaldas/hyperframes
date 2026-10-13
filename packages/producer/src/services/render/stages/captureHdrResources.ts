@@ -419,7 +419,10 @@ export async function extractHdrVideoFrames(args: {
   const out = new Map<string, HdrVideoFrameSource>();
   mkdirSync(framesDir, { recursive: true });
   const plannedVideos: Array<{ durationSeconds: number; width: number; height: number }> = [];
-  const extractionWindows = new Map<string, HdrExtractionWindow>();
+  const extractionWindows = new Map<
+    string,
+    { window: HdrExtractionWindow; videoStreamLeadSeconds?: number }
+  >();
   for (const [videoId, srcPath] of prep.hdrVideoSrcPaths) {
     const video = composition.videos.find((v) => v.id === videoId);
     if (!video) continue;
@@ -434,7 +437,10 @@ export async function extractHdrVideoFrames(args: {
       initialWindow,
       abortSignal,
     );
-    extractionWindows.set(videoId, window);
+    extractionWindows.set(videoId, {
+      window,
+      videoStreamLeadSeconds: metadata.videoStreamLeadSeconds,
+    });
     prep.hdrVideoStartTimes.set(videoId, window.compositionStart);
     plannedVideos.push({
       durationSeconds: window.durationSeconds,
@@ -453,14 +459,16 @@ export async function extractHdrVideoFrames(args: {
   try {
     for (const [videoId, srcPath] of prep.hdrVideoSrcPaths) {
       const video = composition.videos.find((v) => v.id === videoId);
-      const window = extractionWindows.get(videoId);
-      if (!video || !window) continue;
+      const planned = extractionWindows.get(videoId);
+      if (!video || !planned) continue;
+      const { window } = planned;
       mkdirSync(framesDir, { recursive: true });
       const frameDir = mkdtempSync(join(framesDir, `hdr_${tempDirSafePrefix(videoId)}-`));
       createdFrameDirs.add(frameDir);
       const dims = prep.hdrExtractionDims.get(videoId) ?? { width, height };
       const rawPath = join(frameDir, "frames.rgb48le");
-      const extractionStart = String(window.extractionMediaStart ?? window.mediaStart);
+      const extractionMediaStart = window.extractionMediaStart ?? window.mediaStart;
+      const extractionStart = String(extractionMediaStart);
       const ffmpegArgs: string[] = [];
       if (window.finalFrameOnly) {
         // Decode before seeking for the one-frame path. Input-side seeking can
@@ -524,6 +532,8 @@ export async function extractHdrVideoFrames(args: {
           frameCount,
           scratch: Buffer.allocUnsafe(frameSize),
           loop: video.loop,
+          mediaStart: extractionMediaStart,
+          videoStreamLeadSeconds: planned.videoStreamLeadSeconds,
         });
         handedOff = true;
       } finally {

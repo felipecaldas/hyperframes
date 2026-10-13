@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/cli",
-  "version": "0.8.140",
+  "version": "0.8.150",
   "description": "HyperFrames CLI — create, preview, and render HTML video compositions",
   "license": "Apache-2.0",
   "repository": {
@@ -17,6 +17,13 @@
     "dist"
   ],
   "type": "module",
+  "exports": {
+    "./api": {
+      "import": "./dist/api.js",
+      "types": "./dist/api.d.ts"
+    },
+    "./package.json": "./package.json"
+  },
   "scripts": {
     "test": "vitest run",
     "dev": "tsx src/cli.ts",
@@ -48,7 +55,8 @@
     "postcss": "^8.5.8",
     "prettier": "^3.8.1",
     "puppeteer-core": "^25.10.0",
-    "sharp": "^0.35.0"
+    "sharp": "^0.35.0",
+    "yauzl": "^3.4.0"
   },
   "devDependencies": {
     "@clack/prompts": "^1.1.0",

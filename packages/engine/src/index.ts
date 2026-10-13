@@ -42,6 +42,7 @@ export type {
   CapturePerfSummary,
   CaptureWarning,
   CaptureWarningCode,
+  SubTimelineWaitMemo,
   SubTimelineWaitOutcome,
 } from "./types.js";
 
@@ -60,6 +61,7 @@ export {
   type EngineConfig,
   type ExtractCacheDirResolution,
 } from "./config.js";
+export { SDR_RGB_TO_BT709_FILTER } from "./utils/sdrCaptureColor.js";
 export {
   DEFAULT_VP9_CPU_USED,
   MAX_VP9_CPU_USED,
@@ -86,6 +88,7 @@ export {
   buildChromeArgs,
   compositionRequiresWebGpu,
   assertWebGpuAdapterAvailable,
+  usesSoftwareWebGpu,
   WebGpuUnavailableError,
   ENABLE_BROWSER_POOL,
   BrowserLeasePool,
@@ -201,6 +204,7 @@ export {
   parseImageElements,
   extractVideoFramesRange,
   extractAllVideoFrames,
+  isVideoPastTimelineEnd,
   resolveTimelineExtractionWindow,
   resolveVideoExtractionWindow,
   resolveFinalFrameExtractionWindow,
@@ -209,6 +213,7 @@ export {
   extractionFrameCountForDuration,
   resolveProjectRelativeSrc,
   getFrameAtTime,
+  isVideoHiddenBeforeStreamStart,
   createFrameLookupTable,
   FrameLookupTable,
   analyzeClipMediaFit,
@@ -220,6 +225,8 @@ export {
   type VideoElement,
   type ImageElement,
   type ExtractedFrames,
+  type DeferredFrameRange,
+  type FrameRange,
   type ExtractionOptions,
   type ExtractionResult,
   type ExtractionPhaseBreakdown,
@@ -249,6 +256,7 @@ export { createVideoFrameInjector } from "./services/videoFrameInjector.js";
 export {
   MIXED_AUDIO_FILENAME,
   parseAudioElements,
+  parseMasterFxChain,
   processCompositionAudio,
 } from "./services/audioMixer.js";
 export { cloneCaptureWarning, cloneCaptureWarnings } from "./services/captureWarning.js";
@@ -339,6 +347,7 @@ export {
 export {
   runFfmpeg,
   formatFfmpegError,
+  describeFfmpegFailure,
   isExternalFfmpegInterruption,
   type RunFfmpegOptions,
   type RunFfmpegResult,

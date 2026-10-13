@@ -45,6 +45,7 @@ import {
   detectTransfer,
   extractAllVideoFrames,
   extractMediaMetadata,
+  isVideoPastTimelineEnd,
   isHdrColorSpace,
   resolveProjectRelativeSrc,
   runVideoExtractionWithRetry,
@@ -56,6 +57,7 @@ import {
   type RenderJob,
 } from "../../renderOrchestrator.js";
 import { materializeExtractedFramesForCompiledDir, type CompositionMetadata } from "../shared.js";
+import { REMOTE_MEDIA_SUBDIR } from "../../htmlCompiler.js";
 import { resolveRenderFpsConfig } from "../../fileServer.js";
 import type { ProducerLogger } from "../../../logger.js";
 import { encoderFailureError } from "../encoderInterruption.js";
@@ -83,6 +85,7 @@ export interface ExtractVideosStageInput {
    * passes `true` so the planDir is self-contained.
    */
   materializeSymlinks?: boolean;
+  deferRangeExtraction?: boolean;
 }
 
 export interface ExtractVideosStageResult {
@@ -382,10 +385,14 @@ export async function runExtractVideosStage(
     abortSignal,
     assertNotAborted,
     materializeSymlinks,
+    deferRangeExtraction,
   } = input;
 
   const stage2Start = Date.now();
   const extractionPolicy = resolveVideoExtractionPolicy();
+  composition.videos = composition.videos.filter(
+    (video) => !isVideoPastTimelineEnd(video, composition.duration),
+  );
 
   let frameLookup: FrameLookupTable | null = null;
   let extractionResult: Awaited<ReturnType<typeof extractAllVideoFrames>> | null = null;
@@ -501,6 +508,8 @@ export async function runExtractVideosStage(
         timelineEnd: composition.duration,
         maxTransientRetries: extractionPolicy.maxTransientRetries,
         collectProbeFailures: extractionPolicy.failureMode === "enforce",
+        deferRangeExtraction,
+        contentKeyedDirs: [join(compiledDir, REMOTE_MEDIA_SUBDIR)],
       },
       abortSignal,
       cfg,

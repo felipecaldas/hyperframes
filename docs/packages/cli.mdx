@@ -236,7 +236,7 @@ thin with counts on it was cut short.
 | `--capture-budget`  | Budget in ms for everything after the page loads (default 120000). Cooperative — it stops new work, but cannot interrupt work already running.     |
 | `--skip-assets`     | Do not download images and SVGs                                                                                                                   |
 | `--skip-vision`     | Do not run AI image captioning                                                                                                                    |
-| `--max-screenshots` | Accepted, but has no effect — capture picks its own scroll positions.                                                                              |
+| `--max-screenshots` | Maximum page-capture files, including the full-page plate; derived contact sheets are excluded. Positive integer; default 21. A value of 1 captures only the top viewport.                                                                              |
 | `--json`            | Structured output for programmatic use                                                                                                             |
 | `--video <folder>`  | Switch to video-download mode against a captured folder's manifest. Pair with `--list`, `--index`, or `--video-url`.                               |
 
@@ -268,8 +268,9 @@ npx hyperframes transcribe video.mp4 --model medium.en --language en
 npx hyperframes transcribe subtitles.srt
 npx hyperframes transcribe openai-response.json
 
-# Export a caption sidecar
+# Export a caption sidecar, from a transcript or straight from the media
 npx hyperframes transcribe transcript.json --to srt
+npx hyperframes transcribe video.mp4 --to vtt
 ```
 
 | Flag              | Description                                                                                                                                                                                       |
@@ -278,7 +279,7 @@ npx hyperframes transcribe transcript.json --to srt
 | `--engine, -e`    | ASR engine: `auto` (default — Parakeet if installed and the language is one of its 25, else whisper), `parakeet` (fails if Parakeet is missing, broken, or lacks the `--language`), or `whisper` |
 | `--model, -m`     | Whisper model (default `small.en`): `tiny.en`, `base.en`, `small.en`, `medium.en`, `large-v3`                                                                                                       |
 | `--language, -l`  | Language code (`en`, `es`, `ja`, …). Whisper transcribes as this language; Parakeet, used when it covers it, detects the language itself.                                                          |
-| `--to`            | Export a sidecar instead: `srt` or `vtt`                                                                                                                                                           |
+| `--to`            | Write an `srt` or `vtt` sidecar: from a transcript file it exports instead of importing; from audio or video it is written beside `transcript.json`, with cues for languages without spaces grouped, which exporting that `transcript.json` later may split differently |
 | `--output, -o`    | Where the exported SRT/VTT goes                                                                                                                                                                    |
 | `--preserve-cues` | Keep each transcript entry as its own caption cue, skipping word-level grouping                                                                                                                    |
 | `--optional`      | Skip and exit 0 when whisper-cpp is unavailable, instead of failing. For pipelines that can carry on without captions. A broken Parakeet install is a real failure: it exits 1 even when whisper-cpp is missing. |
@@ -309,13 +310,20 @@ cues with no internal spaces — single-word or CJK captions.
 
 ### `models`
 
-Download an on-device model. Only asked-for installs happen; nothing downloads
+List or download on-device models. Only asked-for installs happen; nothing downloads
 on first use.
 
 ```bash
+npx hyperframes models list                      # Parakeet and any downloaded whisper models
+npx hyperframes models list --json               # { ok, models: [{ engine, model, installed, runner, path }] }
 npx hyperframes models install parakeet          # progress on stderr
 npx hyperframes models install parakeet --json   # one JSON result
 ```
+
+`list` reports Parakeet as installed only when `transcribe` would use it, through
+the CLI's own runtime or `parakeet-mlx` (`runner`), and gives the reason when this
+machine cannot run it. Whisper models appear once
+`transcribe` has downloaded them.
 
 `parakeet` installs the sherpa-onnx runtime from npm and NVIDIA's Parakeet TDT
 0.6B v3 speech model (int8, about 640 MB, CC-BY-4.0) into
@@ -421,7 +429,7 @@ where `u2net_human_seg` falls down, and free alternatives.
 
 ### `media-treatment`
 
-Read or edit the colour and effect treatment stored on one image or video.
+Read or edit the colour and effect treatment stored on images and videos.
 
 ```bash
 # Find out what exists, then look at one family or effect
@@ -435,7 +443,7 @@ npx hyperframes media-treatment --selector '#hero' --analyze --json
 npx hyperframes media-treatment --selector '#hero' \
   --grading '{"preset":"skin-soft","intensity":0.6}' --apply
 npx hyperframes media-treatment --file compositions/scene.html --selector 'video' \
-  --grading '{"preset":"warm-daylight"}' --apply --dry-run --json
+  --grading '{"preset":"warm-daylight"}' --dry-run --json
 npx hyperframes media-treatment --selector '#hero' --clear
 ```
 
@@ -446,14 +454,16 @@ npx hyperframes media-treatment --selector '#hero' --clear
 | `--all`                | Print the exhaustive capability catalog                               |
 | `--project <dir>`      | Project directory (default: current directory)                        |
 | `--file <path>`        | Composition file (default `index.html`)                               |
-| `--selector <css>`     | CSS selector for one `<img>` or `<video>`                             |
-| `--selector-index <n>` | Zero-based match index when the selector is not unique                |
+| `--selector <css>`     | CSS selector; every matched `<img>` or `<video>` gets the patch       |
+| `--selector-index <n>` | Zero-based match index to patch only one of several matches           |
 | `--grading <json>`     | Validated colour-grading patch                                        |
 | `--apply`              | Apply the patch                                                       |
 | `--analyze`            | Measure the selected local media and suggest a bounded correction     |
 | `--clear`              | Remove colour grading from the target                                 |
 | `--dry-run`            | Validate and report without writing                                   |
 | `--json`               | Agent-readable JSON                                                   |
+
+`--dry-run` accepts `--grading` without `--apply` and writes nothing. JSON includes `count`, `attribute`, the exact normalized `value` that apply would write (or `null` to remove it), and `lint`, the color-grading lint verdict and findings for the proposed HTML. When the selector matches several elements, each gets the patch merged into its own current grading, and JSON lists them under `targets` (each with its own `value`) instead of a single `value`; run `--clear` first for an identical look. Matches come from the main document or, when it has none, from the first `<template>` that has any, the same scope rule as Studio's source edits.
 
 The command writes `data-color-grading` — the same contract Studio, preview, and
 render all read, so the two can never disagree. It does not recognise subjects
@@ -703,11 +713,14 @@ background colours, the measured ratio against the required one, and a
 compliant colour you could use instead.
 
 Severity is persistence-aware: a finding at a single sample demotes to info, a
-finding that persists gates the exit code, and a timeline that never moves on a
-composition of 3s or more fails with `sweep_static`. When only audio advanced
-and nothing on screen moved, `sweep_static` is a warning instead (`--strict`
-fails the run on it); add `data-no-timeline` to a composition that is meant to
-be still.
+finding that persists gates the exit code, and a composition of 3s or more
+fails with `sweep_static` when its frame never changes and a GSAP timeline or
+tween, or a CSS or Web animation, on the page held the same time without ever
+finishing, so the seek never drove it.
+Any other frame that never changes, such as a still title card, is a
+`sweep_static` warning ("Nothing on screen moved under seek"), and so is an
+audio-only advance; `--strict` fails the run on either. A composition that is
+meant to be still can declare `data-no-timeline` to skip the guard.
 
 {/* VISUAL: a `check --snapshots` overview frame beside one finding crop, with the labelled finding box visible on both */}
 
@@ -761,7 +774,7 @@ borders and shadows, the pixels of visible canvas/video/img elements, and video
 playback time all count as motion — so a playing background video keeps a scope
 live on its own, even a color-graded one whose picture is drawn into a canvas.
 Audio playback time never counts here: it shows the timeline ran, but it is not
-a moving picture. The frozen-sweep guard turns an audio-only advance into a
+a moving picture. The frozen-sweep guard reports an audio-only advance as a
 warning rather than a failure. Elements under
 `data-layout-ignore` inside the scope never count; the opt-out does not apply to
 the scope element itself, since naming it in an assertion outranks it. Content
@@ -1383,7 +1396,8 @@ First match wins:
 
 1. `HEYGEN_API_KEY`
 2. `HYPERFRAMES_API_KEY` (a HyperFrames alias for the same thing)
-3. `~/.heygen/credentials`
+3. `HEYGEN_ACCESS_TOKEN` (an OAuth token a host app injects; never refreshed or saved)
+4. `~/.heygen/credentials`
 
 ### `auth login`
 
@@ -1441,6 +1455,7 @@ hyperframes auth logout --yes            # no prompt
 | --------------------- | ------------------------------------------------ |
 | `HEYGEN_API_KEY`      | Override the stored credential.                  |
 | `HYPERFRAMES_API_KEY` | Alias for `HEYGEN_API_KEY`.                      |
+| `HEYGEN_ACCESS_TOKEN` | OAuth token from a host app; never refreshed.    |
 | `HEYGEN_API_URL`      | API base URL (default `https://api.heygen.com`). |
 | `HEYGEN_CONFIG_DIR`   | Credentials directory (default `~/.heygen`).     |
 

@@ -50,6 +50,12 @@ export interface LayoutOptions {
 
 export type CheckSeverity = "error" | "warning" | "info";
 
+export interface SeekClock {
+  id: number;
+  time: number;
+  done: boolean;
+}
+
 export interface CheckBbox {
   x: number;
   y: number;
@@ -63,6 +69,7 @@ export interface CheckAnchor {
   sourceFile: string;
   bbox: CheckBbox;
   time: number;
+  times?: number[];
 }
 
 export interface CheckFinding extends CheckAnchor {
@@ -198,6 +205,7 @@ export interface CheckAuditDriver {
   /** Frozen-sweep guard (#U10): an opaque fingerprint of the seeked visual state, from
    * motion-signature.browser.js (shared with motion-sample's liveness). Legacy name kept. */
   collectLayoutGeometry(): Promise<string>;
+  collectSeekClock(): Promise<SeekClock[]>;
   /** rotation_pivot_drift: every rotatable element's bbox center/size/angle at
    * the current seeked state. Accumulated across the grid — see checkPipeline. */
   collectRotationSample(time: number): Promise<RotationSample[]>;

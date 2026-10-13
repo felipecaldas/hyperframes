@@ -93,6 +93,9 @@ import type { SdrStreamingCapturePlan } from "../capturePlan.js";
  */
 const DEFAULT_CAPTURE_STALL_MS = 60_000;
 const DE_STALL_POLL_MS = 5_000;
+const STALL_ADVICE =
+  "Chrome stopped answering. If another app is keeping the GPU or CPU busy " +
+  "(a 3D render, a game, another export), let it finish or render one job at a time, then retry.";
 
 /**
  * The parallel no-progress watchdog tripped. Typed like the sequential stall
@@ -116,12 +119,12 @@ class ParallelCaptureStallError extends Error {
   }) {
     const phases = args.phaseSummary ? ` Last worker phases: ${args.phaseSummary}.` : "";
     super(
-      args.variant === "drain"
+      (args.variant === "drain"
         ? `[Render] Parallel ${args.captureLabel} capture stalled: no frame progress for ` +
-            `${args.stallTimeoutMs}ms (stuck at ${args.lastCapturedFrames}/${args.totalFrames}).${phases}`
+          `${args.stallTimeoutMs}ms (stuck at ${args.lastCapturedFrames}/${args.totalFrames}).${phases}`
         : `[Render] Parallel ${args.captureLabel} capture stalled after ${args.stallTimeoutMs}ms ` +
-            `with no frame progress (last frame ${args.lastCapturedFrames}/${args.totalFrames}); ` +
-            `retrying on a fresh screenshot session.${phases}`,
+          `with no frame progress (last frame ${args.lastCapturedFrames}/${args.totalFrames}); ` +
+          `retrying on a fresh screenshot session.${phases}`) + ` ${STALL_ADVICE}`,
     );
     this.name = "ParallelCaptureStallError";
     this.variant = args.variant;
@@ -160,21 +163,25 @@ function captureModeLabel(mode: CaptureSession["captureMode"]): string {
   return "screenshot";
 }
 
+type StalledSession = Pick<CaptureSession, "captureMode" | "captureStep">;
+
 class SequentialCaptureStallError extends Error {
   readonly captureMode: CaptureSession["captureMode"];
 
   constructor(
-    captureMode: CaptureSession["captureMode"],
+    session: StalledSession,
     stallTimeoutMs: number,
     frameIndex: number,
     totalFrames: number,
   ) {
+    const step = session.captureStep ? ` while ${session.captureStep}` : "";
     super(
-      `[Render] Sequential ${captureModeLabel(captureMode)} capture stalled: ` +
-        `no frame progress for ${stallTimeoutMs}ms (stuck at frame ${frameIndex}/${totalFrames}).`,
+      `[Render] Sequential ${captureModeLabel(session.captureMode)} capture stalled: ` +
+        `no frame progress for ${stallTimeoutMs}ms (stuck at frame ${frameIndex}/${totalFrames}${step}). ` +
+        STALL_ADVICE,
     );
     this.name = "SequentialCaptureStallError";
-    this.captureMode = captureMode;
+    this.captureMode = session.captureMode;
   }
 }
 
@@ -182,7 +189,7 @@ export function raceAgainstStall<T>(
   promise: Promise<T>,
   deadlineMs: number,
   input: {
-    captureMode: CaptureSession["captureMode"];
+    session: StalledSession;
     frameIndex: number;
     totalFrames: number;
     stallTimeoutMs: number;
@@ -195,11 +202,11 @@ export function raceAgainstStall<T>(
         reject(
           signal?.aborted
             ? new Error(
-                `[Render] Sequential ${captureModeLabel(input.captureMode)} capture aborted ` +
+                `[Render] Sequential ${captureModeLabel(input.session.captureMode)} capture aborted ` +
                   `while a capture call was in flight (frame ${input.frameIndex}/${input.totalFrames}).`,
               )
             : new SequentialCaptureStallError(
-                input.captureMode,
+                input.session,
                 input.stallTimeoutMs,
                 input.frameIndex,
                 input.totalFrames,
@@ -473,7 +480,7 @@ async function runWorkerEncodePipelineLoop(
     raceAgainstStall(
       promise,
       stallTimeoutMs - (Date.now() - lastProgressAt),
-      { captureMode: session.captureMode, frameIndex: idx, totalFrames, stallTimeoutMs },
+      { session, frameIndex: idx, totalFrames, stallTimeoutMs },
       abortSignal,
     );
 
@@ -953,7 +960,7 @@ export async function runCaptureStreamingStage(
             const { buffer } = await raceAgainstStall(
               captureFrameToBuffer(session, i, time),
               stallTimeoutMs - (Date.now() - lastProgressAt),
-              { captureMode: session.captureMode, frameIndex: i, totalFrames, stallTimeoutMs },
+              { session, frameIndex: i, totalFrames, stallTimeoutMs },
               abortSignal,
             );
             await reorderBuffer.waitForFrame(i);

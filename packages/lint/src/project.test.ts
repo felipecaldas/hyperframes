@@ -781,6 +781,86 @@ describe("audio_src_not_found with templating tokens", () => {
   });
 });
 
+describe("a double-quoted src that contains an apostrophe", () => {
+  const name = "Narrator's voice take 1.mp3";
+
+  it("finds the existing audio file instead of cutting the src at the apostrophe", async () => {
+    const project = makeProject(`<html><body>
+  <div data-composition-id="main" data-width="1920" data-height="1080" data-start="0" data-duration="10"></div>
+  <audio id="a1" class="clip" data-start="0" data-duration="3" data-track-index="10" src="assets/${name}"></audio>
+</body></html>`);
+    mkdirSync(join(project, "assets"), { recursive: true });
+    writeFileSync(join(project, "assets", name), "");
+    const { results } = await lintProject(project);
+    const codes = results.flatMap((entry) => entry.result.findings).map((f) => f.code);
+    expect(codes).not.toContain("audio_src_not_found");
+  });
+
+  async function lintCodes(body: string, files: string[]): Promise<string[]> {
+    const project = makeProject(`<html><body>
+  <div data-composition-id="main" data-width="1920" data-height="1080" data-start="0" data-duration="10"></div>
+  ${body}
+</body></html>`);
+    mkdirSync(join(project, "assets"), { recursive: true });
+    for (const file of files) writeFileSync(join(project, "assets", file), "");
+    const { results } = await lintProject(project);
+    return results.flatMap((entry) => entry.result.findings).map((f) => f.code);
+  }
+
+  it("finds an existing audio file whose apostrophe is written as a character reference", async () => {
+    const codes = await lintCodes(
+      `<audio id="a1" class="clip" data-start="0" data-duration="3" data-track-index="10" src="assets/Narrator&#39;s take.mp3"></audio>`,
+      ["Narrator's take.mp3"],
+    );
+    expect(codes).not.toContain("audio_src_not_found");
+  });
+
+  it("tells two layered files apart when their names share text up to an apostrophe", async () => {
+    const audio = (id: string, file: string) =>
+      `<audio id="${id}" class="clip" data-start="0" data-duration="5" data-track-index="10" src="assets/${file}"></audio>`;
+    const codes = await lintCodes(
+      audio("a1", "Narrator's take 1.mp3") + audio("a2", "Narrator's take 2.mp3"),
+      ["Narrator's take 1.mp3", "Narrator's take 2.mp3"],
+    );
+    expect(codes).toContain("duplicate_audio_track");
+  });
+
+  it("still reports a missing file whose name starts with a quote character", async () => {
+    const codes = await lintCodes(
+      `<audio id="a1" class="clip" data-start="0" data-duration="3" data-track-index="10" src="'90s theme.mp3"></audio>`,
+      [],
+    );
+    expect(codes).toContain("audio_src_not_found");
+  });
+
+  it("does not read an audio tag that an inline script builds as a string", async () => {
+    const codes = await lintCodes(
+      `<script>var s = '<audio src="' + u + '">'; var t = "<audio src='" + u + "'>";</script>`,
+      [],
+    );
+    expect(codes).not.toContain("audio_src_not_found");
+  });
+
+  it("does not read a src out of another attribute's text", async () => {
+    const codes = await lintCodes(`<img id="i1" alt="x src='ghost.png'" />`, []);
+    expect(codes).not.toContain("missing_local_asset");
+  });
+
+  it("finds the existing image through the shared src pattern too", async () => {
+    const image = "Ann's photo.png";
+    const project = makeProject(`<html><body>
+  <div data-composition-id="main" data-width="1920" data-height="1080" data-start="0" data-duration="10">
+    <img id="i1" class="clip" data-start="0" data-duration="3" data-track-index="0" src="assets/${image}">
+  </div>
+</body></html>`);
+    mkdirSync(join(project, "assets"), { recursive: true });
+    writeFileSync(join(project, "assets", image), "");
+    const { results } = await lintProject(project);
+    const codes = results.flatMap((entry) => entry.result.findings).map((f) => f.code);
+    expect(codes).not.toContain("missing_local_asset");
+  });
+});
+
 describe("templating tokens are checked on the raw src, before cleanAssetUrl", () => {
   // cleanAssetUrl splits on ?/#, which also chops inside a ${...} expression
   // (e.g. `${asset?.url}` -> `${asset`). The token skip must run on the RAW value or
@@ -900,5 +980,70 @@ describe("audio-aware project rules", () => {
       const codes = await codesFor(composition(video("muted")), ["audio.mp3"]);
       expect(codes).toContain("audio_file_without_element");
     });
+  });
+});
+
+describe("sub-composition files", () => {
+  const sceneFindings = async (project: string) =>
+    (await lintProject(project)).results.find((result) => result.file === "compositions/scene.html")
+      ?.result.findings ?? [];
+
+  it("resolves a scene's ../assets/ path from its own folder, as preview and render do", async () => {
+    const project = makeProject(validHtml(), {
+      "scene.html": `<template id="scene-template">
+  <div data-composition-id="scene" data-width="1920" data-height="1080">
+    <img src="../assets/logo.png" alt=""><img src="../../outside.png" alt="">
+  </div>
+</template>`,
+    });
+    mkdirSync(join(project, "assets"));
+    writeFileSync(join(project, "assets", "logo.png"), "");
+    const finding = (await sceneFindings(project)).find(
+      (f) => f.code === "invalid_parent_traversal_in_asset_path",
+    );
+    expect(finding?.message).toContain("1 asset path(s)");
+    expect(finding?.message).toContain("../../");
+  });
+
+  it("resolves a linked stylesheet's url()s from the stylesheet's own folder", async () => {
+    const project = makeProject(
+      validHtml().replace(
+        "<body>",
+        '<head><link rel="stylesheet" href="styles/main.css"></head><body>',
+      ),
+      {
+        "scene.html": `<template id="scene-template">
+  <link rel="stylesheet" href="../styles/escape.css">
+  <div data-composition-id="scene" data-width="1920" data-height="1080"></div>
+</template>`,
+      },
+    );
+    mkdirSync(join(project, "styles"));
+    writeFileSync(
+      join(project, "styles", "main.css"),
+      "@font-face { src: url('../fonts/B.woff2'); }",
+    );
+    writeFileSync(
+      join(project, "styles", "escape.css"),
+      ".a { background: url('../../outside.png'); }",
+    );
+    const { results } = await lintProject(project);
+    const traversal = (file: string) =>
+      results
+        .find((result) => result.file === file)
+        ?.result.findings.find((f) => f.code === "invalid_parent_traversal_in_asset_path");
+    expect(traversal("index.html")).toBeUndefined();
+    expect(traversal("compositions/scene.html")?.message).toContain("../../");
+  });
+
+  it("does not stop the check over a scene without its own size", async () => {
+    const project = makeProject(validHtml(), {
+      "scene.html": `<template id="scene-template">
+  <div data-composition-id="scene"><p>Hi</p></div>
+</template>`,
+    });
+    expect((await sceneFindings(project)).map((f) => f.code)).not.toContain(
+      "root_missing_dimensions",
+    );
   });
 });

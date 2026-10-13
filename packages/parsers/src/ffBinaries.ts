@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { accessSync, constants, existsSync } from "node:fs";
-import { delimiter, join, resolve } from "node:path";
+import { createRequire } from "node:module";
+import { delimiter, dirname, join, resolve } from "node:path";
 
 /**
  * Shared FFmpeg/FFprobe binary resolution for every package that shells out
@@ -18,7 +19,10 @@ const ENV_BY_NAME: Record<FfBinaryName, string> = {
   ffprobe: FFPROBE_PATH_ENV,
 };
 
-const pathLookupCache = new Map<FfBinaryName, string | undefined>();
+const pathLookupCache = new Map<FfBinaryName, string>();
+// A miss is trusted briefly: callers probe per media file, and an install still shows up within seconds.
+const MISS_TTL_MS = 5_000;
+const lastMissAt = new Map<FfBinaryName, number>();
 
 function candidateFileName(candidate: string): string {
   return candidate.split(/[\\/]/).at(-1)?.toLowerCase() ?? candidate.toLowerCase();
@@ -87,22 +91,45 @@ const COMMON_BIN_DIRS =
     ? []
     : ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/snap/bin"];
 
-function findInCommonDirs(name: FfBinaryName): string | undefined {
+// The npm installer package comes last: its binaries are old builds, so any system install wins.
+function findInCommonDirsOrInstallerPackage(name: FfBinaryName): string | undefined {
   for (const dir of COMMON_BIN_DIRS) {
     const candidate = `${dir}/${name}`;
     if (existsSync(candidate)) return candidate;
   }
-  return undefined;
+  return findInInstallerPackage(name);
+}
+
+function binaryFileName(name: FfBinaryName): string {
+  return process.platform === "win32" ? `${name}.exe` : name;
 }
 
 function findInProjectLocalBin(name: FfBinaryName): string | undefined {
-  const extension = process.platform === "win32" ? ".exe" : "";
-  const candidate = resolve(".hyperframes", "bin", `${name}${extension}`);
+  const candidate = resolve(".hyperframes", "bin", binaryFileName(name));
   return existsSync(candidate) ? candidate : undefined;
 }
 
-function lookupOnSystem(name: FfBinaryName): string | undefined {
-  if (pathLookupCache.has(name)) return pathLookupCache.get(name);
+function tryResolve(fromFile: string, request: string): string | undefined {
+  try {
+    return createRequire(fromFile).resolve(request);
+  } catch {
+    return undefined;
+  }
+}
+
+// An @ffmpeg-installer / @ffprobe-installer package reachable from the current folder, located
+// but never loaded. The platform package is resolved via the installer package first (pnpm layout).
+function findInInstallerPackage(name: FfBinaryName): string | undefined {
+  const project = resolve("package.json");
+  const platformManifest = `@${name}-installer/${process.platform}-${process.arch}/package.json`;
+  const installer = tryResolve(project, `@${name}-installer/${name}/package.json`);
+  const manifest =
+    (installer && tryResolve(installer, platformManifest)) ?? tryResolve(project, platformManifest);
+  const candidate = manifest && join(dirname(manifest), binaryFileName(name));
+  return candidate && isExecutablePathCandidate(candidate) ? candidate : undefined;
+}
+
+function searchSystem(name: FfBinaryName): string | undefined {
   let found: string | undefined;
   if (process.platform === "win32") {
     // `where.exe` writes bytes in the active console code page, while Node
@@ -124,8 +151,20 @@ function lookupOnSystem(name: FfBinaryName): string | undefined {
     }
   }
   found ??= findInProjectLocalBin(name);
-  found ??= findInCommonDirs(name);
-  const resolved = found ? resolve(found) : undefined;
+  found ??= findInCommonDirsOrInstallerPackage(name);
+  return found;
+}
+
+function lookupOnSystem(name: FfBinaryName): string | undefined {
+  const cached = pathLookupCache.get(name);
+  if (cached) return cached;
+  if (Date.now() - (lastMissAt.get(name) ?? -Infinity) < MISS_TTL_MS) return undefined;
+  const found = searchSystem(name);
+  if (!found) {
+    lastMissAt.set(name, Date.now());
+    return undefined;
+  }
+  const resolved = resolve(found);
   pathLookupCache.set(name, resolved);
   return resolved;
 }
@@ -144,10 +183,11 @@ export interface FindFfBinaryOptions {
 /**
  * Resolve an FFmpeg-family binary: env override first, then a native
  * current-directory/PATH scan on Windows or `which` plus PATH scan on Unix,
- * then a project-local
- * `.hyperframes/bin`, then well-known Unix install dirs. System lookups are
- * cached per binary for the process lifetime; the env override is re-read on
- * every call.
+ * then a project-local `.hyperframes/bin`, then well-known Unix install dirs, then an
+ * `@ffmpeg-installer`/`@ffprobe-installer` package reachable from the current folder.
+ * A found binary is cached for the process lifetime; a miss only for a few
+ * seconds, so a long-running server sees an install made after it started. The env
+ * override is re-read on every call.
  */
 export function findFfBinary(
   name: FfBinaryName,
@@ -164,4 +204,5 @@ export function findFfBinary(
 /** Test hook: drop cached system lookups so resolution can be re-exercised. */
 export function clearFfBinaryLookupCache(): void {
   pathLookupCache.clear();
+  lastMissAt.clear();
 }

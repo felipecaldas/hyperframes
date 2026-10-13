@@ -186,7 +186,7 @@ export interface StudioApiAdapter {
   /** Lint a single HTML string. */
   lint(
     html: string,
-    opts?: { filePath?: string; isSubComposition?: boolean },
+    opts?: { filePath?: string; isSubComposition?: boolean; compSrcPath?: string },
   ): Promise<LintResult> | LintResult;
 
   /**
@@ -250,6 +250,7 @@ export interface StudioApiAdapter {
      * the same channel `hyperframes render --variables` uses.
      */
     variables?: Record<string, unknown>;
+    useGpu?: boolean;
     /**
      * Telemetry id of the browser user who triggered the render. Lets the
      * adapter attribute the server-emitted render_complete/render_error to

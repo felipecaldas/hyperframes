@@ -7,6 +7,7 @@
 
 // fallow-ignore-file code-duplication
 import { type Page } from "puppeteer-core";
+import { withVideoFrameSources, type VideoFrameUpdate } from "./videoFrameTransport.js";
 import { type CaptureOptions } from "../types.js";
 import { COLOR_GRADING_SOURCE_HIDDEN_ATTR } from "@hyperframes/core/color-grading";
 import {
@@ -131,7 +132,7 @@ async function sendBeginFrame(
       }
       if (isPending) {
         throw new Error(
-          `[BeginFrame] Frame still pending after ${PENDING_FRAME_RETRIES} retries — CPU overloaded by parallel renders. ` +
+          `[BeginFrame] Frame still pending after ${PENDING_FRAME_RETRIES} retries: CPU overloaded by parallel renders. ` +
             `Reduce concurrent renders or use --docker for isolation.`,
         );
       }
@@ -643,10 +644,19 @@ export async function injectVideoFramesBatch(
   updates: Array<{ videoId: string; dataUri: string }>,
 ): Promise<string[]> {
   if (updates.length === 0) return [];
+  return withVideoFrameSources(page, updates, (resolved) =>
+    injectResolvedVideoFramesBatch(page, resolved),
+  );
+}
+
+async function injectResolvedVideoFramesBatch(
+  page: Page,
+  updates: VideoFrameUpdate[],
+): Promise<string[]> {
   return await page.evaluate(
     // fallow-ignore-next-line complexity
     async (
-      items: Array<{ videoId: string; dataUri: string; frameId: string }>,
+      items: Array<VideoFrameUpdate & { frameId: string }>,
       visualProperties: string[],
       colorGradingSourceHiddenAttr: string,
     ) => {
@@ -735,6 +745,15 @@ export async function injectVideoFramesBatch(
             ? 1
             : opacityParsed;
 
+        // Measure first: an in-flow bordered <img> sibling would shrink the video's flex box.
+        const videoRect = video.getBoundingClientRect();
+        const videoBox = {
+          left: Number.isFinite(video.offsetLeft) ? video.offsetLeft : 0,
+          top: Number.isFinite(video.offsetTop) ? video.offsetTop : 0,
+          width: video.offsetWidth > 0 ? video.offsetWidth : videoRect.width,
+          height: video.offsetHeight > 0 ? video.offsetHeight : videoRect.height,
+        };
+
         if (isNewImage) {
           img = document.createElement("img");
           img.classList.add("__render_frame__");
@@ -770,32 +789,27 @@ export async function injectVideoFramesBatch(
         // instead of flowing below it. With position:relative, both elements
         // stack vertically — the <img> lands below the video and gets clipped
         // by any overflow:hidden ancestor (e.g., border-radius wrappers).
-        //
-        // Apply this after visual style copying so the measured used box is
-        // the final authority for replacement frame geometry.
-        {
-          const videoRect = video.getBoundingClientRect();
-          const offsetLeft = Number.isFinite(video.offsetLeft) ? video.offsetLeft : 0;
-          const offsetTop = Number.isFinite(video.offsetTop) ? video.offsetTop : 0;
-          const offsetWidth = video.offsetWidth > 0 ? video.offsetWidth : videoRect.width;
-          const offsetHeight = video.offsetHeight > 0 ? video.offsetHeight : videoRect.height;
-          img.style.position = "absolute";
-          img.style.inset = "auto";
-          img.style.left = `${offsetLeft}px`;
-          img.style.top = `${offsetTop}px`;
-          img.style.right = "auto";
-          img.style.bottom = "auto";
-          img.style.width = `${offsetWidth}px`;
-          img.style.height = `${offsetHeight}px`;
-        }
+        img.style.position = "absolute";
+        img.style.inset = "auto";
+        img.style.left = `${videoBox.left}px`;
+        img.style.top = `${videoBox.top}px`;
+        img.style.right = "auto";
+        img.style.bottom = "auto";
+        img.style.width = `${videoBox.width}px`;
+        img.style.height = `${videoBox.height}px`;
+        // `videoBox` is a border-box even when the video is content-box.
+        img.style.boxSizing = "border-box";
         img.style.objectFit = computedStyle.objectFit;
         img.style.objectPosition = computedStyle.objectPosition;
         img.style.zIndex = computedStyle.zIndex;
 
         img.decoding = "sync";
         if (img.getAttribute("src") !== item.dataUri) {
+          if (item.crossOrigin) img.crossOrigin = item.crossOrigin;
+          else img.removeAttribute("crossorigin");
           img.src = item.dataUri;
-          const source = item.dataUri.startsWith("data:") ? "inline frame" : item.dataUri;
+          const source =
+            item.sourceLabel ?? (item.dataUri.startsWith("data:") ? "inline frame" : item.dataUri);
           pendingDecodes.push(
             img.decode().catch((error: unknown) => {
               throw new Error(

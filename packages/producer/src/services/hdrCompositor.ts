@@ -29,6 +29,7 @@ import {
   blitRgb48leAffine,
   parseTransformMatrix,
   convertTransfer,
+  isVideoHiddenBeforeStreamStart,
 } from "@hyperframes/engine";
 import type { ProducerLogger } from "../logger.js";
 import { type HdrImageTransferCache } from "./hdrImageTransferCache.js";
@@ -141,6 +142,8 @@ export interface HdrVideoFrameSource {
   scratch: Buffer;
   /** The raw file contains one playable source cycle and must wrap at EOF. */
   loop?: boolean;
+  mediaStart?: number;
+  videoStreamLeadSeconds?: number;
 }
 
 export function closeHdrVideoFrameSource(source: HdrVideoFrameSource, log?: ProducerLogger): void {
@@ -198,6 +201,8 @@ export function blitHdrVideoLayer(
     frameSource.loop,
   );
   if (effectiveIndex === null) return;
+  const mediaTime = (frameSource.mediaStart ?? 0) + effectiveIndex / fps;
+  if (isVideoHiddenBeforeStreamStart(frameSource.videoStreamLeadSeconds, mediaTime)) return;
   const frameOffset = effectiveIndex * frameSource.frameSize;
 
   try {
@@ -260,7 +265,7 @@ export function blitHdrVideoLayer(
       if (matrix && !isTranslationOnly) {
         if (clipped && log) {
           log.debug(
-            `HDR clip rect on affine-transformed element ${el.id} — clip not applied (affine scissor not yet supported)`,
+            `HDR clip rect on affine-transformed element ${el.id}: clip not applied (affine scissor not yet supported)`,
           );
         }
         blitRgb48leAffine(
@@ -349,7 +354,7 @@ export function blitHdrImageLayer(
     return;
   }
   if (el.clipRect && log) {
-    log.debug(`HDR clip rect on image element ${el.id} — clip not yet supported for images`);
+    log.debug(`HDR clip rect on image element ${el.id}: clip not yet supported for images`);
   }
 
   try {

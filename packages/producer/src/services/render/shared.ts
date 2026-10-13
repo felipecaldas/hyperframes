@@ -47,6 +47,7 @@ export interface CompositionMetadata {
   videos: VideoElement[];
   audios: AudioElement[];
   images: ImageElement[];
+  masterFxChain?: string;
   width: number;
   height: number;
 }

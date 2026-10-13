@@ -154,7 +154,9 @@ function claimHeld(reply: Awaited<ReturnType<typeof post>>, label: string): stri
   if (reply.ok)
     return (reply.body as { claimed: { id: string } | null } | null)?.claimed?.id ?? null;
   if (reply.status !== 404)
-    console.error(`"${label}" was not recorded as your edit: ${reply.error}`);
+    console.error(
+      `[history] ${reply.status}: "${label}" was not recorded as your edit: ${reply.error}`,
+    );
   return null;
 }
 

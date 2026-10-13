@@ -591,3 +591,47 @@ describe("computeStaticFrameSet's real page-side property matching (not a canned
     expect(result.nonSpatialOnlyFrameSet.has(0)).toBe(true);
   });
 });
+
+describe("a stall on a motion-blurred frame names the step in progress", () => {
+  it("names the frame seek, the injection and the restore seek, not the previous frame's step", async () => {
+    const steps: string[] = [];
+    const session = makeSession({
+      captureStep: "capturing the frame",
+      onBeforeCapture: async () => {
+        steps.push(`inject:${session.captureStep}`);
+      },
+    });
+    const page = globalThis as unknown as {
+      window: { __hf: { seek: (time: number, options?: { subFrameDivisions?: number }) => void } };
+    };
+    page.window.__hf.seek = (_time, options) => {
+      if (options?.subFrameDivisions === undefined) steps.push(`seek:${session.captureStep}`);
+    };
+
+    await captureFrameToBuffer(session, 10, 10 / 30);
+
+    expect(steps[0]).toBe("seek:seeking the timeline");
+    expect(steps[1]).toBe("inject:injecting video frames");
+    expect(steps[steps.length - 1]).toBe("seek:seeking the timeline");
+  });
+
+  it("names the seek and the injection on a frame without motion blur too", async () => {
+    const steps: string[] = [];
+    const session = makeSession({
+      motionBlur: undefined,
+      captureStep: "capturing the frame",
+      onBeforeCapture: async () => {
+        steps.push(`inject:${session.captureStep}`);
+      },
+    });
+    const page = globalThis as unknown as { window: { __hf: { seek: () => void } } };
+    page.window.__hf.seek = () => {
+      steps.push(`seek:${session.captureStep}`);
+    };
+
+    await captureFrameToBuffer(session, 10, 10 / 30);
+
+    expect(steps).toEqual(["seek:seeking the timeline", "inject:injecting video frames"]);
+    expect(session.captureStep).toBe("capturing the frame");
+  });
+});

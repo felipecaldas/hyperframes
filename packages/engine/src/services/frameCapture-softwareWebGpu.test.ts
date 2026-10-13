@@ -21,6 +21,7 @@ vi.mock("./browserManager.js", async (importOriginal) => ({
       browser: {
         version: async () => "Chrome/150.0.0.0",
         newPage: async () => ({
+          mainFrame: () => ({}),
           on: () => {},
           goto: async () => null,
           createCDPSession: async () => ({ on: () => {}, send: async () => ({}) }),

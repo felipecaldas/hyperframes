@@ -12,6 +12,7 @@ import {
   resolveAuthoredTimingWindow,
 } from "./authoredTiming";
 import { swallow } from "./diagnostics";
+import { readTimelineDurationSeconds } from "./timelineDuration";
 import { readElementPlaybackRate, readElementPlaybackStart } from "./media";
 import {
   parseStrictFiniteTimingNumber,
@@ -27,11 +28,8 @@ import { isSceneLikeCompositionId } from "../slideshow/index.js";
 import { COMPOSITION_CONTRACT_VERSION } from "../compositionContract.js";
 import { runtimeProtocolMetadata } from "./protocol.js";
 import { isElementNode, isMediaElement } from "./domRealm";
-
-/** A root timeline this long is an endless loop, not a film: GSAP reports 1e10 s for `repeat: -1`.
- *  Studio's sanitizeDurationSeconds rejects the same length. Animations that simply end past the
- *  voiceover are real duration, and the runtime player already plays them. */
-export const LOOP_INFLATED_TIMELINE_SECONDS = 7200;
+import { LOOP_INFLATED_TIMELINE_SECONDS } from "./compositionLength";
+import { cutToHostSlots } from "../mediaTiming";
 
 export function isRuntimeElementVisibleAt(
   rawNode: HTMLElement,
@@ -57,10 +55,7 @@ export function isRuntimeElementVisibleAt(
   const compId = rawNode.getAttribute("data-composition-id");
   if (compId) {
     const compTimeline = options.timelineRegistry[compId];
-    const liveDuration =
-      compTimeline && typeof compTimeline.duration === "function"
-        ? Number(compTimeline.duration())
-        : null;
+    const liveDuration = readTimelineDurationSeconds(compTimeline);
     const hasAuthoredTiming =
       rawNode.hasAttribute("data-duration") ||
       rawNode.hasAttribute("data-end") ||
@@ -70,7 +65,6 @@ export function isRuntimeElementVisibleAt(
       !hasAuthoredTiming &&
       (duration == null || duration <= 0) &&
       liveDuration != null &&
-      Number.isFinite(liveDuration) &&
       liveDuration > 0
     ) {
       duration = liveDuration;
@@ -185,11 +179,22 @@ function getFirstClassToken(node: Element): string | null {
 
 function filenameFromAssetUrl(url: string | null): string | null {
   if (!url) return null;
+  let filename: string | undefined;
   try {
     const parsed = new URL(url, document.baseURI);
-    return parsed.pathname.split("/").filter(Boolean).at(-1) ?? null;
+    filename = parsed.pathname.split("/").filter(Boolean).at(-1);
   } catch {
-    return url.split(/[\\/]/).filter(Boolean).at(-1) ?? null;
+    filename = url
+      .replace(/[?#].*$/, "")
+      .split(/[\\/]/)
+      .filter(Boolean)
+      .at(-1);
+  }
+  if (!filename) return null;
+  try {
+    return decodeURIComponent(filename);
+  } catch {
+    return filename;
   }
 }
 
@@ -254,14 +259,8 @@ export function collectRuntimeTimelinePayload(params: {
   });
   const resolveTimelineDurationSeconds = (compositionId: string | null): number | null => {
     if (!compositionId) return null;
-    const timeline = timelineRegistry[compositionId] ?? null;
-    if (!timeline || typeof timeline.duration !== "function") return null;
-    try {
-      const duration = Number(timeline.duration());
-      return Number.isFinite(duration) && duration > 0 ? duration : null;
-    } catch {
-      return null;
-    }
+    const duration = readTimelineDurationSeconds(timelineRegistry[compositionId]);
+    return duration != null && duration > 0 ? duration : null;
   };
   const resolveMediaWindowEndSeconds = (): number | null => {
     const mediaNodes = Array.from(
@@ -424,13 +423,14 @@ export function collectRuntimeTimelinePayload(params: {
       continue;
     const compositionContext = resolveNearestCompositionContext(node, root);
     const tag = node.tagName.toLowerCase();
-    const start =
+    let start =
       tag === "video" || tag === "audio"
         ? startResolver.resolveMediaStartForElement(node)
         : startResolver.resolveStartForElement(node, compositionContext.inheritedStart ?? 0);
     const nodeCompositionId = node.getAttribute("data-composition-id");
+    const isNestedHost = !!nodeCompositionId && nodeCompositionId !== rootCompositionId;
     let duration = parseElementDurationAttr(node);
-    if (duration == null && nodeCompositionId && nodeCompositionId !== rootCompositionId) {
+    if (duration == null && isNestedHost) {
       duration = resolveTimelineDurationSeconds(nodeCompositionId);
     }
     if (duration == null && isMediaElement(node)) {
@@ -450,6 +450,14 @@ export function collectRuntimeTimelinePayload(params: {
     if (duration == null || duration <= 0) continue;
     duration = clampDurationToRootWindow(start, duration);
     if (duration <= 0) continue;
+    const slots = startResolver.resolveHostSlotsForElement(node);
+    if (slots.length > 0) {
+      const played = cutToHostSlots({ start, end: start + duration }, slots);
+      const keepZeroLengthSoStudioNestsChildren = isNestedHost;
+      if (played.end <= played.start && !keepZeroLengthSoStudioNestsChildren) continue;
+      start = played.start;
+      duration = played.end - played.start;
+    }
     const end = start + duration;
     maxEnd = Math.max(maxEnd, end);
     const kind: RuntimeTimelineClip["kind"] =

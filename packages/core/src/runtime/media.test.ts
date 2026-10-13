@@ -911,6 +911,26 @@ describe("syncRuntimeMedia", () => {
       expect(clip.el.play).not.toHaveBeenCalled();
     });
 
+    it("judges a head-cut clip's cue-ahead by its rate at the cut, not at its own start", () => {
+      // The clip's own t=0 is 2 and an in-point cuts it to start at 5, where the ramp has reached 3x.
+      const rate: HfAutomationLane = {
+        target: "rate",
+        points: [
+          { t: 0, v: 1 },
+          { t: 3, v: 3 },
+        ],
+      };
+      const clip = createMockClip({ start: 5, origin: 2, end: 6, rate }, "audio");
+      syncRuntimeMedia({
+        clips: [clip],
+        timeSeconds: 4.98,
+        playing: true,
+        playbackRate: 1,
+        cueAheadSeconds: 0.034,
+      });
+      expect(clip.el.play).not.toHaveBeenCalled();
+    });
+
     it("keeps a clip it started early playing when the next tick is shorter", () => {
       const clip = createMockClip({ start: 5, end: 6 }, "audio");
       syncRuntimeMedia({
@@ -1980,6 +2000,44 @@ describe("syncRuntimeMedia", () => {
       expect(clip.el.playbackRate).toBeCloseTo(2.06, 9);
     });
   });
+
+  it.each([
+    [60, 0.25],
+    [10, 0.5],
+  ])(
+    "keeps a video slower than the browser can play on the playhead at %i fps, preview speed %f",
+    (fps, speed) => {
+      // A 0.1x clip at 0.25x or 0.5x preview speed is below Chromium's 1/16 rate floor.
+      const clip = createMockClip({ start: 0, end: 30, duration: 30, playbackRate: 0.1 });
+      const el = clip.el;
+      let rate = speed;
+      let paused = true;
+      Object.defineProperty(el, "playbackRate", {
+        configurable: true,
+        get: () => rate,
+        set: (v: number) => {
+          if (v < 0.0625) throw new DOMException("unsupported rate", "NotSupportedError");
+          rate = v;
+        },
+      });
+      Object.defineProperty(el, "paused", { configurable: true, get: () => paused });
+      el.play = vi.fn(() => ((paused = false), Promise.resolve()));
+      el.pause = vi.fn(() => void (paused = true));
+      const dt = 1 / fps;
+      let timeline = 0;
+      for (let i = 0; i < fps * 4; i++) {
+        timeline += speed * dt;
+        if (!paused) el.currentTime += rate * dt;
+        syncRuntimeMedia({
+          clips: [clip],
+          timeSeconds: timeline,
+          playing: true,
+          playbackRate: speed,
+        });
+      }
+      expect(Math.abs(el.currentTime - 0.1 * timeline)).toBeLessThan(0.05);
+    },
+  );
 
   // A seek while playing pauses and syncs in one pass, before the video element has paused.
   it("a seek that pauses mid-playback lands a lagging playing video on the new time", () => {

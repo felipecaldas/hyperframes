@@ -1,4 +1,5 @@
 import { refreshSvgSelectorAliases } from "../compiler/svgSelectorAliases";
+import { recordStartupError } from "./diagnostics";
 import {
   initSandboxRuntimeModular,
   installAuthoredMediaCapture,
@@ -73,10 +74,20 @@ function bootstrapHyperframeRuntime(): void {
 
 // Compiled composition scripts wait for web fonts, so what they measure matches every run.
 function startAfterCompositionScripts(): void {
-  refreshSvgSelectorAliases();
-  const deferred = Array.from(document.querySelectorAll(AFTER_FONTS_SCRIPTS));
-  if (deferred.length === 0) bootstrapHyperframeRuntime();
-  else void runScriptsAfterFonts(deferred, bootstrapHyperframeRuntime);
+  try {
+    refreshSvgSelectorAliases();
+    const deferred = Array.from(document.querySelectorAll(AFTER_FONTS_SCRIPTS));
+    if (deferred.length === 0) bootstrapHyperframeRuntime();
+    else {
+      void runScriptsAfterFonts(deferred, bootstrapHyperframeRuntime).catch((err: unknown) => {
+        recordStartupError(err);
+        reportError(err);
+      });
+    }
+  } catch (err) {
+    recordStartupError(err);
+    throw err;
+  }
 }
 
 if (document.readyState === "loading") {

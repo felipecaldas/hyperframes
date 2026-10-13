@@ -18,6 +18,7 @@ const INTEGRATION_TEST_FILES = new Set([
   "src/services/distributed/assemble.test.ts",
   "src/services/distributed/chunkBoundary.test.ts",
   "src/services/distributed/crossWorkerIdempotency.test.ts",
+  "src/services/distributed/plan.masterBus.test.ts",
   "src/services/distributed/plan.test.ts",
   "src/services/distributed/planSizeCap.test.ts",
   "src/services/distributed/renderChunk.test.ts",
@@ -34,6 +35,7 @@ const INTEGRATION_TEST_FILES = new Set([
   "src/services/render/renderCancel.integration.test.ts",
   "src/services/render/stages/compileStage.mediaType.test.ts",
   "src/services/render/stages/gifEncodeArgs.test.ts",
+  "src/services/videoFrameBorderClip.test.ts",
   "src/utils/audioRegression.test.ts",
   "src/utils/streamDurationParity.test.ts",
 ]);

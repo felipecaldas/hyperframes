@@ -7,6 +7,7 @@ import { PlayerControls } from "./PlayerControls";
 import { DEFAULT_SHORTCUT_SECTIONS, type ShortcutSection } from "./studioShortcuts";
 import { createHappyDomRootHarness } from "./testRootHarness";
 import { usePlayerStore } from "../store/playerStore";
+import { POPUP_LAYER } from "../../components/ui/Menu";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -52,11 +53,16 @@ function openPanel(trigger: HTMLButtonElement): void {
   expect(trigger.getAttribute("aria-expanded")).toBe("true");
 }
 
+/** The open popover a trigger controls; it portals out of the trigger's host. */
+function panelOf(trigger: HTMLButtonElement): HTMLElement {
+  return document.getElementById(trigger.getAttribute("aria-controls")!)!;
+}
+
 describe("ShortcutsPanel", () => {
   it.each(["page", "button", "panel"] as const)(
     "closes with Escape from the %s-focused position",
     (focusPosition) => {
-      const { host, trigger } = renderPanel();
+      const { trigger } = renderPanel();
       openPanel(trigger);
 
       let eventTarget: Document | HTMLElement;
@@ -70,7 +76,9 @@ describe("ShortcutsPanel", () => {
         eventTarget = trigger;
         expect(document.activeElement).toBe(trigger);
       } else {
-        const panelInput = host.querySelector<HTMLInputElement>('[aria-label="Jump to frame"]')!;
+        const panelInput = document.querySelector<HTMLInputElement>(
+          '[aria-label="Jump to frame"]',
+        )!;
         panelInput.focus();
         eventTarget = panelInput;
         expect(document.activeElement).toBe(panelInput);
@@ -81,40 +89,47 @@ describe("ShortcutsPanel", () => {
       });
 
       expect(trigger.getAttribute("aria-expanded")).toBe("false");
-      expect(host.querySelector('[aria-label="Jump to frame"]')).toBeNull();
+      expect(document.querySelector('[aria-label="Jump to frame"]')).toBeNull();
     },
   );
 
-  it("closes on capture-phase pointerdown even when its default is prevented", () => {
+  it("closes on an outside press whose pointerdown a canvas gesture prevented", () => {
     const preventDefault = (event: Event) => event.preventDefault();
     document.addEventListener("pointerdown", preventDefault, true);
-    const { host, trigger } = renderPanel();
-    openPanel(trigger);
+    // The canvas exists before the panel opens, as in the editor.
     const outside = document.createElement("div");
     document.body.append(outside);
+    const { trigger } = renderPanel();
+    openPanel(trigger);
     const pointerDown = new PointerEvent("pointerdown", {
       bubbles: true,
       cancelable: true,
       button: 0,
     });
 
-    act(() => outside.dispatchEvent(pointerDown));
+    // A prevented pointerdown suppresses mousedown and mouseup; the browser still sends the click.
+    act(() => {
+      outside.dispatchEvent(pointerDown);
+      outside.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }),
+      );
+    });
 
     document.removeEventListener("pointerdown", preventDefault, true);
     expect(pointerDown.defaultPrevented).toBe(true);
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
-    expect(host.querySelector('[aria-label="Jump to frame"]')).toBeNull();
+    expect(document.querySelector('[aria-label="Jump to frame"]')).toBeNull();
   });
 
   it("does not close on a click inside the panel", () => {
-    const { host, trigger } = renderPanel();
+    const { trigger } = renderPanel();
     openPanel(trigger);
-    const panelInput = host.querySelector<HTMLInputElement>('[aria-label="Jump to frame"]')!;
+    const panelInput = document.querySelector<HTMLInputElement>('[aria-label="Jump to frame"]')!;
 
     act(() => pressAndClick(panelInput));
 
     expect(trigger.getAttribute("aria-expanded")).toBe("true");
-    expect(host.querySelector('[aria-label="Jump to frame"]')).not.toBeNull();
+    expect(document.querySelector('[aria-label="Jump to frame"]')).not.toBeNull();
   });
 
   it("toggles once per trigger click", () => {
@@ -140,10 +155,10 @@ describe("ShortcutsPanel", () => {
   });
 
   it("connects the trigger to the dialog with aria-controls", () => {
-    const { host, trigger } = renderPanel();
+    const { trigger } = renderPanel();
     openPanel(trigger);
     const panelId = trigger.getAttribute("aria-controls");
-    const panel = panelId ? host.querySelector<HTMLElement>(`#${CSS.escape(panelId)}`) : null;
+    const panel = panelId ? document.querySelector<HTMLElement>(`#${CSS.escape(panelId)}`) : null;
 
     expect(panelId).not.toBeNull();
     expect(panel?.getAttribute("role")).toBe("dialog");
@@ -151,6 +166,21 @@ describe("ShortcutsPanel", () => {
     // operable, so aria-modal would lie to assistive tech about inertness.
     expect(panel?.getAttribute("aria-modal")).toBeNull();
     expect(panel?.id).toBe(panelId);
+  });
+
+  it("opens on the popup layer, above its button and outside the boxes that hold it", async () => {
+    const { host, trigger } = renderPanel();
+    // A button at the window's top edge: the panel must not flip down over the timeline.
+    trigger.getBoundingClientRect = () => new DOMRect(900, 0, 28, 28);
+    openPanel(trigger);
+    await act(async () => {});
+    const panel = panelOf(trigger);
+
+    expect(host.contains(panel)).toBe(false);
+    expect(panel.closest(`.${POPUP_LAYER}`)).not.toBeNull();
+    expect(panel.dataset.side).toBe("top");
+    expect(panel.dataset.align).toBe("end");
+    expect(panel.classList).toContain("max-h-[min(280px,var(--available-height))]");
   });
 
   it("lists what an embedder passes to PlayerControls instead of Studio's defaults", () => {
@@ -162,8 +192,11 @@ describe("ShortcutsPanel", () => {
           <PlayerControls onTogglePlay={vi.fn()} onSeek={vi.fn()} shortcutSections={sections} />,
         );
       });
-      openPanel(host.querySelector<HTMLButtonElement>('button[aria-label="Shortcuts and tools"]')!);
-      return host.textContent ?? "";
+      const trigger = host.querySelector<HTMLButtonElement>(
+        'button[aria-label="Shortcuts and tools"]',
+      )!;
+      openPanel(trigger);
+      return panelOf(trigger).textContent ?? "";
     };
     const withoutSplit = DEFAULT_SHORTCUT_SECTIONS.map((section) => ({
       ...section,
@@ -196,10 +229,30 @@ describe("ShortcutsPanel", () => {
     });
     openPanel(host.querySelector<HTMLButtonElement>('button[aria-label="Shortcuts and tools"]')!);
 
-    expect(host.textContent).toContain("Select");
-    expect(host.textContent).toContain("Snap");
+    expect(document.body.textContent).toContain("Select");
+    expect(document.body.textContent).toContain("Snap");
     expect(errors.mock.calls.flat().join(" ")).not.toMatch(/same key/);
     errors.mockRestore();
+  });
+
+  it("ties the shortcuts button to its tooltip for screen readers", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    act(() => {
+      mount(host).render(<ShortcutsButton sections={[{ title: "Host", hints: [] }]} />);
+    });
+    const button = host.querySelector<HTMLButtonElement>(
+      'button[aria-label="Shortcuts and tools"]',
+    )!;
+
+    act(() => button.focus());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const tip = document.querySelector<HTMLElement>('[role="tooltip"]');
+    expect(tip?.textContent).toBe("Shortcuts and tools");
+    expect(button.getAttribute("aria-describedby")).toBe(tip?.id);
   });
 
   it("renders standalone for a host toolbar, reading the player store", () => {
@@ -213,10 +266,10 @@ describe("ShortcutsPanel", () => {
         mount(host).render(<ShortcutsButton sections={[{ title: "Host", hints: [] }]} />);
       });
       openPanel(host.querySelector<HTMLButtonElement>('button[aria-label="Shortcuts and tools"]')!);
-      expect(host.textContent).toContain("Host");
-      expect(host.textContent).toContain("00:02");
+      expect(document.body.textContent).toContain("Host");
+      expect(document.body.textContent).toContain("00:02");
 
-      const input = host.querySelector<HTMLInputElement>('input[aria-label="Jump to frame"]')!;
+      const input = document.querySelector<HTMLInputElement>('input[aria-label="Jump to frame"]')!;
       act(() => {
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
           input,

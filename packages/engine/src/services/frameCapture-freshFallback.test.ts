@@ -25,6 +25,7 @@ vi.mock("./browserManager.js", async (importOriginal) => ({
     browser: {
       version: async () => "Chrome/150.0.0.0",
       newPage: async () => ({
+        mainFrame: () => ({}),
         evaluateOnNewDocument: async () => {},
         setViewport: async () => {},
         evaluate: async () => undefined,

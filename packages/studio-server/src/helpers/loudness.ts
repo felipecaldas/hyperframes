@@ -4,6 +4,8 @@ import { promisify } from "node:util";
 import { isAudibleVideoElement } from "@hyperframes/core/audible-video";
 import { formatAudioGain, MAX_AUDIO_GAIN_DB } from "@hyperframes/core/audio-gain";
 import { findFfBinary } from "@hyperframes/parsers/ff-binaries";
+import { readMediaOffsetSeconds } from "@hyperframes/parsers/media-duration";
+import { requestedProjectPath } from "./requestSubPath.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -252,6 +254,14 @@ function requiredAudioIdentity(attributes: Map<string, AttributeSpan>) {
   return { id, src };
 }
 
+function authoredMediaStart(attributes: Map<string, AttributeSpan>, id: string): number {
+  return readMediaOffsetSeconds((name) => {
+    const raw = attributes.get(name)?.value;
+    if (name === "data-media-start") authoredNumber(raw, 0, name, id);
+    return raw;
+  });
+}
+
 /** Boolean attributes carry no `=`, so the value map cannot see them. */
 function hasBareAttribute(html: string, range: TagRange, name: string): boolean {
   const unquoted = html.slice(range.start, range.end).replace(/"[^"]*"|'[^']*'/g, '""');
@@ -297,12 +307,7 @@ function mediaTagFromRange(html: string, range: MediaTagRange): AudioTag | null 
     id,
     src,
     volume: authoredNumber(volumeAttribute?.value, 1, "data-volume", id),
-    mediaStart: authoredNumber(
-      attributes.get("data-media-start")?.value,
-      0,
-      "data-media-start",
-      id,
-    ),
+    mediaStart: authoredMediaStart(attributes, id),
     duration: authoredDuration(attributes, id),
     playbackRate: authoredNumber(
       attributes.get("data-playback-rate")?.value,
@@ -333,13 +338,7 @@ export function audioTags(html: string): AudioTag[] {
 
 /** Resolve only a file contained by the project. Remote and traversal sources are not measured. */
 export function resolveLocalAudioPath(projectDir: string, src: string): string {
-  const withoutSuffix = src.split(/[?#]/, 1)[0] ?? "";
-  let decoded = "";
-  try {
-    decoded = decodeURIComponent(withoutSuffix);
-  } catch {
-    throw new Error(`Audio source must be a local project file: ${src}`);
-  }
+  const decoded = requestedProjectPath(projectDir, src);
   if (!decoded || isAbsolute(decoded) || /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(decoded)) {
     throw new Error(`Audio source must be a local project file: ${src}`);
   }
@@ -387,7 +386,7 @@ export function audioNormalizationPlan(
   if (wantedGainDb > MAX_AUDIO_GAIN_DB + 1e-9) {
     throw new Error(
       `Matching #${targetTrack.id} needs ${wantedGainDb.toFixed(1)} dB, beyond the +${MAX_AUDIO_GAIN_DB} dB authoring ceiling. ` +
-        `A gap this large belongs in the source file, not the mixer — mixer gain raises the noise floor with the signal. ` +
+        `A gap this large belongs in the source file, not the mixer: mixer gain raises the noise floor with the signal. ` +
         `Normalize ${targetTrack.id}'s asset offline (e.g. ffmpeg loudnorm), or lower #${referenceTrack.id} instead.`,
     );
   }

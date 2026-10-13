@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { ensureModel } from "../whisper/manager.js";
+import { MODELS_DIR, ensureModel } from "../whisper/manager.js";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import fs, { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -10,16 +11,7 @@ import type { ClientRequest, IncomingMessage } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { downloadFile, REDIRECT_CODES, redirectTarget } from "./download.js";
 
-const { unlinkSyncMock } = vi.hoisted(() => ({
-  unlinkSyncMock: vi.fn(),
-}));
-
 vi.mock("node:https", () => ({ get: vi.fn() }));
-vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs")>();
-  unlinkSyncMock.mockImplementation(actual.unlinkSync);
-  return { ...actual, unlinkSync: unlinkSyncMock };
-});
 
 const mockGet = vi.mocked(httpsGet);
 const tempDirs: string[] = [];
@@ -28,6 +20,7 @@ function httpsResponse(
   statusCode: number,
   headers: Record<string, string> = {},
   body?: string | ((url: string) => string),
+  onResponse?: (response: IncomingMessage) => void,
 ): typeof httpsGet {
   return ((_url: string, callback: (response: IncomingMessage) => void) => {
     const response = new PassThrough() as PassThrough & {
@@ -38,7 +31,9 @@ function httpsResponse(
     response.headers = headers;
     const request = new EventEmitter() as ClientRequest;
     request.setTimeout = vi.fn();
-    callback(response as unknown as IncomingMessage);
+    const message = response as unknown as IncomingMessage;
+    onResponse?.(message);
+    callback(message);
     if (body !== undefined) {
       queueMicrotask(() => response.end(typeof body === "function" ? body(_url) : body));
     }
@@ -48,10 +43,46 @@ function httpsResponse(
 
 afterEach(() => {
   vi.clearAllMocks();
+  vi.restoreAllMocks();
+  syncBuiltinESMExports();
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 describe("downloadFile", () => {
+  it("hands https.get the caller's signal, so aborting a model download removes the partial file", async () => {
+    let seen: AbortSignal | undefined;
+    mockGet.mockImplementation(((
+      _url: string,
+      options: { signal?: AbortSignal },
+      callback: (response: IncomingMessage) => void,
+    ) => {
+      seen = options.signal;
+      const response = Object.assign(new PassThrough(), { statusCode: 200, headers: {} });
+      const request = new EventEmitter() as ClientRequest;
+      request.setTimeout = vi.fn();
+      callback(response as unknown as IncomingMessage);
+      response.write("partial");
+      // What Node does with a request whose signal aborts.
+      options.signal?.addEventListener("abort", () =>
+        request.emit(
+          "error",
+          Object.assign(new Error("The operation was aborted"), { name: "AbortError" }),
+        ),
+      );
+      return request;
+    }) as unknown as typeof httpsGet);
+    const controller = new AbortController();
+    const model = `test-${randomUUID()}`;
+
+    const download = ensureModel(model, { signal: controller.signal });
+    await new Promise((resolve) => setImmediate(resolve));
+    controller.abort();
+
+    await expect(download).rejects.toThrow("The operation was aborted");
+    expect(seen).toBe(controller.signal);
+    expect(readdirSync(MODELS_DIR).filter((name) => name.includes(model))).toEqual([]);
+  });
+
   it("carries model download progress through the real pipeline and stays quiet on cache hits", async () => {
     mockGet.mockImplementation(httpsResponse(200, { "content-length": "5" }, "hello"));
     const events: unknown[] = [];
@@ -120,16 +151,18 @@ describe("downloadFile", () => {
   });
 
   it("rejects an idle response and removes the partial file", async () => {
-    const actualFs = await vi.importActual<typeof import("node:fs")>("node:fs");
     let responseClosed = false;
-    unlinkSyncMock.mockImplementation((path) => {
+    const realUnlinkSync = fs.unlinkSync;
+    vi.spyOn(fs, "unlinkSync").mockImplementation((path) => {
       if (!responseClosed) {
         const error = new Error("file is locked");
         Object.assign(error, { code: "EBUSY" });
         throw error;
       }
-      actualFs.unlinkSync(path);
+      realUnlinkSync(path);
     });
+    // Node's named exports of a builtin follow its default export only once synced.
+    syncBuiltinESMExports();
 
     mockGet.mockImplementation(((_url: string, callback: (response: IncomingMessage) => void) => {
       const response = new PassThrough() as PassThrough & {
@@ -180,6 +213,78 @@ describe("downloadFile", () => {
 });
 
 describe("redirect handling", () => {
+  it("closes each redirect response before opening the next request", async () => {
+    const responses: IncomingMessage[] = [];
+    const capture = (response: IncomingMessage) => responses.push(response);
+    mockGet
+      .mockImplementationOnce(httpsResponse(302, { location: "/second" }, undefined, capture))
+      .mockImplementationOnce(
+        httpsResponse(307, { location: "/model" }, undefined, (response) => {
+          expect(responses[0]?.destroyed).toBe(true);
+          capture(response);
+        }),
+      )
+      .mockImplementationOnce(
+        httpsResponse(200, {}, "hello", () => {
+          expect(responses[1]?.destroyed).toBe(true);
+        }),
+      );
+    const dir = mkdtempSync(join(tmpdir(), "hyperframes-download-redirect-"));
+    tempDirs.push(dir);
+    await downloadFile("https://example.test/first", join(dir, "model"));
+
+    expect(responses).toHaveLength(2);
+    expect(responses.every((response) => response.destroyed)).toBe(true);
+    expect(mockGet).toHaveBeenCalledTimes(3);
+    expect(readFileSync(join(dir, "model"), "utf8")).toBe("hello");
+  });
+
+  it("does not let a discarded redirect request fail the active download", async () => {
+    mockGet
+      .mockImplementationOnce(httpsResponse(302, { location: "/model" }))
+      .mockImplementationOnce(httpsResponse(200, {}, "hello"));
+    const dir = mkdtempSync(join(tmpdir(), "hyperframes-download-redirect-"));
+    tempDirs.push(dir);
+    const pending = downloadFile("https://example.test/first", join(dir, "model"));
+    const firstRequest = mockGet.mock.results[0]?.value;
+    firstRequest?.emit("error", new Error("old redirect socket failed"));
+
+    await expect(pending).resolves.toBeUndefined();
+    expect(readFileSync(join(dir, "model"), "utf8")).toBe("hello");
+    expect(readdirSync(dir)).toEqual(["model"]);
+  });
+
+  it("closes redirect loop responses when reaching the hop limit", async () => {
+    const responses: IncomingMessage[] = [];
+    mockGet.mockImplementation(
+      httpsResponse(302, { location: "/loop" }, undefined, (response) => responses.push(response)),
+    );
+    const dir = mkdtempSync(join(tmpdir(), "hyperframes-download-redirect-"));
+    tempDirs.push(dir);
+
+    await expect(downloadFile("https://example.test/loop", join(dir, "model"))).rejects.toThrow(
+      "more than 10 redirects",
+    );
+    expect(responses).toHaveLength(11);
+    expect(responses.every((response) => response.destroyed)).toBe(true);
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it.each([302, 404, 503])("closes rejected HTTP %s responses", async (status) => {
+    const responses: IncomingMessage[] = [];
+    mockGet.mockImplementation(
+      httpsResponse(status, {}, undefined, (response) => responses.push(response)),
+    );
+    const dir = mkdtempSync(join(tmpdir(), "hyperframes-download-http-error-"));
+    tempDirs.push(dir);
+
+    await expect(downloadFile("https://example.test/model", join(dir, "model"))).rejects.toThrow(
+      `HTTP ${status}`,
+    );
+    expect(responses[0]?.destroyed).toBe(true);
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
   it("rejects a redirect that the HTTPS client cannot follow", async () => {
     mockGet
       .mockImplementationOnce(

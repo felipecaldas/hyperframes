@@ -203,7 +203,7 @@ async function captureSegmentFrames(
       ctx.captureFrame(ctx.session, i, time),
       ctx.stallTimeoutMs - (Date.now() - lastProgressAt),
       {
-        captureMode: ctx.session.captureMode,
+        session: ctx.session,
         frameIndex: i,
         totalFrames: ctx.totalFrames,
         stallTimeoutMs: ctx.stallTimeoutMs,

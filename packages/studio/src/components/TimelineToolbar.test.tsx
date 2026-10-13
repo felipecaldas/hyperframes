@@ -82,7 +82,7 @@ describe("TimelineToolbar — adaptive thumbnails", () => {
   it("keeps a user-controlled hidden mode as the rollback path", () => {
     const { host, root } = renderToolbar();
     const button = host.querySelector<HTMLButtonElement>(
-      'button[aria-label="Hide thumbnails — labels only"]',
+      'button[aria-label="Hide thumbnails: labels only"]',
     );
     if (!button) throw new Error("thumbnail toggle not rendered");
 
@@ -90,7 +90,7 @@ describe("TimelineToolbar — adaptive thumbnails", () => {
 
     expect(usePlayerStore.getState().thumbnailMode).toBe("hidden");
     expect(button.getAttribute("aria-label")).toBe(
-      "Show thumbnails — posters stay visible; richer previews appear on interaction",
+      "Show thumbnails: posters stay visible; richer previews appear on interaction",
     );
     act(() => root.unmount());
   });
@@ -271,7 +271,7 @@ describe("TimelineToolbar Fit", () => {
       timelineFitPps: 10,
       timelinePps: 10,
     });
-    return registerTimelineZoomViewport({ scroll, contentOrigin: 32 });
+    return registerTimelineZoomViewport({ scroll, contentOrigin: 32, publishScroll: () => {} });
   }
 
   it("moves the slider and its readout with a zoom while it is previewed", () => {

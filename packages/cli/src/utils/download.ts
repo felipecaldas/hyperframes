@@ -13,6 +13,8 @@ export interface DownloadOptions {
   /** Reject before writing more than this many response bytes. */
   maxBytes?: number;
   onProgress?: (receivedBytes: number, totalBytes: number | null) => void;
+  /** Aborting it destroys the request and removes the partial file. */
+  signal?: AbortSignal;
 }
 
 /** Every redirect a host may reasonably answer with, not just the two we saw first. */
@@ -65,6 +67,14 @@ function measureDownload(options: DownloadOptions, contentLength: string | undef
   return { stream, complete: () => options.onProgress?.(receivedBytes, totalBytes) };
 }
 
+function getUrl(
+  url: string,
+  signal: AbortSignal | undefined,
+  onResponse: (res: IncomingMessage) => void,
+): ClientRequest {
+  return signal ? httpsGet(url, { signal }, onResponse) : httpsGet(url, onResponse);
+}
+
 /**
  * Download a file from a URL, following redirects.
  * Uses atomic write (download to .tmp, rename on success) to prevent
@@ -88,24 +98,25 @@ export function downloadFile(
   return new Promise((resolve, reject) => {
     const follow = (u: string, hops = 0) => {
       let activeResponse: IncomingMessage | undefined;
+      let responseDiscarded = false;
       let responsePipelineStarted = false;
       let requestError: Error | undefined;
       let request: ClientRequest;
       try {
-        request = httpsGet(u, (res) => {
+        request = getUrl(u, options.signal, (res) => {
           activeResponse = res;
           if (res.statusCode && REDIRECT_CODES.has(res.statusCode)) {
             const location = res.headers.location;
             if (location) {
+              responseDiscarded = true;
+              res.destroy();
               if (hops >= MAX_REDIRECTS) {
-                res.resume();
                 removePartialFile(tmp);
                 reject(
                   new Error(`Download failed: more than ${MAX_REDIRECTS} redirects from ${url}`),
                 );
                 return;
               }
-              res.resume();
               try {
                 follow(redirectTarget(location, u), hops + 1);
               } catch (error) {
@@ -116,7 +127,8 @@ export function downloadFile(
             }
           }
           if (res.statusCode !== 200) {
-            res.resume();
+            responseDiscarded = true;
+            res.destroy();
             removePartialFile(tmp);
             reject(new Error(`Download failed: HTTP ${res.statusCode}`));
             return;
@@ -145,6 +157,7 @@ export function downloadFile(
         request.destroy(new Error(`Download timed out after ${timeoutMs}ms`));
       });
       request.on("error", (err) => {
+        if (responseDiscarded) return;
         if (responsePipelineStarted) {
           requestError = err;
           activeResponse?.destroy(err);

@@ -50,17 +50,28 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+      # HEAD is the PR merge ref; its first parent is the current base tip, unlike the payload's
+      # base.sha, which goes stale and would count the base's newer commits as the PR's changes.
+      - name: Find the pull request's current base
+        id: base
+        if: github.event_name == 'pull_request'
+        run: |
+          git rev-parse --verify -q HEAD^2 > /dev/null || { echo "::error::HEAD is not the pull request merge commit"; exit 1; }
+          sha="$(git rev-parse --verify HEAD^1)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         id: filter
         if: github.event_name != 'schedule'
         with:
           token: ""
+          base: ${{ steps.base.outputs.sha }}
           filters: |
             code:
               - "packages/core/**"
               - "packages/producer/**"
               - "packages/engine/**"
               - "Dockerfile*"
+              - ".github/workflows/regression.yml"
       # Bin-pack the shard matrix from recorded per-fixture timings rather than
       # a hand-written list. Fails if any fixture on disk is neither scheduled
       # nor explicitly excluded, so a new fixture cannot silently never run.
@@ -115,6 +126,12 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          # Docker Hub rate-limits anonymous pulls from shared runners; pull through Google's mirror.
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
 
       - name: Build test Docker image (cached)
         # Normal duration is ~3 min; a bun install that errors and hangs

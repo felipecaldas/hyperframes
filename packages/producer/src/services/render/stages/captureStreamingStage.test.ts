@@ -61,11 +61,12 @@ mock.module("@hyperframes/engine", () => ({
     }
     return [];
   },
-  captureFrameToBuffer: async () => {
+  captureFrameToBuffer: async (session: { captureStep?: string }) => {
     if (failCaptureFrameToBuffer) {
       throw new Error("captureFrameToBuffer failed");
     }
     if (hangSequentialUntilStall) {
+      session.captureStep = "capturing the frame";
       return new Promise(() => {});
     }
     return { buffer: Buffer.from("frame"), captureTimeMs: 1 };
@@ -600,6 +601,7 @@ describe("runCaptureStreamingStage", () => {
     expect(caught).toBeInstanceOf(Error);
     expect((caught as Error & { cause?: Error }).cause?.name).toBe("SequentialCaptureStallError");
     expect((caught as Error).message).toContain("Sequential screenshot capture stalled");
+    expect((caught as Error).message).toContain("(stuck at frame 0/10 while capturing the frame)");
     expect((caught as Error).message).not.toContain("drawElement");
     expect(closeCaptureSession).toHaveBeenCalledTimes(1);
   });

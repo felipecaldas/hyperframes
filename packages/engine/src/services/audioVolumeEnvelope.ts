@@ -11,7 +11,7 @@
  * output (and the golden baselines) only change where a fade is actually applied.
  *
  * The prepared tracks are always `pcm_s16le`, 48 kHz, stereo (see
- * `prepareAudioTrack` / `extractAudioFromVideo`). Anything else is rejected so
+ * `extractAudioSegment`). Anything else is rejected so
  * the caller can fall back to the expression path rather than corrupting audio.
  */
 

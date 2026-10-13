@@ -1,3 +1,4 @@
+import { decodedUrlPath } from "@hyperframes/parsers/asset-paths";
 // fallow-ignore-file code-duplication complexity
 /**
  * HTML Compiler for Producer
@@ -53,6 +54,7 @@ import {
   parseHostVariableValues,
   headStyleRuns,
   inlineScriptRuns,
+  parsesAsScript,
   styleElementsFor,
   insertBeforeCloseTag,
   isRuntimeFileUrl,
@@ -77,6 +79,7 @@ import {
   analyzeKeyframeIntervals,
   assertMediaPayload,
   NotMediaPayloadError,
+  parseMasterFxChain,
   probeMediaProfile,
 } from "@hyperframes/engine";
 import {
@@ -108,6 +111,8 @@ export interface CompiledComposition {
   videos: VideoElement[];
   audios: AudioElement[];
   images: ImageElement[];
+  droppedMediaIds: Set<string>;
+  masterFxChain?: string;
   unresolvedCompositions: UnresolvedElement[];
   /** Assets that resolve outside projectDir. Keys are the path used in HTML, values are absolute filesystem paths. */
   externalAssets: Map<string, string>;
@@ -482,8 +487,9 @@ async function resolveMediaDuration(
       // The element will get duration 0 and be excluded from the render.
       return { duration: null, resolvedPath: src };
     }
-  } else if (!filePath.startsWith("/")) {
-    filePath = join(baseDir, filePath);
+  } else {
+    filePath = decodedUrlPath(src);
+    if (!filePath.startsWith("/")) filePath = join(baseDir, filePath);
   }
 
   if (!existsSync(filePath)) {
@@ -537,7 +543,7 @@ async function resolveMediaDuration(
           // as `prepare/ffmpeg_failed` with owner "system".
           log?.warn(
             `[compile] Audio "${elementIdentity}" (${src}) is a text document, not a media ` +
-              "file — the element is dropped from the render. Point it at a rendered media file.",
+              "file, so the element is dropped from the render. Point it at a rendered media file.",
           );
         }
         return { duration: null, resolvedPath: filePath };
@@ -666,7 +672,7 @@ async function compileHtmlFile(
       // thread `log` through parseSubCompositions to warn for it too.
       log?.warn(
         `[compile] Audio "${r.id}" (${r.src}) is ${r.maxDuration.toFixed(2)}s but its ` +
-          `data-duration is ${r.duration.toFixed(2)}s — the slot is shortened to the media ` +
+          `data-duration is ${r.duration.toFixed(2)}s, so the slot is shortened to the media ` +
           `length. Set data-duration to ~${r.maxDuration.toFixed(2)}s, trim data-media-start, ` +
           `or use a longer/looping source if that isn't intended.`,
       );
@@ -904,9 +910,9 @@ function coalesceHeadStylesAndBodyScripts(html: string): string {
   const { document } = parseHTML(html);
   const head = document.querySelector("head");
   const body = document.querySelector("body");
-  if (!head) return html;
+  if (!head && !body) return html;
 
-  const styleEls = Array.from(head.querySelectorAll("style"));
+  const styleEls = head ? Array.from(head.querySelectorAll("style")) : [];
   const importRe = /@import\s+url\([^)]*\)\s*;|@import\s+["'][^"']+["']\s*;/gi;
   for (const run of styleEls.length > 1 ? headStyleRuns(styleEls) : []) {
     const imports: string[] = [];
@@ -943,6 +949,7 @@ function coalesceHeadStylesAndBodyScripts(html: string): string {
         .filter(Boolean)
         .join("\n;\n")
         .trim();
+      if (mergedJs && !parsesAsScript(mergedJs)) continue;
       for (const el of members) el.remove();
       if (!mergedJs) continue;
       const script = document.createElement("script");
@@ -1101,9 +1108,12 @@ function inlineSubCompositions(
     let pending = variablesByCompScript ? [variablesByCompScript] : [];
     const flushInline = () => {
       if (!pending.length) return;
-      const scriptEl = document.createElement("script");
-      scriptEl.textContent = pending.join("\n;\n");
-      body.appendChild(scriptEl);
+      const joined = pending.join("\n;\n");
+      for (const text of parsesAsScript(joined) ? [joined] : pending) {
+        const scriptEl = document.createElement("script");
+        scriptEl.textContent = text;
+        body.appendChild(scriptEl);
+      }
       pending = [];
     };
     for (const item of result.scriptItems) {
@@ -1266,7 +1276,7 @@ export async function inlineExternalScripts(html: string): Promise<string> {
       // browser support for integrity metadata (including casing) can differ.
       if (download.reason instanceof ScriptIntegrityError) throw download.reason;
       defaultLogger.warn(
-        `[Compiler] WARNING: Failed to download CDN script: ${src} — ${download.reason}. ` +
+        `[Compiler] WARNING: Failed to download CDN script: ${src} (${download.reason}). ` +
           `The render may fail if this script is required (e.g. GSAP). ` +
           `Consider bundling it locally in your project.`,
       );
@@ -1344,7 +1354,7 @@ export function collectExternalAssets(
 
   if (externalAssets.size > 0) {
     defaultLogger.info(
-      `[Compiler] Found ${externalAssets.size} asset(s) outside project directory — will copy to render output`,
+      `[Compiler] Found ${externalAssets.size} asset(s) outside project directory, will copy to render output`,
     );
   }
 
@@ -1354,7 +1364,7 @@ export function collectExternalAssets(
   };
 }
 
-const REMOTE_MEDIA_SUBDIR = "_remote_media";
+export const REMOTE_MEDIA_SUBDIR = "_remote_media";
 // Match opening tags of <video> or <audio> elements that carry an HTTP(S) src.
 // Uses [^>]* to span attributes — safe for composition elements that won't
 // have `>` inside quoted attribute values (data-title etc.).
@@ -1402,7 +1412,7 @@ async function downloadAndRewriteUrls(
         urlToLocal.set(url, localPath);
       } catch (err) {
         const identity = safeDownloadUrlIdentity(url);
-        defaultLogger.warn(`[Compiler] ${warnLabel} — using original URL as fallback.`, {
+        defaultLogger.warn(`[Compiler] ${warnLabel}, using original URL as fallback.`, {
           urlFingerprint: identity.urlFingerprint,
           host: identity.host,
           error: err instanceof Error ? err.message : String(err),
@@ -1594,7 +1604,7 @@ async function fetchExternalStylesheetCss(href: string): Promise<string | null> 
       timeoutMs: 15_000,
     });
   } catch (err) {
-    defaultLogger.warn("[Compiler] External stylesheet fetch failed — preserving link tag.", {
+    defaultLogger.warn("[Compiler] External stylesheet fetch failed, preserving link tag.", {
       urlFingerprint: identity.urlFingerprint,
       host: identity.host,
       error: err instanceof Error ? err.message : String(err),
@@ -2138,7 +2148,8 @@ export async function compileForRender(
   // within one composition file: two scenes declaring `<video id="clip">` — or
   // two bare `<video>`s, both auto-numbered `hf-video-0` — collapsed into one
   // entry and injected frames onto whichever element came first. See #3340.
-  const { videos, audios, images } = collectRenderMedia(html);
+  const { videos, audios, images, droppedMediaIds } = collectRenderMedia(html);
+  const masterFxChain = parseMasterFxChain(html);
 
   // Advisory video checks (sparse keyframes, VFR). Fire-and-forget — these spawn
   // ffprobe subprocesses and should not block compilation since they only produce warnings.
@@ -2191,6 +2202,8 @@ export async function compileForRender(
     videos,
     audios,
     images,
+    droppedMediaIds,
+    ...(masterFxChain ? { masterFxChain } : {}),
     unresolvedCompositions,
     externalAssets,
     width,
@@ -2655,12 +2668,15 @@ export async function resolveCompositionDurations(
     for (const id of compIds) {
       // Try window.__timelines[id].duration() first (GSAP timeline)
       const tl = timelines[id];
-      if (tl && typeof tl.duration === "function") {
-        const dur = tl.duration();
-        if (dur > 0) {
-          resolved.push({ id, duration: dur, source: "__timelines" });
-          continue;
-        }
+      let dur = 0;
+      try {
+        dur = typeof tl?.duration === "function" ? Number(tl.duration()) : 0;
+      } catch {
+        dur = 0;
+      }
+      if (dur > 0) {
+        resolved.push({ id, duration: dur, source: "__timelines" });
+        continue;
       }
 
       // Fallback: check for authored duration on the element itself

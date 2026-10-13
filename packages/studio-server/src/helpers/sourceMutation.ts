@@ -1,3 +1,4 @@
+import { replacementTimelineAssetId } from "@hyperframes/core/timeline-asset-id";
 import { parseHTML } from "linkedom";
 import { removeElementWithGsapCascade } from "@hyperframes/parsers";
 import { readMediaOffsetSeconds, readPlaybackRate } from "@hyperframes/parsers/media-duration";
@@ -310,6 +311,9 @@ export function patchElementInHtml(
         if (!isAllowedHtmlAttribute(op.property)) break;
         if (op.value != null) {
           if (!isSafeAttributeValue(op.property, op.value)) break;
+          const replacementId =
+            op.property === "src" ? replacementTimelineAssetId(document, opTarget, op.value) : null;
+          if (replacementId !== null) opTarget.setAttribute("id", replacementId);
           opTarget.setAttribute(op.property, op.value);
         } else {
           opTarget.removeAttribute(op.property);
@@ -413,7 +417,6 @@ export function splitElementInHtml(
     duration: number;
     playbackStart?: number;
     playbackRate?: number;
-    stampPlaybackStart?: boolean;
     // The element's current resolved track (authored, or the runtime's
     // positional-index fallback when unauthored). Stamped onto both halves so
     // inserting the clone can't shift either one to a different row — see
@@ -457,14 +460,14 @@ export function splitElementInHtml(
   // Keep the "clip" class — the runtime uses it to control visibility
   // based on data-start/data-duration timing.
 
-  // A split creates two views over the same media source. Even an untrimmed
-  // audio/video element needs an explicit zero in-point stamped on the first
+  // A split creates two views over the same media source or sub-composition.
+  // Even an untrimmed one needs an explicit zero in-point stamped on the first
   // half so the second half can advance from it instead of restarting at zero.
   const playbackStartAttr = el.hasAttribute("data-playback-start")
     ? "data-playback-start"
     : el.hasAttribute("data-media-start")
       ? "data-media-start"
-      : fallbackTiming?.stampPlaybackStart
+      : el.matches("[data-composition-src], [data-composition-id]")
         ? "data-playback-start"
         : el.matches("audio, video")
           ? "data-media-start"

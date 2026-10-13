@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/core",
-  "version": "0.8.140",
+  "version": "0.8.150",
   "description": "",
   "repository": {
     "type": "git",
@@ -10,8 +10,6 @@
   "files": [
     "dist/**/*.js",
     "dist/**/*.d.ts",
-    "dist/**/*.d.ts.map",
-    "dist/**/*.js.map",
     "!dist/hyperframe.runtime.mjs",
     "docs",
     "schemas",
@@ -516,7 +514,13 @@
       "types": "./src/figma/index.ts"
     },
     "./schemas/registry.json": "./schemas/registry.json",
-    "./schemas/registry-item.json": "./schemas/registry-item.json"
+    "./schemas/registry-item.json": "./schemas/registry-item.json",
+    "./timeline-asset-id": {
+      "bun": "./src/timelineAssetId.ts",
+      "node": "./dist/timelineAssetId.js",
+      "import": "./src/timelineAssetId.ts",
+      "types": "./src/timelineAssetId.ts"
+    }
   },
   "publishConfig": {
     "access": "public",
@@ -852,7 +856,11 @@
         "types": "./dist/figma/index.d.ts"
       },
       "./schemas/registry.json": "./schemas/registry.json",
-      "./schemas/registry-item.json": "./schemas/registry-item.json"
+      "./schemas/registry-item.json": "./schemas/registry-item.json",
+      "./timeline-asset-id": {
+        "import": "./dist/timelineAssetId.js",
+        "types": "./dist/timelineAssetId.d.ts"
+      }
     },
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts"
@@ -892,6 +900,7 @@
     "@hyperframes/lint": "workspace:*",
     "@hyperframes/parsers": "workspace:*",
     "@hyperframes/studio-server": "workspace:*",
+    "acorn": "^8.17.0",
     "bpm-detective": "^2.0.5",
     "linkedom": "^0.18.12",
     "postcss": "^8.5.8",

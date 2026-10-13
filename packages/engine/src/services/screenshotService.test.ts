@@ -17,6 +17,15 @@ import {
   DOM_LAYER_MASK_STYLE_ID,
 } from "./screenshotService.js";
 
+// These DOM tests isolate layout/decode from the CDP transport, exercised in Chrome separately.
+vi.mock("./videoFrameTransport.js", () => ({
+  withVideoFrameSources: async (
+    _page: Page,
+    updates: Array<{ videoId: string; dataUri: string }>,
+    inject: (resolved: Array<{ videoId: string; dataUri: string }>) => Promise<string[]>,
+  ) => inject(updates),
+}));
+
 // Stub a Page + CDPSession just enough that pageScreenshotCapture can call
 // `client.send("Page.captureScreenshot", ...)` and we can inspect the args.
 function makeFakePageWithCdp(send: (method: string, params: object) => Promise<{ data: string }>) {

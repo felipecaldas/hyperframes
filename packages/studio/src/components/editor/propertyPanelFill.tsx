@@ -20,6 +20,7 @@ import {
 } from "./propertyPanelPrimitives";
 import { ColorField } from "./propertyPanelColor";
 import { useTrackDesignInput } from "../../contexts/DesignPanelInputContext";
+import { encodeUrlPath } from "@hyperframes/parsers";
 
 /* ------------------------------------------------------------------ */
 /*  Asset path helpers                                                 */
@@ -134,7 +135,7 @@ export function ImageFillField({
         commitImage(toProjectRootAssetPath(nextImage), true);
       }
     } catch {
-      setUploadError("Upload failed — check the file and try again.");
+      setUploadError("Upload failed. Check the file and try again.");
     } finally {
       setUploading(false);
     }
@@ -181,7 +182,7 @@ export function ImageFillField({
             {selectedAsset && (
               <div className="overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900/80">
                 <img
-                  src={buildProjectApiPath(projectId, `/preview/${selectedAsset}`)}
+                  src={buildProjectApiPath(projectId, `/preview/${encodeUrlPath(selectedAsset)}`)}
                   alt={selectedAsset.split("/").pop() ?? selectedAsset}
                   className="h-28 w-full object-contain bg-neutral-950/80"
                 />
