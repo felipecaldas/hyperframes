@@ -7,22 +7,23 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { applyDotEnv } from "../utils/dotEnv.js";
+import { applyDotEnv, CAPTURE_ENV_KEYS } from "../utils/dotEnv.js";
 import { writeNewFileSync } from "../utils/writeNewFile.js";
 import type { CatalogedAsset } from "./assetCataloger.js";
 import type { CaptureResult, DesignTokens } from "./types.js";
 
 /**
- * Load .env file by walking up from startDir (up to 5 levels).
- * Sets process.env keys that are not already set. Best-effort — never throws.
+ * Load supported vision settings from .env by walking up from startDir (up to 5 levels).
+ * Keeps inherited settings. Best-effort — never throws.
  */
 export function loadEnvFile(startDir: string): void {
+  if (process.env.HYPERFRAMES_NO_CAPTURE_DOTENV === "1") return;
   try {
     let dir = resolve(startDir);
     for (let i = 0; i < 5; i++) {
       const envPath = resolve(dir, ".env");
       try {
-        applyDotEnv(readFileSync(envPath, "utf-8"), process.env);
+        applyDotEnv(readFileSync(envPath, "utf-8"), process.env, CAPTURE_ENV_KEYS);
         break;
       } catch {
         dir = resolve(dir, "..");

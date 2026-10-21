@@ -7,6 +7,7 @@ import type { CatalogUsage } from "../utils/catalogUsage.js";
 import { flush, shouldTrack, trackEvent } from "./client.js";
 import { readConfig } from "./config.js";
 import { getPowerState } from "./system.js";
+import type { RenderCpuTelemetryPayload } from "./renderCpu.js";
 import { CliRuntimeError } from "../utils/commandResult.js";
 
 // Power state is volatile (a laptop docks/undocks mid-session), so it is
@@ -255,6 +256,16 @@ function renderEnvironmentEventProperties(props: RenderEnvironmentTelemetryPaylo
   };
 }
 
+function renderCpuEventProperties(props: RenderCpuTelemetryPayload) {
+  return {
+    cpu_busy_avg_pct: props.cpuBusyAvgPct,
+    cpu_busy_peak_pct: props.cpuBusyPeakPct,
+    cpu_cores_busy_peak: props.cpuCoresBusyPeak,
+    load_avg_start: props.loadAvgStart,
+    load_avg_end: props.loadAvgEnd,
+  };
+}
+
 function redactTelemetryMessage(value: string): string {
   return redactTelemetryString(value);
 }
@@ -470,7 +481,8 @@ export function trackRenderComplete(
     distinctId?: string;
   } & RenderObservabilityTelemetryPayload &
     RenderOutputShapeTelemetryPayload &
-    RenderEnvironmentTelemetryPayload,
+    RenderEnvironmentTelemetryPayload &
+    RenderCpuTelemetryPayload,
 ): void {
   trackEvent(
     "render_complete",
@@ -593,6 +605,7 @@ export function trackRenderComplete(
       source: props.source ?? "cli",
       ...renderOutputShapeEventProperties(props),
       ...renderEnvironmentEventProperties(props),
+      ...renderCpuEventProperties(props),
       composition_duration_ms: props.compositionDurationMs,
       composition_width: props.compositionWidth,
       composition_height: props.compositionHeight,
@@ -666,7 +679,8 @@ export function trackRenderError(
     distinctId?: string;
   } & RenderObservabilityTelemetryPayload &
     RenderOutputShapeTelemetryPayload &
-    RenderEnvironmentTelemetryPayload,
+    RenderEnvironmentTelemetryPayload &
+    RenderCpuTelemetryPayload,
 ): void {
   trackEvent(
     "render_error",
@@ -688,6 +702,7 @@ export function trackRenderError(
       elapsed_ms: props.elapsedMs,
       ...renderOutputShapeEventProperties(props),
       ...renderEnvironmentEventProperties(props),
+      ...renderCpuEventProperties(props),
       peak_memory_mb: props.peakMemoryMb,
       memory_free_mb: props.memoryFreeMb,
       ...powerStateFields(),

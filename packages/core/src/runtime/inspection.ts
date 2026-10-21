@@ -66,6 +66,50 @@ const reserved = new Set([
   "defaults",
 ]);
 
+const PAGE_RESET = new Set(["*", "html", "body", ":root", "html *", "body *", ":root *", "* *"]);
+
+function selectorAlternatives(selector: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote: string | undefined;
+  let start = 0;
+  for (let i = 0; i < selector.length; i += 1) {
+    const ch = selector[i];
+    if (ch === "\\") {
+      i += 1;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = undefined;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "/" && selector[i + 1] === "*") {
+      const end = selector.indexOf("*/", i + 2);
+      i = end < 0 ? selector.length : end + 1;
+      continue;
+    }
+    if (ch === "(" || ch === "[") depth += 1;
+    else if (ch === ")" || ch === "]") depth = Math.max(0, depth - 1);
+    else if (ch === "," && depth === 0) {
+      parts.push(selector.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(selector.slice(start));
+  return parts;
+}
+
+export function authoredCssSelector(selector: string): string | null {
+  const specific = selectorAlternatives(selector)
+    .map((part) => part.trim())
+    .filter((part) => part && !PAGE_RESET.has(part.replace(/\s+/g, " ").toLowerCase()));
+  return specific.length > 0 ? specific.join(", ") : null;
+}
+
 export function installInspection(win: InspectorWindow, generation: string, limit = 20_000) {
   const records = new WeakMap<Animation, string>();
   const attachments = new WeakMap<Animation, string>();
@@ -86,6 +130,12 @@ export function installInspection(win: InspectorWindow, generation: string, limi
     }
     return value;
   };
+  const ancestorId = (el: Element) => {
+    for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+      if (parent.id) return parent.id;
+    }
+    return "";
+  };
   const describe = (el: Element): ElementRef => ({
     ref: ref(el),
     tag: el.tagName.toLowerCase(),
@@ -93,6 +143,7 @@ export function installInspection(win: InspectorWindow, generation: string, limi
     hfId: el.getAttribute("data-hf-id"),
     classes: [...el.classList],
     composition: el.closest("[data-composition-id]")?.getAttribute("data-composition-id") ?? null,
+    withinId: ancestorId(el),
   });
   function record(value: unknown, stack: string) {
     if (animation(value) && !records.has(value) && count < limit) {
@@ -255,8 +306,10 @@ export function installInspection(win: InspectorWindow, generation: string, limi
         });
         const css = q.cssRules
           .filter((rule) => {
+            const selector = authoredCssSelector(rule.selector);
+            if (!selector) return false;
             try {
-              return scope.some((el) => el.matches(rule.selector));
+              return scope.some((el) => el.matches(selector));
             } catch {
               return false;
             }

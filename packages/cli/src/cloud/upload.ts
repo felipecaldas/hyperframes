@@ -85,9 +85,10 @@ async function putBytesToPresignedUrl(
   uploadUrl: string,
   uploadHeaders: Record<string, unknown>,
   bytes: Uint8Array,
+  contentType: string,
 ): Promise<void> {
   const headers: Record<string, string> = {
-    "content-type": CONTENT_TYPE_ZIP,
+    "content-type": contentType,
     ...normalizeUploadHeaders(uploadHeaders),
   };
   // `Uint8Array<ArrayBufferLike>` is a valid `BodyInit` at runtime but
@@ -136,8 +137,8 @@ async function completeWithRetry(
   throw lastErr ?? new Error("completeAssetUpload retries exhausted");
 }
 
-export async function uploadZipViaDirectUpload(
-  opts: UploadZipViaDirectOptions,
+export async function uploadAssetViaDirectUpload(
+  opts: UploadZipViaDirectOptions & { contentType: string },
 ): Promise<UploadZipViaDirectResult> {
   const start = Date.now();
   const { bytes, filename, idempotencyKey } = opts;
@@ -147,12 +148,18 @@ export async function uploadZipViaDirectUpload(
 
   opts.onProgress?.({ phase: "initialize" });
   const initialize = await opts.client.createAssetUpload({
-    body: { filename, content_type: CONTENT_TYPE_ZIP, size_bytes, checksum_sha256 },
+    body: { filename, content_type: opts.contentType, size_bytes, checksum_sha256 },
     idempotencyKey,
   });
 
   opts.onProgress?.({ phase: "upload", percent: 0 });
-  await putBytesToPresignedUrl(fetchImpl, initialize.upload_url, initialize.upload_headers, bytes);
+  await putBytesToPresignedUrl(
+    fetchImpl,
+    initialize.upload_url,
+    initialize.upload_headers,
+    bytes,
+    opts.contentType,
+  );
   opts.onProgress?.({ phase: "upload", percent: 100 });
 
   opts.onProgress?.({ phase: "complete" });
@@ -162,4 +169,10 @@ export async function uploadZipViaDirectUpload(
     size_bytes,
     duration_ms: Date.now() - start,
   };
+}
+
+export function uploadZipViaDirectUpload(
+  opts: UploadZipViaDirectOptions,
+): Promise<UploadZipViaDirectResult> {
+  return uploadAssetViaDirectUpload({ ...opts, contentType: CONTENT_TYPE_ZIP });
 }

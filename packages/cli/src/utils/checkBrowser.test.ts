@@ -1,12 +1,14 @@
 // @vitest-environment happy-dom
 // fallow-ignore-file code-duplication
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import os, { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   openSettledCompositionPage,
   type OpenSettledCompositionPageOptions,
+  SCREENSHOT_SEEK_OPTIONS,
+  seekCompositionTimeline,
 } from "../capture/captureCompositionFrame.js";
 import { DEFAULT_CHECK_OPTIONS, runAuditGrid } from "./checkPipeline.js";
 import {
@@ -17,6 +19,8 @@ import {
   dropFailedProxyEchoes,
   runBrowserCheck,
   collectSeekClock,
+  mergeHelperDrafts,
+  samplingBrowserCount,
 } from "./checkBrowser.js";
 import type { ProjectDir } from "./project.js";
 
@@ -26,6 +30,7 @@ const mocks = vi.hoisted(() => ({
   resolveProxy:
     vi.fn<(projectDir: string, absoluteSourcePath: string, variant?: string) => Promise<string>>(),
   FfmpegUnavailableError: class FfmpegUnavailableError extends Error {},
+  getProxyCachePath: vi.fn((projectDir: string, sourcePath: string) => `${sourcePath}.proxy.mp4`),
   scanProjectMediaCodecMap: vi.fn<
     (...args: unknown[]) => Promise<
       Record<
@@ -80,9 +85,16 @@ vi.mock("@hyperframes/studio-server/media-codec-map", async (importOriginal) => 
 }));
 vi.mock("@hyperframes/studio-server/proxy-transcoder", () => ({
   FfmpegUnavailableError: mocks.FfmpegUnavailableError,
-  resolveProxies: (projectDir: string, sources: Array<{ sourcePath: string; variant: string }>) =>
+  getProxyCachePath: mocks.getProxyCachePath,
+  resolveProxies: (
+    projectDir: string,
+    sources: Array<{ sourcePath: string; variant: string }>,
+    onSettled: () => void = () => {},
+  ) =>
     Promise.allSettled(
-      sources.map(({ sourcePath, variant }) => mocks.resolveProxy(projectDir, sourcePath, variant)),
+      sources.map(({ sourcePath, variant }) =>
+        mocks.resolveProxy(projectDir, sourcePath, variant).finally(onSettled),
+      ),
     ),
 }));
 
@@ -91,6 +103,15 @@ const PROJECT: ProjectDir = {
   name: "project",
   indexPath: "/project/index.html",
 };
+
+// The overlap grid logs one marker per sample; keep them out of test output. One core keeps
+// the browser pass on one page unless a test says otherwise.
+beforeEach(() => {
+  vi.spyOn(console, "debug").mockImplementation(() => undefined);
+  vi.spyOn(os, "availableParallelism").mockReturnValue(1);
+  vi.spyOn(os, "freemem").mockReturnValue(16 * 1024 ** 3);
+  vi.spyOn(process, "availableMemory").mockReturnValue(16 * 1024 ** 3);
+});
 
 afterEach(() => {
   vi.useRealTimers();
@@ -168,6 +189,213 @@ it("carries raw browser geometry through the page driver and pipeline", async ()
   ]);
   expect(result.timings).toEqual({ launchSettleMs: 60, seekLoopMs: 40, contrastMs: 0 });
   expect(mocks.serverClose).toHaveBeenCalledOnce();
+});
+
+it("splits the samples over a second Chrome and reports what one Chrome reports", async () => {
+  mountCanvasFixture(`<p id="copy" data-layout-name="copy">Hi</p>`);
+  type Message = ReturnType<typeof fakeConsoleMessage>;
+  const run = async (cores: number, helper: "works" | "crashes" | "never opens" = "works") => {
+    vi.mocked(os.availableParallelism).mockReturnValue(cores);
+    let helperSeeks = 0;
+    const pages: ReturnType<typeof fakePage>[] = [];
+    const helperPages = new Set<unknown>();
+    const handlers = new Map<unknown, ((message: Message) => void)[]>();
+    const log = (page: unknown, text: string) =>
+      handlers.get(page)?.forEach((handler) => handler(fakeConsoleMessage("error", text)));
+    const browser = Object.assign(Object.create(null), {
+      close: vi.fn(async () => undefined),
+      process: () => ({ exitCode: 0, signalCode: null }),
+    });
+    vi.mocked(openSettledCompositionPage).mockImplementation(
+      async (_html: string, _url: string, options: OpenSettledCompositionPageOptions) => {
+        const page = fakePage();
+        page.on = vi.fn((event: string, handler: (message: Message) => void) => {
+          if (event === "console") handlers.set(page, [...(handlers.get(page) ?? []), handler]);
+        });
+        const opened = pages.push(page);
+        // Only the first page's open takes prelaunched Chromes.
+        if (!("prelaunched" in options)) helperPages.add(page);
+        if (helperPages.has(page) && helper === "never opens")
+          await new Promise((_, reject) => options.signal?.addEventListener("abort", reject));
+        options.onBrowser?.(browser);
+        await options.beforeNavigate?.(page);
+        log(page, `logged at load on page ${opened}`);
+        return { page, browser, renderReadyTimedOut: false };
+      },
+    );
+    vi.mocked(seekCompositionTimeline).mockImplementation(async (page, time) => {
+      if (helperPages.has(page) && helper === "crashes" && ++helperSeeks === 2) {
+        log(page, "renderer crashed");
+        throw new Error("Target closed");
+      }
+      log(page, `seeked to ${time}`);
+    });
+    const result = await runBrowserCheck(
+      PROJECT,
+      { ...DEFAULT_CHECK_OPTIONS, contrast: false },
+      { kind: "none" },
+      runAuditGrid,
+    );
+    const seeks = vi.mocked(seekCompositionTimeline).mock.calls;
+    vi.mocked(seekCompositionTimeline).mockClear();
+    return {
+      pages,
+      seekingPages: new Set(seeks.map(([page]) => page)).size,
+      messages: result.runtimeFindings.map((finding) => `${finding.time} ${finding.message}`),
+    };
+  };
+
+  const serial = await run(1);
+  const split = await run(4);
+  expect(serial.pages).toHaveLength(1);
+  expect(split.pages).toHaveLength(2);
+  expect(split.seekingPages).toBe(2);
+  const loads = (messages: string[]) => messages.filter((line) => line.includes("at load"));
+  const sampled = (messages: string[]) => messages.filter((line) => !line.includes("at load"));
+  expect(loads(serial.messages)).toHaveLength(1);
+  expect(loads(split.messages)).toHaveLength(1);
+  expect(sampled(split.messages)).toEqual(sampled(serial.messages));
+  expect(serial.messages.length).toBeGreaterThan(3);
+
+  const crashed = await run(4, "crashes");
+  expect(crashed.seekingPages).toBe(2);
+  expect(loads(crashed.messages)).toHaveLength(1);
+  expect(sampled(crashed.messages)).toEqual(sampled(serial.messages));
+  const unopened = await run(4, "never opens");
+  expect(unopened.pages).toHaveLength(2);
+  expect(unopened.seekingPages).toBe(1);
+  expect(loads(unopened.messages)).toHaveLength(1);
+  expect(sampled(unopened.messages)).toEqual(sampled(serial.messages));
+});
+
+it("runs the dense overlap grid in one page task, keeping each sample's time on what it logs", async () => {
+  mountCanvasFixture(
+    `<section data-composition-file="scenes/copy.html"><p id="copy" data-layout-name="copy">Hi</p></section>`,
+  );
+  const page = fakePage();
+  const consoleHandlers: ((message: ReturnType<typeof fakeConsoleMessage>) => void)[] = [];
+  const onConsole = (message: ReturnType<typeof fakeConsoleMessage>) =>
+    consoleHandlers.forEach((handler) => handler(message));
+  page.on = vi.fn((event: string, handler: (typeof consoleHandlers)[number]) => {
+    if (event === "console") consoleHandlers.push(handler);
+  });
+  // CDP delivers the page's console calls in order; forward jsdom's the same way.
+  vi.spyOn(console, "debug").mockImplementation((text: string) => {
+    onConsole(fakeConsoleMessage("debug", text));
+  });
+  let evaluateCalls = 0;
+  let afterGrid = false;
+  const evaluate = page.evaluate;
+  page.evaluate = vi.fn(async (...args: unknown[]) => {
+    // A timer a sample queued fires once the grid's task ends, before Node's next command.
+    if (afterGrid) onConsole(fakeConsoleMessage("error", "queued during the grid"));
+    afterGrid = typeof args[0] === "string" && args[0].includes("__hfCheckSample");
+    evaluateCalls += 1;
+    return Reflect.apply(evaluate, page, args);
+  });
+  const denseAudits: number[] = [];
+  const injectScript = page.addScriptTag;
+  page.addScriptTag = vi.fn(async (arg: { content: string }) => {
+    await injectScript(arg);
+    Reflect.set(window, "__hyperframesOverlapAudit", ({ time }: { time: number }) => {
+      if (time !== 5) denseAudits.push(evaluateCalls);
+      if (time !== 2.5) return [];
+      onConsole(fakeConsoleMessage("error", "thrown at 2.5"));
+      const rect = { left: 10, top: 20, right: 110, bottom: 60, width: 100, height: 40 };
+      return [
+        {
+          code: "content_overlap",
+          severity: "warning",
+          time,
+          selector: "#copy",
+          message: "x",
+          rect,
+        },
+      ];
+    });
+  });
+  installSessionMock(page);
+
+  const result = await runBrowserCheck(
+    PROJECT,
+    { ...DEFAULT_CHECK_OPTIONS, samples: 1, contrast: false },
+    { kind: "none" },
+    runAuditGrid,
+  );
+
+  expect(denseAudits.length).toBeGreaterThan(10);
+  expect(new Set(denseAudits).size).toBe(1);
+  expect(result.runtimeFindings).toContainEqual(
+    expect.objectContaining({ code: "console_error", message: "thrown at 2.5", time: 2.5 }),
+  );
+  expect(result.runtimeFindings).toContainEqual(
+    expect.objectContaining({ message: "queued during the grid", time: 0, timeRange: [0, 10] }),
+  );
+  expect(
+    result.runtimeFindings.find((finding) => finding.message === "thrown at 2.5"),
+  ).not.toHaveProperty("timeRange");
+  expect(result.layoutIssues).toContainEqual(
+    expect.objectContaining({
+      code: "content_overlap",
+      selector: "#copy",
+      sourceFile: "scenes/copy.html",
+      dataAttributes: { "data-layout-name": "copy" },
+      bbox: { x: 10, y: 20, width: 100, height: 40 },
+      time: 2.5,
+    }),
+  );
+});
+
+it("takes no contrast screenshot at a sample with no text to measure", async () => {
+  mountCanvasFixture();
+  const page = fakePage();
+  page.screenshot = vi.fn(async () => "c3R1Yg==");
+  installSessionMock(page);
+
+  await runBrowserCheck(
+    PROJECT,
+    { ...DEFAULT_CHECK_OPTIONS, samples: 1, contrast: true },
+    { kind: "none" },
+    runAuditGrid,
+  );
+
+  expect(page.screenshot).not.toHaveBeenCalled();
+});
+
+it("measures text on its own opaque fill without a contrast screenshot", async () => {
+  vi.spyOn(Date, "now").mockReturnValue(100);
+  mountCanvasFixture(`<div id="headline">Readable copy</div>`);
+  const headline = document.querySelector("#headline");
+  if (!headline) throw new Error("Contrast fixture failed to mount");
+  vi.spyOn(headline, "getBoundingClientRect").mockReturnValue(new DOMRect(50, 50, 300, 40));
+  vi.spyOn(window, "getComputedStyle").mockImplementation(
+    () =>
+      ({
+        display: "block",
+        visibility: "visible",
+        opacity: "1",
+        color: "rgb(255,255,255)",
+        fill: "",
+        backgroundColor: "rgb(0,0,0)",
+        backgroundImage: "none",
+        fontSize: "32px",
+        fontWeight: "700",
+      }) as unknown as CSSStyleDeclaration,
+  );
+  const page = fakePage();
+  page.screenshot = vi.fn(async () => "c3R1Yg==");
+  installSessionMock(page);
+
+  const result = await runBrowserCheck(
+    PROJECT,
+    { ...DEFAULT_CHECK_OPTIONS, samples: 1, contrast: true },
+    { kind: "none" },
+    runAuditGrid,
+  );
+
+  expect(result.contrastChecked).toBeGreaterThan(0);
+  expect(result.contrastFindings).toEqual([]);
+  expect(page.screenshot).not.toHaveBeenCalled();
 });
 
 it("uses check --timeout for both navigation and render-ready settling", async () => {
@@ -288,60 +516,74 @@ it("round-trips the browser script's raw contrast candidates back into finish", 
   }
 });
 
-it("captures check overview snapshots after contrast restores hidden text", async () => {
-  vi.spyOn(Date, "now").mockReturnValue(100);
-  mountCanvasFixture(`<div id="headline">Readable copy</div>`);
-  const root = document.querySelector("[data-composition-id]");
-  const headline = document.querySelector<HTMLElement>("#headline");
-  if (!root || !headline) throw new Error("Contrast fixture failed to mount");
-  vi.spyOn(root, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 640, 360));
-  vi.spyOn(headline, "getBoundingClientRect").mockReturnValue(new DOMRect(50, 50, 300, 40));
-  vi.spyOn(window, "getComputedStyle").mockImplementation(
-    () =>
-      ({
-        display: "block",
-        visibility: "visible",
-        opacity: "1",
-        color: "rgb(255,255,255)",
-        fill: "",
-        clipPath: "none",
-        fontSize: "32px",
-        fontWeight: "700",
-      }) as unknown as CSSStyleDeclaration,
-  );
+it.each([
+  { snapshots: true, shots: 2, saved: ["text-visible-base64"] },
+  { snapshots: false, shots: 1, saved: [] },
+])(
+  "takes $shots contrast screenshot(s) when snapshots is $snapshots, overview after text restores",
+  async ({ snapshots, shots, saved }) => {
+    vi.spyOn(Date, "now").mockReturnValue(100);
+    mountCanvasFixture(`<div id="headline">Readable copy</div>`);
+    const root = document.querySelector("[data-composition-id]");
+    const headline = document.querySelector<HTMLElement>("#headline");
+    if (!root || !headline) throw new Error("Contrast fixture failed to mount");
+    vi.spyOn(root, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 640, 360));
+    vi.spyOn(headline, "getBoundingClientRect").mockReturnValue(new DOMRect(50, 50, 300, 40));
+    vi.spyOn(window, "getComputedStyle").mockImplementation(
+      () =>
+        ({
+          display: "block",
+          visibility: "visible",
+          opacity: "1",
+          color: "rgb(255,255,255)",
+          fill: "",
+          clipPath: "none",
+          fontSize: "32px",
+          fontWeight: "700",
+        }) as unknown as CSSStyleDeclaration,
+    );
 
-  const page = fakePage();
-  const injectScript = page.addScriptTag;
-  page.addScriptTag = vi.fn(async (arg: { content: string }) => {
-    await injectScript(arg);
-    const w = window as unknown as {
-      __contrastAuditFinish?: (...args: unknown[]) => Promise<unknown>;
-      __contrastAuditRestoreIfPending?: () => void;
-    };
-    if (w.__contrastAuditFinish) {
-      w.__contrastAuditFinish = async () => {
-        w.__contrastAuditRestoreIfPending?.();
-        return [];
+    const page = fakePage();
+    const injectScript = page.addScriptTag;
+    page.addScriptTag = vi.fn(async (arg: { content: string }) => {
+      await injectScript(arg);
+      const w = window as unknown as {
+        __contrastAuditFinish?: (...args: unknown[]) => Promise<unknown>;
+        __contrastAuditRestoreIfPending?: () => void;
       };
-    }
-  });
-  page.screenshot = vi.fn(async () =>
-    headline.style.getPropertyValue("color") === "transparent"
-      ? "text-hidden-base64"
-      : "text-visible-base64",
-  );
-  installSessionMock(page);
+      if (w.__contrastAuditFinish) {
+        w.__contrastAuditFinish = async () => {
+          w.__contrastAuditRestoreIfPending?.();
+          return [];
+        };
+      }
+    });
+    page.screenshot = vi.fn(async () =>
+      headline.style.getPropertyValue("color") === "transparent"
+        ? "text-hidden-base64"
+        : "text-visible-base64",
+    );
+    installSessionMock(page);
 
-  const result = await runBrowserCheck(
-    PROJECT,
-    { ...DEFAULT_CHECK_OPTIONS, samples: 1, contrast: true, snapshots: true },
-    { kind: "none" },
-    runAuditGrid,
-  );
+    const result = await runBrowserCheck(
+      PROJECT,
+      { ...DEFAULT_CHECK_OPTIONS, samples: 1, contrast: true, snapshots },
+      { kind: "none" },
+      runAuditGrid,
+    );
 
-  expect(page.screenshot).toHaveBeenCalledTimes(2);
-  expect(result.screenshots[0]?.pngBase64).toBe("text-visible-base64");
-});
+    expect(page.screenshot).toHaveBeenCalledTimes(shots);
+    expect(page.screenshot).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        clip: { x: 50, y: 50, width: 300, height: 40 },
+        captureBeyondViewport: false,
+      }),
+    );
+    expect(seekCompositionTimeline).toHaveBeenCalledWith(page, 5, SCREENSHOT_SEEK_OPTIONS);
+    expect(result.screenshots.map((shot) => shot.pngBase64)).toEqual(saved);
+  },
+);
 
 it("carries validate's clip-duration audit into the runtime findings", async () => {
   vi.spyOn(Date, "now").mockReturnValue(100);
@@ -685,6 +927,76 @@ describe("keepBrokenImageAborts", () => {
   });
 });
 
+describe("samplingBrowserCount", () => {
+  const GB = 1024 ** 3;
+  it("uses a second Chrome only with a spare core, 250 MB free each and more than one sample", () => {
+    expect(samplingBrowserCount(DEFAULT_CHECK_OPTIONS, 8, 16 * GB)).toBe(2);
+    expect(samplingBrowserCount(DEFAULT_CHECK_OPTIONS, 3, 1 * GB)).toBe(2);
+    expect(samplingBrowserCount(DEFAULT_CHECK_OPTIONS, 2, 16 * GB)).toBe(1);
+    expect(samplingBrowserCount(DEFAULT_CHECK_OPTIONS, 1, 2 * GB)).toBe(1);
+    expect(samplingBrowserCount(DEFAULT_CHECK_OPTIONS, 8, 400 * 1024 ** 2)).toBe(1);
+    expect(samplingBrowserCount({ ...DEFAULT_CHECK_OPTIONS, at: [1] }, 8, 16 * GB)).toBe(1);
+  });
+
+  it("counts a container's memory limit, not the host's free memory", () => {
+    vi.mocked(os.freemem).mockReturnValue(100 * GB);
+    vi.mocked(process.availableMemory).mockReturnValue(400 * 1024 ** 2);
+    expect(samplingBrowserCount(DEFAULT_CHECK_OPTIONS, 8)).toBe(1);
+    vi.mocked(process.availableMemory).mockReturnValue(16 * GB);
+    expect(samplingBrowserCount(DEFAULT_CHECK_OPTIONS, 8)).toBe(2);
+  });
+});
+
+describe("mergeHelperDrafts", () => {
+  const draft = (message: string, time: number) =>
+    ({ code: "console_error", severity: "error", message, time }) as const;
+  it("orders the helper's sample-loop messages by time and drops its load and same-time repeats", () => {
+    const primary = {
+      drafts: [draft("load", 0), draft("at 0", 0), draft("at 2", 2), draft("dense", 0)],
+      start: 1,
+      end: 3,
+    };
+    const helper = {
+      drafts: [draft("load", 0), draft("at 1", 1), draft("at 2", 2), draft("at 3", 3)],
+      start: 1,
+      end: 4,
+    };
+    expect(mergeHelperDrafts(primary, helper).map((entry) => entry.message)).toEqual([
+      "load",
+      "at 0",
+      "at 1",
+      "at 2",
+      "at 3",
+      "dense",
+    ]);
+  });
+
+  it("orders samples the first page redid after its own later ones", () => {
+    const primary = {
+      drafts: [draft("load", 0), draft("at 0", 0), draft("at 2", 2), draft("at 1", 1)],
+      start: 1,
+      end: 4,
+    };
+    const dropped = { drafts: [draft("at 1", 1)], start: Infinity, end: Infinity };
+    expect(mergeHelperDrafts(primary, dropped).map((entry) => entry.message)).toEqual([
+      "load",
+      "at 0",
+      "at 1",
+      "at 2",
+    ]);
+  });
+
+  it("adds nothing from a helper that never sampled", () => {
+    const primary = { drafts: [draft("load", 0)], start: 1, end: 1 };
+    const helper = {
+      drafts: [draft("load", 0)],
+      start: Number.POSITIVE_INFINITY,
+      end: Number.POSITIVE_INFINITY,
+    };
+    expect(mergeHelperDrafts(primary, helper)).toEqual(primary.drafts);
+  });
+});
+
 describe("dropFailedProxyEchoes", () => {
   it("keeps one finding for a failed proxy and drops the preview's repeats of it", () => {
     const at = (code: string, message: string, url?: string) =>
@@ -868,15 +1180,45 @@ describe("preResolveHostileMediaProxies", () => {
 
     await preResolveHostileMediaProxies(projectDir, "<html></html>");
 
-    expect(errorSpy).toHaveBeenCalledTimes(1);
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(errorSpy.mock.calls.map(([line]) => line)).toEqual([
+      expect.stringMatching(/^\[hyperframes\] Making browser-playable copies of 1 video /),
+      "[hyperframes] browser-playable copies: 1/1",
       expect.stringMatching(
         /^\[hyperframes\] media proxy pre-resolve: 1\/1 ready, 0 failed \(\d+ms\)$/,
       ),
-    );
+    ]);
     expect(infoSpy).not.toHaveBeenCalled();
     expect(logSpy).not.toHaveBeenCalled();
     expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+
+  it("says it is making copies, and counts them, only when some are not made yet", async () => {
+    const projectDir = mkProjectDir();
+    const codec = {
+      codecName: "hevc",
+      browserHostile: true,
+      representativeMime: null,
+      hasAlpha: false,
+    };
+    mocks.scanProjectMediaCodecMap.mockResolvedValue({ "/a.mov": codec, "/b.mov": codec });
+    mocks.resolveProxy.mockResolvedValue("/cache/copy.mp4");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    writeFileSync(join(projectDir, "a.mov.proxy.mp4"), "");
+    await preResolveHostileMediaProxies(projectDir, "<html></html>");
+    expect(errorSpy.mock.calls.map(([line]) => String(line).slice(0, 48))).toEqual([
+      "[hyperframes] Making browser-playable copies of ",
+      "[hyperframes] browser-playable copies: 1/2",
+      "[hyperframes] browser-playable copies: 2/2",
+      "[hyperframes] media proxy pre-resolve: 2/2 ready",
+    ]);
+    expect(errorSpy.mock.calls[0]![0]).toContain("copies of 1 video Chrome");
+
+    errorSpy.mockClear();
+    writeFileSync(join(projectDir, "b.mov.proxy.mp4"), "");
+    await preResolveHostileMediaProxies(projectDir, "<html></html>");
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0]![0]).toMatch(/^\[hyperframes\] media proxy pre-resolve: 2\/2/);
   });
 
   it("writes a scan failure to stderr and leaves stdout untouched", async () => {
@@ -994,10 +1336,13 @@ function fakeConsoleMessage(type: string, text: string) {
 function fakePage() {
   return Object.assign(Object.create(null), {
     on: vi.fn(),
+    viewport: () => ({ width: 640, height: 360 }),
+    screenshot: vi.fn(async () => "c3R1Yg=="),
     addScriptTag: vi.fn(async ({ content }: { content: string }) => {
       window.eval(content);
     }),
     evaluate: vi.fn(async (callback: unknown, ...args: unknown[]) => {
+      if (typeof callback === "string") return window.eval(callback);
       if (typeof callback !== "function") throw new Error("Expected an evaluate callback");
       return Reflect.apply(callback, window, args);
     }),

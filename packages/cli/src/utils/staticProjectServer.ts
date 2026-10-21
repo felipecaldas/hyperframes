@@ -1,4 +1,5 @@
-import { createServer, type ServerResponse } from "node:http";
+import { createServer, request as httpRequest, type Server, type ServerResponse } from "node:http";
+import { Duplex } from "node:stream";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { getMimeType } from "@hyperframes/core/studio-api";
@@ -22,8 +23,92 @@ import {
 
 export interface StaticProjectServer {
   url: string;
+  /** 0 when nothing listens: the server answers in this process only (see `answer`). */
   port: number;
   close: () => Promise<void>;
+  /** Set when a sandbox refused listen(): the browser's requests to `url` come here instead of a socket. */
+  answer?: (request: InProcessRequest) => Promise<InProcessResponse>;
+}
+
+export interface InProcessRequest {
+  method: string;
+  /** Path and query, e.g. `/assets/a.mp4?hf-proxy=alpha`. */
+  path: string;
+  headers: Record<string, string>;
+}
+
+export interface InProcessResponse {
+  status: number;
+  headers: Record<string, string>;
+  body: Buffer;
+}
+
+/** A sandbox refuses a loopback listen() with one of these; any other bind error stays fatal. */
+const REFUSED_LISTEN = new Set(["EPERM", "EACCES"]);
+
+/** Two connected in-memory sockets: what one side writes, the other reads. */
+function socketPair(): [Duplex, Duplex] {
+  const sides: Duplex[] = [];
+  const side = (other: () => Duplex) =>
+    new Duplex({
+      read() {},
+      write(chunk, _encoding, done) {
+        other().push(chunk);
+        done();
+      },
+      final(done) {
+        other().push(null);
+        done();
+      },
+    });
+  sides.push(
+    side(() => sides[1]!),
+    side(() => sides[0]!),
+  );
+  return [sides[0]!, sides[1]!];
+}
+
+/** Hands one request to `server` over an in-memory socket, so its handler (Range, proxies) answers unchanged. */
+function answerInProcess(server: Server, request: InProcessRequest): Promise<InProcessResponse> {
+  const [client, served] = socketPair();
+  server.emit("connection", served);
+  return new Promise((resolveAnswer, rejectAnswer) => {
+    const req = httpRequest(
+      {
+        method: request.method,
+        path: request.path,
+        headers: { ...request.headers, connection: "close" },
+        // No `agent`: Node uses createConnection only when no agent is given.
+        createConnection: () => client as never,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("error", rejectAnswer);
+        res.on("end", () => {
+          const headers: Record<string, string> = {};
+          for (const [name, value] of Object.entries(res.headers)) {
+            if (value !== undefined && name !== "connection" && name !== "transfer-encoding")
+              headers[name] = Array.isArray(value) ? value.join(", ") : value;
+          }
+          resolveAnswer({ status: res.statusCode ?? 500, headers, body: Buffer.concat(chunks) });
+        });
+      },
+    );
+    req.on("error", rejectAnswer);
+    req.end();
+  });
+}
+
+let inProcessServers = 0;
+const inProcessAnswers = new Map<
+  string,
+  (request: InProcessRequest) => Promise<InProcessResponse>
+>();
+
+/** The in-process answer for a URL served by `serveStaticProjectHtml` when listen() was refused, else undefined. */
+export function inProcessAnswer(url: string) {
+  return inProcessAnswers.get(new URL(url).origin);
 }
 
 /**
@@ -123,6 +208,7 @@ async function serveProxyRequest(
   autoProxy: boolean,
   rangeHeader: string | undefined,
   res: ServerResponse,
+  signal: AbortSignal,
 ): Promise<void> {
   const contentType = getMimeType(filePath);
   if (!autoProxy || !contentType.startsWith("video/")) {
@@ -150,7 +236,7 @@ async function serveProxyRequest(
       return;
     }
     recordProxyRequest();
-    const proxyPath = await resolveProxy(projectDir, filePath, variant);
+    const proxyPath = await resolveProxy(projectDir, filePath, variant, undefined, { signal });
     // The await above can span a whole transcode; the client may be gone.
     if (res.writableEnded || res.destroyed) return;
     serveFileWithRange(proxyPath, rangeHeader, res, PROXY_VARIANT_CONFIG[variant].contentType);
@@ -158,6 +244,10 @@ async function serveProxyRequest(
     writeProxyError(err, res);
   }
 }
+
+// Tabario fork (TAB-805): how long close() lets in-flight responses finish
+// before it drops every remaining connection.
+const CLOSE_GRACE_MS = 250;
 
 export async function serveStaticProjectHtml(
   projectDir: string,
@@ -175,13 +265,16 @@ export async function serveStaticProjectHtml(
   // this function inherit it in one place; computed once since `html` is
   // static for the lifetime of this server, not re-scanned per request.
   const autoProxy = resolveAutoProxy(projectDir, autoProxyOverride);
-  const servedHtml = autoProxy ? await injectMediaCodecMap(html, projectDir, [{ html }]) : html;
+  const copies = new AbortController();
+  const servedHtml = autoProxy
+    ? await injectMediaCodecMap(html, projectDir, [{ html }], undefined, true, copies.signal)
+    : html;
 
   // fallow-ignore-next-line complexity
   const server = createServer((req, res) => {
     const url = req.url ?? "/";
     if (url === "/" || url === "/index.html") {
-      res.writeHead(200, { "Content-Type": "text/html" });
+      res.writeHead(200, { "Content-Type": getMimeType("index.html") });
       res.end(servedHtml);
       return;
     }
@@ -207,6 +300,7 @@ export async function serveStaticProjectHtml(
             autoProxy,
             req.headers.range,
             res,
+            copies.signal,
           );
         } else {
           serveFileWithRange(filePath, req.headers.range, res);
@@ -229,7 +323,27 @@ export async function serveStaticProjectHtml(
       if (!resolvedPort) rejectPort(new Error(bindErrorMessage));
       else resolvePort(resolvedPort);
     });
+  }).catch((error: unknown) => {
+    if (REFUSED_LISTEN.has((error as NodeJS.ErrnoException).code ?? "")) return 0;
+    throw error;
   });
+
+  if (port === 0) {
+    server.removeAllListeners("error");
+    // A sandbox (e.g. an agent's) may refuse listen(); the browser asks this origin and the process answers.
+    const url = `http://hyperframes-${++inProcessServers}.localhost/`;
+    const answer = (request: InProcessRequest) => answerInProcess(server, request);
+    inProcessAnswers.set(new URL(url).origin, answer);
+    return {
+      url,
+      port: 0,
+      close: async () => {
+        copies.abort();
+        inProcessAnswers.delete(new URL(url).origin);
+      },
+      answer,
+    };
+  }
 
   return {
     url: `http://127.0.0.1:${port}/`,
@@ -245,11 +359,20 @@ export async function serveStaticProjectHtml(
      *
      * This is hardening, not the fix for any observed hang — the measurement
      * carries its own deadline for that.
+     *
+     * The drop waits a short grace first. Aborting `copies` makes each held
+     * proxy request answer 500 a few ticks later (upstream #5895), and a
+     * synchronous drop destroyed the socket before that answer was written.
      */
     close: () =>
       new Promise<void>((resolveClose) => {
-        server.close(() => resolveClose());
-        server.closeAllConnections();
+        copies.abort();
+        const drop = setTimeout(() => server.closeAllConnections(), CLOSE_GRACE_MS);
+        drop.unref();
+        server.close(() => {
+          clearTimeout(drop);
+          resolveClose();
+        });
       }),
   };
 }

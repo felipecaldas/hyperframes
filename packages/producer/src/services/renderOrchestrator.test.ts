@@ -98,6 +98,20 @@ describe("resolveRenderWorkDirPrefix", () => {
       join("C:/Temp", "hf-render-"),
     );
   });
+
+  it("keeps macOS frames out of the project folder, which a sync client may be watching", () => {
+    const outputPath = join("/Users/me/Nextcloud/project", "renders", "final.mp4");
+
+    expect(resolveRenderWorkDirPrefix(outputPath, "job-id", "darwin", "/var/folders/x/T")).toBe(
+      join("/var/folders/x/T", "hf-render-"),
+    );
+  });
+
+  it("keeps Linux frames beside the output, where a container's small /tmp cannot fill", () => {
+    expect(resolveRenderWorkDirPrefix("/work/renders/final.mp4", "job-id", "linux", "/tmp")).toBe(
+      join("/work/renders", "work-job-id-"),
+    );
+  });
 });
 
 describe("captureAttemptMadeProgress", () => {
@@ -1761,15 +1775,26 @@ describe("resolveDeviceScaleFactor", () => {
     );
   });
 
-  it("rejects downsampling (4K composition → 1080p output)", () => {
-    expect(() =>
+  it("returns 0.5 for a 4K composition → 1080p output", () => {
+    expect(
       resolveDeviceScaleFactor({
         ...defaults,
         compositionWidth: 3840,
         compositionHeight: 2160,
         outputResolution: "landscape",
       }),
-    ).toThrow(/Downsampling/);
+    ).toBe(0.5);
+  });
+
+  it("scales 1080p down for 720p and 480p, so 480p frames are 854×480", () => {
+    const scale = (outputResolution: "landscape-720p" | "landscape-480p") =>
+      resolveDeviceScaleFactor({ ...defaults, outputResolution });
+    expect(scale("landscape-720p")).toBeCloseTo(2 / 3);
+    expect(scale("landscape-480p")).toBe(854 / 1920);
+    expect([
+      Math.round(1920 * scale("landscape-480p")),
+      Math.round(1080 * scale("landscape-480p")),
+    ]).toEqual([854, 480]);
   });
 
   it("rejects non-integer scale factors", () => {
@@ -3288,7 +3313,7 @@ describe("sequential capture stall recovery", () => {
 describe("resolveParallelCaptureMode", () => {
   const beginframe = {
     platform: "linux" as NodeJS.Platform,
-    headlessShell: true,
+    headlessShellPath: "/cache/chrome-headless-shell" as string | undefined,
     forceScreenshot: false,
     deviceScaleFactor: 1,
   };
@@ -3303,7 +3328,9 @@ describe("resolveParallelCaptureMode", () => {
     // System Chrome on linux: resolveObservedCaptureMode calls this beginframe,
     // the engine launches screenshot. Getting this wrong would default-enable
     // the router for a cohort whose real path is the screenshot one.
-    expect(resolveParallelCaptureMode({ ...beginframe, headlessShell: false })).toBe("screenshot");
+    expect(resolveParallelCaptureMode({ ...beginframe, headlessShellPath: undefined })).toBe(
+      "screenshot",
+    );
     expect(resolveParallelCaptureMode({ ...beginframe, forceScreenshot: true })).toBe("screenshot");
     // Supersampling: BeginFrame ignores deviceScaleFactor, so preMode falls back.
     expect(resolveParallelCaptureMode({ ...beginframe, deviceScaleFactor: 2 })).toBe("screenshot");

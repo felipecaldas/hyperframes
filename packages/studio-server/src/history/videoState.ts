@@ -11,6 +11,13 @@ import {
   finishArtifactCleanup,
   type PendingArtifactCleanup,
 } from "./artifactCleanup.js";
+import {
+  ownSnapshotRun,
+  releaseSnapshotRun,
+  planSnapshotCleanup,
+  finishSnapshotCleanup,
+  type SnapshotRun,
+} from "./snapshotRuns.js";
 import type { HistoryEntry, HistoryWho, HistoryTarget } from "./historyLog.js";
 
 export interface FileVersion {
@@ -243,6 +250,7 @@ export async function recordArtifacts(
   }
   const after = await beginArtifactCapture(projectDir);
   const unchanged = after.fingerprint === capture.fingerprint;
+  let cleanup: SnapshotRun[] = [];
   await updateState(projectDir, (state) => {
     const revision = unchanged ? knownRevision(state, capture.revision) : null;
     const attribution = attributionOf(unchanged, revision);
@@ -264,7 +272,9 @@ export async function recordArtifacts(
       records.push(record);
       artifacts.latest = { revision, id: record.id };
     }
+    cleanup = planSnapshotCleanup(projectDir, state);
   });
+  finishSnapshotCleanup(projectDir, cleanup);
   return records;
 }
 
@@ -326,7 +336,9 @@ export async function forgetRecordedArtifacts(
 }
 
 export function artifactDirectory(projectDir: string, kind: "checks" | "snapshots"): string {
-  return join(resolve(projectDir), ".hyperframes", "artifacts", kind, randomUUID());
+  const path = join(resolve(projectDir), ".hyperframes", "artifacts", kind, randomUUID());
+  if (kind === "snapshots") ownSnapshotRun(projectDir, path);
+  return path;
 }
 
 function retainRevision(retained: readonly string[], revision: string | null): string[] {
@@ -367,4 +379,13 @@ export async function recordRenderSuccess(
     finishArtifactCleanup(projectDir, state);
   });
   return record;
+}
+
+export async function finishSnapshotRun(projectDir: string, path: string): Promise<void> {
+  releaseSnapshotRun(projectDir, path);
+  let cleanup: SnapshotRun[] = [];
+  await updateState(projectDir, (state) => {
+    cleanup = planSnapshotCleanup(projectDir, state);
+  });
+  finishSnapshotCleanup(projectDir, cleanup);
 }

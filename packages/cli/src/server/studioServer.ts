@@ -32,6 +32,7 @@ import {
   resolveCliTelemetryDistinctId,
 } from "./telemetryIdentity.js";
 import { emitStudioRenderComplete, emitStudioRenderError } from "./studioRenderTelemetry.js";
+import { startRenderCpuSampler } from "../telemetry/renderCpu.js";
 import { mountDesktopRoutes } from "./desktopRoutes.js";
 import { isDevMode } from "../utils/env.js";
 import { runRenderSetupWorker } from "../utils/cancellableProcess.js";
@@ -100,6 +101,7 @@ import {
   type BrowserGpuMode,
   type ResolvedBrowserGpuMode,
 } from "../browser/gpuPolicy.js";
+import { loadSharpInBackground } from "../utils/optionalPackages.js";
 
 const STUDIO_MANUAL_EDITS_PATH = ".hyperframes/studio-manual-edits.json";
 
@@ -847,6 +849,7 @@ export interface StudioServerOptions {
   browserGpuMode?: BrowserGpuMode;
   /** Where project histories are kept; defaults to ~/.cache/hyperframes/history. */
   historyRoot?: string;
+  origin?: () => string | undefined;
 }
 
 export interface StudioServer {
@@ -975,11 +978,16 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
   // Opened on first use, so a server that never serves Studio's history never writes one. A failed open stays off
   // for this run; one another process was holding is tried again on the next request, which no write waits for.
   let ownerWaitMs: number | undefined;
+  const historyUrl = () => {
+    const origin = options.origin?.();
+    return origin && `${origin}/api/projects/${encodeURIComponent(projectId)}/history`;
+  };
   const histories = historyCache(() =>
     openProjectHistory({
       projectDir,
       historyRoot: options.historyRoot ?? DEFAULT_HISTORY_ROOT,
       ownerWaitMs,
+      ownerUrl: historyUrl(),
     })
       .then((history) => {
         ownerWaitMs = undefined;
@@ -1010,6 +1018,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
     ),
 
     history: () => projectHistory(),
+    loadSharp: () => loadSharpInBackground("image thumbnails"),
     // Explicit option wins (preview's resolved --proxy/--no-proxy + config);
     // otherwise honor the project's hyperframes.json media.autoProxy so every
     // createStudioServer caller (e.g. the background preview child) gets the
@@ -1118,6 +1127,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
 
       // Run render asynchronously, mutating the state object
       const startTime = Date.now();
+      const cpu = startRenderCpuSampler(opts.telemetryOptOut !== true);
       const run = (async () => {
         let renderJob: RenderJob | undefined;
         const removeCancelledOutput = () => {
@@ -1154,6 +1164,10 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
             ...(manualEditsRenderScript ? { renderBodyScripts: [manualEditsRenderScript] } : {}),
             ...(opts.composition ? { entryFile: opts.composition } : {}),
             ...(opts.variables ? { variables: opts.variables } : {}),
+            ...(opts.crf !== undefined ? { crf: opts.crf } : {}),
+            ...(opts.videoBitrate ? { videoBitrate: opts.videoBitrate } : {}),
+            ...(opts.videoFrameFormat ? { videoFrameFormat: opts.videoFrameFormat } : {}),
+            ...(opts.hdrMode ? { hdrMode: opts.hdrMode } : {}),
             ...(opts.useGpu ? { useGpu: true } : {}),
           });
           renderJob = job;
@@ -1192,7 +1206,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
           // /api/telemetry-identity, so this process would otherwise keep its
           // startup-cached posture for the life of the preview server.
           refreshTelemetryPosture();
-          emitStudioRenderComplete(opts, Date.now() - startTime, job.perfSummary);
+          emitStudioRenderComplete(opts, Date.now() - startTime, job.perfSummary, cpu.stop());
         } catch (err) {
           if (abortController.signal.aborted) {
             removeCancelledOutput();
@@ -1202,13 +1216,22 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
           state.error = err instanceof Error ? err.message : String(err);
           // fallow-ignore-next-line code-duplication
           refreshTelemetryPosture();
-          emitStudioRenderError(opts, Date.now() - startTime, state.stage, err, renderJob);
+          emitStudioRenderError(
+            opts,
+            Date.now() - startTime,
+            state.stage,
+            err,
+            renderJob,
+            cpu.stop(),
+          );
           try {
             const metaPath = opts.outputPath.replace(/\.(mp4|webm|mov)$/, ".meta.json");
             writeFileSync(metaPath, JSON.stringify({ status: "failed" }));
           } catch {
             /* ignore */
           }
+        } finally {
+          cpu.stop();
         }
       })();
       inFlightRenders.set(abortController, run);
@@ -1470,7 +1493,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
         (await loadRuntimeSource()) ?? readBundleFile(runtimePath)?.toString("utf-8") ?? null;
       if (!runtimeSource) return c.text("runtime not available", 404);
       return c.body(runtimeSource, 200, {
-        "Content-Type": "text/javascript",
+        "Content-Type": getMimeType("runtime.js"),
         "Cache-Control": "no-store",
       });
     };

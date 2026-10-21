@@ -700,6 +700,36 @@ describe("runCaptureSegmentedStage", () => {
     expect(createdSessionConfigs).toEqual([expect.objectContaining({ enableBrowserPool: false })]);
   });
 
+  it("opens every worker's session together, so readiness waits overlap", async () => {
+    let opening = 0;
+    let mostOpeningAtOnce = 0;
+    let id = 0;
+    const result = await runCaptureSegmentedStage({
+      ...fakeStageInput({ totalFrames: 9 }),
+      probeSession: null,
+      segmentFrames: 3,
+      segmentDir: join(fixtureRoot, "concurrent-open"),
+      workerCount: 3,
+      sessionFactory: {
+        create: async () => {
+          mostOpeningAtOnce = Math.max(mostOpeningAtOnce, ++opening);
+          await new Promise((resolve) => setImmediate(resolve));
+          opening--;
+          return fakeSession(id++);
+        },
+      },
+      deps: {
+        spawnEncoder: mock(async () => okEncoder()),
+        captureFrame: mock(async () => ({ buffer: Buffer.alloc(1) })),
+        concat: mock(async () => ({ success: true as const })),
+        closeSession: mock(async () => {}),
+        removeFile: () => {},
+      },
+    });
+    expect(result.success).toBe(true);
+    expect(mostOpeningAtOnce).toBe(3);
+  });
+
   it("closes a fresh session whose initialization fails", async () => {
     closeCaptureSession.mockClear();
     failInitializeSession = true;

@@ -58,6 +58,7 @@ export const BROWSER_HOSTILE_CODECS: Record<string, BrowserHostileCodec> = {
   // Windows/Linux and Firefox everywhere need the substitute.
   hevc: { representativeMime: 'video/mp4; codecs="hvc1.1.6.L120.B0"', prewarm: true },
   prores: { representativeMime: null, prewarm: true },
+  theora: { representativeMime: 'video/ogg; codecs="theora"', prewarm: true },
   // Every mainstream engine decodes AV1 and VP9, so canPlayType keeps the
   // original and only the rare browser that cannot pays for a transcode.
   av1: { representativeMime: 'video/mp4; codecs="av01.0.08M.08"', prewarm: false },

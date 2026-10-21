@@ -603,6 +603,18 @@ describe("T7 — data-hf-id targeting (spec for R1)", () => {
     expect(html).toMatch(/color:\s*blue/);
   });
 
+  it("never falls back by id onto an element pinned to another hfId", () => {
+    // A clip in a sub-composition shares the audio group's id; its edit must not land on the group.
+    const source = `<div data-composition-id="main"><hf-audio-group id="voice" data-hf-id="hf-oova" data-fx-chain="[]"></hf-audio-group><div class="clip" data-start="0"></div></div>`;
+    const target = { id: "voice", hfId: "hf-6egx" };
+    expect(removeElementFromHtml(source, target)).toBe(source);
+    const { html, matched } = patchElementInHtml(source, target, [
+      { type: "attribute", property: "data-start", value: "3" },
+    ]);
+    expect(matched).toBe(false);
+    expect(html).toBe(source);
+  });
+
   it("does not break out of the selector on a crafted hfId (CSS injection guard)", () => {
     // A value with a quote/bracket must be escaped, not injected — it should
     // simply match nothing and leave the source untouched, never throw.

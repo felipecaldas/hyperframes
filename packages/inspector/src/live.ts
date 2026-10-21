@@ -14,7 +14,12 @@ import {
 } from "./engine";
 import { liveGenerationPage, type PageRunner } from "./pageQueries";
 import { assertGeneration, validateInspectRequest, validateTimelineRequest } from "./requests";
-import { Sources, fingerprint } from "./sources";
+import {
+  Sources,
+  authoredHtml,
+  fingerprint as sourceFingerprint,
+  type AuthoredHtml,
+} from "./sources";
 import type { InspectRequest, Snippet } from "./types";
 
 export interface LiveInspection {
@@ -32,6 +37,7 @@ export function prepareLiveInspection(
   html: string,
   provenance: readonly BundleScriptProvenance[],
   sourceVersion: string,
+  reads?: readonly string[],
 ): LiveInspection {
   const project = realpathSync(projectDir);
   if (fingerprint(project) !== sourceVersion) throw new Error("source_changed_during_load");
@@ -42,6 +48,7 @@ export function prepareLiveInspection(
   const prepared = html.replace(/<head\b[^>]*>/i, (head) => `${head}<script>${script}</script>`);
   let document = prepared;
   let context: SourceContext | undefined;
+  let authored: AuthoredHtml | undefined;
   const catalog = new Map<string, Snippet>();
   const view: InspectionView = {
     generation,
@@ -49,10 +56,13 @@ export function prepareLiveInspection(
     pageGeneration: generation,
     sourceContext() {
       if (!context) {
-        const sources = new Sources(project);
+        const sources = new Sources(project, reads);
         context = { sources, map: sources.mapper(document, [...provenance]) };
       }
       return context;
+    },
+    authoredHtml() {
+      return (authored ??= authoredHtml(project));
     },
     async assertCurrent() {
       if (fingerprint(project) !== sourceVersion)
@@ -99,6 +109,14 @@ export function previewGeneration(runner: PageRunner): Promise<string | null> {
   return runner.run(liveGenerationPage, undefined);
 }
 
-export { fingerprint } from "./sources";
-export { componentsTool, timelineTool, toolContent, type InspectionTool } from "./tools";
-export type { ComponentReport, ElementMapReport, PageRunner, TimelineReport };
+export function fingerprint(project: string) {
+  return sourceFingerprint(project, { ignoreHfIds: true });
+}
+export type {
+  ComponentReport,
+  ElementMapReport,
+  InspectRequest,
+  PageRunner,
+  TimelineReport,
+  TimelineRequest,
+};

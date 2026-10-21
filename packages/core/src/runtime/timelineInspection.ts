@@ -151,6 +151,7 @@ export function inspectTimelineRuntime(
   const resolver = createRuntimeStartTimeResolver({
     timelineRegistry: registry,
     documentRef: scope.ownerDocument,
+    includeAuthoredTimingAttrs: true,
   });
   const rootElement = findRootCompositionElement(scope.ownerDocument);
   const clocks = new Map<TimedAnimation, Element>();
@@ -212,7 +213,11 @@ export function inspectTimelineRuntime(
         const properties = Object.keys(piece.vars ?? {}).filter(
           (k) => !reserved.has(k) && !k.startsWith("on"),
         );
-        const values = animationValues(piece.vars ?? {}, properties);
+        const values = animationValues(
+          piece.vars ?? {},
+          properties,
+          internal && a.vars?.keyframes ? a.vars.ease : undefined,
+        );
         const localIntervals = internal
           ? globalIntervals(
               a,

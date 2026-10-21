@@ -398,6 +398,35 @@ describe("render telemetry events", () => {
     expect(props.browser_version_major).toBe(118);
   });
 
+  it("carries machine CPU use on render_complete and render_error", () => {
+    const cpu = {
+      cpuBusyAvgPct: 57,
+      cpuBusyPeakPct: 90,
+      cpuCoresBusyPeak: 2,
+      loadAvgStart: 1.23,
+      loadAvgEnd: 3.46,
+    };
+    trackRenderComplete({
+      durationMs: 1,
+      fps: 30,
+      quality: "draft",
+      docker: false,
+      gpu: false,
+      ...cpu,
+    });
+    trackRenderError({ fps: 30, quality: "draft", docker: false, ...cpu });
+    for (const [, props] of trackEvent.mock.calls) {
+      expect(props).toMatchObject({
+        cpu_busy_avg_pct: 57,
+        cpu_busy_peak_pct: 90,
+        cpu_cores_busy_peak: 2,
+        load_avg_start: 1.23,
+        load_avg_end: 3.46,
+      });
+    }
+    expect(trackEvent).toHaveBeenCalledTimes(2);
+  });
+
   it("carries the browser install path facts on both render events, never the path", () => {
     const browserInstall = {
       build: "152.0.7928.2",

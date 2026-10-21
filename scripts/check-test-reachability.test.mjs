@@ -173,6 +173,16 @@ test("quoted comments do not widen path filters", () => {
   assert.match(check(tree)["scripts/parity.test.mjs"].join("\n"), /CI filters exclude skills/);
 });
 
+test("negated filter globs exclude only under some-with-excludes, and fail closed elsewhere", () => {
+  const tree = fixture("node --test scripts/parity.test.mjs", '"**"\n              - "!skills/**"');
+  assert.throws(() => check(tree), /Negated path filters/);
+  tree[".github/workflows/ci.yml"] = tree[".github/workflows/ci.yml"].replace(
+    "        with:\n",
+    "        with:\n          predicate-quantifier: some-with-excludes\n",
+  );
+  assert.match(check(tree)["scripts/parity.test.mjs"].join("\n"), /CI filters exclude skills/);
+});
+
 test("runner verbs must match exactly", () => {
   const tree = fixture("vitest run-anything", '"**"');
   assert.match(check(tree)["scripts/parity.test.mjs"][0], /no CI runner/);

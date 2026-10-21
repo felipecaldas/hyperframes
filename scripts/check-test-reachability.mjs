@@ -30,20 +30,29 @@ export function matches(path, glob) {
   return regex.test(path);
 }
 
+// A negated glob is a final exclusion only under paths-filter's `some-with-excludes`; elsewhere it fails closed.
 function readFilters(source) {
   return Object.fromEntries(
     [...source.matchAll(/^            ([\w-]+):\n((?:              - .*\n)+)/gm)].map(
-      ([, name, body]) => {
+      ({ 1: name, 2: body, index }) => {
         const globs = [...body.matchAll(/^              - (["'])(.*?)\1(?:\s+#.*)?$/gm)].map(
           (match) => match[2],
         );
-        if (globs.some((glob) => glob.startsWith("!")))
+        const step = source.slice(source.lastIndexOf("- uses: dorny/paths-filter", index), index);
+        if (
+          globs.some((glob) => glob.startsWith("!")) &&
+          !/^\s+predicate-quantifier: some-with-excludes$/m.test(step)
+        )
           throw new Error("Negated path filters need an explicit reachability model");
         return [name, globs];
       },
     ),
   );
 }
+
+const filterMatches = (globs, path) =>
+  globs.some((glob) => !glob.startsWith("!") && matches(path, glob)) &&
+  !globs.some((glob) => glob.startsWith("!") && matches(path, glob.slice(1)));
 
 function jobField(body, key) {
   return body.match(new RegExp(`^    ${key}: (.*)$`, "m"))?.[1] ?? "";
@@ -82,7 +91,7 @@ function conditionEnabled(condition, path, filters) {
   const resolved = condition
     .replace(/needs\.changes\.outputs\.([\w-]+) == 'true'/g, (_, name) => {
       if (!filters[name]) throw new Error(`Unknown path filter: ${name}`);
-      return String(filters[name].some((glob) => matches(path, glob)));
+      return String(filterMatches(filters[name], path));
     })
     .replace(/always\(\)/g, "true")
     .replace(/github.event_name == 'pull_request'/g, "true")

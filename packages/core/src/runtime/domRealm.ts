@@ -101,12 +101,15 @@ export function isLinkElement(value: unknown): value is HTMLLinkElement {
   return isHtmlTag(value, "link");
 }
 
+/** HTML or SVG: TypeScript narrows an `Element` by `HTMLElement | SVGElement` to `HTMLElement` alone. */
+export type StylableElement = Element & ElementCSSInlineStyle;
+
 /**
  * An element that carries a CSS `style` map: HTML **or** SVG. Position edits and
  * transform writes apply to both (authored SVG `<text>`/shapes honour the CSS
  * `translate` longhand exactly as HTML does).
  */
-export function isStylableElement(value: unknown): value is HTMLElement | SVGElement {
+export function isStylableElement(value: unknown): value is StylableElement {
   return (
     isElementNode(value) &&
     ((value as NodeLike).namespaceURI === XHTML_NS ||

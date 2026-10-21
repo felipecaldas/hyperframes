@@ -360,8 +360,9 @@ function stylesheetCanvasZoomHits(
   const hits: CanvasZoomHit[] = [];
   for (const style of styles) {
     const ruleWithBody = /([^{}]+)\{([^{}]*)\}/g;
+    const content = stripCssComments(style.content);
     let match: RegExpExecArray | null;
-    while ((match = ruleWithBody.exec(stripCssComments(style.content))) !== null) {
+    while ((match = ruleWithBody.exec(content)) !== null) {
       const hit = canvasZoomInRule(match[1] ?? "", match[2] ?? "", rootId, rootClasses);
       if (hit) hits.push(hit);
     }
@@ -556,6 +557,77 @@ function cssOwnerSelector(content: string, matchIndex: number): string | undefin
 function elementSelector(tag: OpenTag): string | undefined {
   const elementId = readAttr(tag.raw, "id");
   return elementId ? `#${elementId}` : undefined;
+}
+
+// A parent with one of these is a stacking context, measured at 0.8.72: the
+// negative-z child paints above that parent's background and is visible.
+const STACKING_CONTEXT_DECLARATION =
+  /(?:^|[;{])\s*(?:isolation\s*:\s*isolate|opacity\s*:\s*(?:0\b|0?\.\d+)|transform\s*:\s*(?!none\b)[^;]+|filter\s*:\s*(?!none\b)[^;]+|backdrop-filter\s*:\s*(?!none\b)[^;]+|-webkit-backdrop-filter\s*:\s*(?!none\b)[^;]+|contain\s*:[^;]*\bpaint\b|will-change\s*:[^;]*(?:transform|opacity|filter))/i;
+
+function stackingContextSelectors(styles: readonly ExtractedBlock[]): Set<string> {
+  const selectors = new Set<string>();
+  for (const style of styles) {
+    const content = stripCssComments(style.content);
+    const rule = /([^{}]+)\{([^{}]*)\}/g;
+    let match: RegExpExecArray | null;
+    while ((match = rule.exec(content)) !== null) {
+      if (!STACKING_CONTEXT_DECLARATION.test(match[2] ?? "")) continue;
+      for (const part of (match[1] ?? "").split(",")) {
+        const selector = part.trim();
+        if (/^[.#][\w-]+$/.test(selector)) selectors.add(selector);
+      }
+    }
+  }
+  return selectors;
+}
+
+function classTokens(tag: OpenTag): string[] {
+  return (readAttr(tag.raw, "class") ?? "").split(/\s+/).filter(Boolean);
+}
+
+function tagMatchesSimpleSelector(tag: OpenTag, selector: string): boolean {
+  if (selector.startsWith("#")) return readAttr(tag.raw, "id") === selector.slice(1);
+  if (selector.startsWith(".")) return classTokens(tag).includes(selector.slice(1));
+  return false;
+}
+
+function nearestParentTag(tag: OpenTag, tags: readonly OpenTag[]): OpenTag | undefined {
+  let parent: OpenTag | undefined;
+  for (const candidate of tags) {
+    if (candidate.closeIndex == null) continue;
+    if (tag.index <= candidate.index || tag.index >= candidate.closeIndex) continue;
+    if (!parent || candidate.index > parent.index) parent = candidate;
+  }
+  return parent;
+}
+
+function parentHasStackingContext(
+  tag: OpenTag,
+  tags: readonly OpenTag[],
+  stacking: ReadonlySet<string>,
+): boolean {
+  const parent = nearestParentTag(tag, tags);
+  if (!parent) return false;
+  return elementFormsStackingContext(parent, stacking);
+}
+
+function elementFormsStackingContext(tag: OpenTag, stacking: ReadonlySet<string>): boolean {
+  const id = readAttr(tag.raw, "id");
+  if (id && stacking.has(`#${id}`)) return true;
+  if (classTokens(tag).some((name) => stacking.has(`.${name}`))) return true;
+  const inline = readAttr(tag.raw, "style");
+  return Boolean(inline && STACKING_CONTEXT_DECLARATION.test(inline));
+}
+
+function negativeZIndexIsContained(
+  selector: string | undefined,
+  tags: readonly OpenTag[],
+  stacking: ReadonlySet<string>,
+): boolean {
+  if (!selector || !/^[.#][\w-]+$/.test(selector)) return false;
+  const matched = tags.filter((tag) => tagMatchesSimpleSelector(tag, selector));
+  if (matched.length === 0) return false;
+  return matched.every((tag) => parentHasStackingContext(tag, tags, stacking));
 }
 
 function negativeZIndexFinding(
@@ -1005,9 +1077,9 @@ export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding
   // is in the DOM, laid out, and invisible. The message therefore names the CAUSE
   // and the remedy rather than implying the tool failed.
   //
-  // THE CONDITION IS LOAD-BEARING AND THE MESSAGE STATES IT. The element is only
-  // dropped when its nearest ancestor stacking context is the composition root,
-  // which is the shape #4366 reports. Give any ancestor a stacking context and it
+  // The element is only dropped when its nearest ancestor stacking context is
+  // the composition root,
+  // which is the shape #4366 reports. Give its parent a stacking context and it
   // renders correctly: measured at 0.8.72 on ONE frame carrying the same
   // `z-index: -1` band under six triggers -- isolation:isolate, transform,
   // opacity below 1, filter, contain:paint, will-change -- all six PRESENT at full
@@ -1015,19 +1087,22 @@ export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding
   // That is ordinary CSS painting order: a negative-z child paints above its
   // stacking context root's own background, so only the root case is hidden.
   //
-  // This rule matches CSS TEXT and does not resolve the cascade, so it cannot know
-  // whether an ancestor forms a stacking context and fires on both shapes. That is
-  // why the message is CONDITIONAL rather than an assertion of absence: an
-  // unconditional "silently dropped" is false for every isolated case, and a lint
-  // message that overclaims is how authors learn to disregard the rule.
+  // A simple class or id parent that this file itself sets as a stacking
+  // context (isolation, transform, opacity below 1, filter, contain:paint,
+  // will-change) is enough to know the element paints. Anything the cascade
+  // could still hide stays a finding, and that message stays CONDITIONAL:
+  // an unconditional "silently dropped" is false for every isolated case.
   ({ tags, styles }) => {
     const findings: HyperframeLintFinding[] = [];
+    const stacking = stackingContextSelectors(styles);
     for (const style of styles) {
       const content = stripCssComments(style.content);
       NEGATIVE_Z_INDEX.lastIndex = 0;
       let match: RegExpExecArray | null;
       while ((match = NEGATIVE_Z_INDEX.exec(content)) !== null) {
-        findings.push(negativeZIndexFinding(match, cssOwnerSelector(content, match.index)));
+        const selector = cssOwnerSelector(content, match.index);
+        if (negativeZIndexIsContained(selector, tags, stacking)) continue;
+        findings.push(negativeZIndexFinding(match, selector));
       }
     }
     for (const tag of tags) {
@@ -1035,7 +1110,9 @@ export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding
       if (!inline) continue;
       NEGATIVE_Z_INDEX.lastIndex = 0;
       const match = NEGATIVE_Z_INDEX.exec(inline);
-      if (match) findings.push(negativeZIndexFinding(match, elementSelector(tag)));
+      if (!match) continue;
+      if (parentHasStackingContext(tag, tags, stacking)) continue;
+      findings.push(negativeZIndexFinding(match, elementSelector(tag)));
     }
     return findings;
   },
@@ -1146,38 +1223,6 @@ export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding
     tags
       .filter((tag) => readJsonAttr(tag.raw, "data-composition-variables"))
       .flatMap((tag) => variablesDeclarationFindings(tag, tags)),
-
-  // html_dir_attribute_breaks_render — valid non-LTR dir values on
-  // <html> renders correctly in preview/snapshot but produces a fully
-  // blank/black video from render, with no other lint/validate/inspect
-  // check catching it (output file size, far smaller than expected, is the
-  // only tell). Confirmed independently by two separate reports, both
-  // diagnosing the same exact trigger and the same fix: drop dir from
-  // <html>, keep lang, and scope `direction: rtl` to individual
-  // text-containing elements via CSS instead (text still bidi-shapes
-  // correctly). Advisory-only — this does not attempt to fix the render
-  // pipeline's own root cause (suspected to be a capture step that clips a
-  // fixed top-left-origin screenshot region, which RTL layout can shift the
-  // actual content away from), only surfaces the already-confirmed footgun
-  // before someone hits it blind.
-  ({ tags }) => {
-    const htmlTag = findHtmlTag(tags);
-    if (!htmlTag) return [];
-    const dir = readAttr(htmlTag.raw, "dir");
-    if (!dir) return [];
-    const normalizedDir = dir.toLowerCase();
-    if (normalizedDir !== "rtl" && normalizedDir !== "auto") return [];
-    const scopedDirection = normalizedDir === "auto" ? 'dir="auto"' : `direction: ${normalizedDir}`;
-    return [
-      {
-        code: "html_dir_attribute_breaks_render",
-        severity: "error",
-        message: `<html dir="${dir}"> renders correctly in preview/snapshot but produces a fully blank/black video from render. This is a confirmed, silent failure.`,
-        fixHint: `Remove dir="${dir}" from <html>. Keep lang, and scope ${scopedDirection} to individual text-containing elements instead. Text still shapes correctly via the browser's own bidi algorithm.`,
-        snippet: truncateSnippet(htmlTag.raw),
-      },
-    ];
-  },
 
   // subcomposition_blanks_before_host
   // Warns when a full-bleed sub-composition slot ends before the host composition

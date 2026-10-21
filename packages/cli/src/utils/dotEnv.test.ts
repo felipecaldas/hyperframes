@@ -22,4 +22,26 @@ describe("applyDotEnv", () => {
     );
     expect(env).toEqual({ OTHER: "1" });
   });
+
+  it("copies only exact allowed names when a caller limits the imported settings", () => {
+    const env: NodeJS.ProcessEnv = { GEMINI_API_KEY: "inherited" };
+    applyDotEnv(
+      "GEMINI_API_KEY=project\nGOOGLE_API_KEY=allowed\ngoogle_api_key=other\nPATH=/untrusted\nLD_PRELOAD=payload",
+      env,
+      ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+    );
+    expect(env).toEqual({ GEMINI_API_KEY: "inherited", GOOGLE_API_KEY: "allowed" });
+  });
+
+  it("an allowlist cannot opt the feedback email back in", () => {
+    const env: NodeJS.ProcessEnv = {};
+    applyDotEnv("HyperFrames_Feedback_Email=private", env, ["HyperFrames_Feedback_Email"]);
+    expect(env).toEqual({});
+  });
+
+  it("an empty allowlist imports nothing", () => {
+    const env: NodeJS.ProcessEnv = {};
+    applyDotEnv("GEMINI_API_KEY=project", env, []);
+    expect(env).toEqual({});
+  });
 });

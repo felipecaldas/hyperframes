@@ -156,7 +156,7 @@ function loadProxy(
  * render (the same check `syncRuntimeMedia`'s `skipForInjectedVideo` makes
  * in media.ts).
  */
-function isRenderMode(el: HTMLMediaElement): boolean {
+export function isRenderMode(el: HTMLMediaElement): boolean {
   if (window.__HF_EXPORT_RENDER_SEEK_CONFIG) return true;
   return isVideoElement(el) && !!findInjectedRenderFrame(el);
 }
@@ -347,7 +347,10 @@ export function swapToProxy(
     });
   });
   // A frame capture holds for the copy as it held for a loading video before, up to the same cap.
-  registerSeekCompletion(Promise.race([swap, new Promise((cap) => setTimeout(cap, HOLD_CAP_MS))]));
+  registerSeekCompletion(
+    Promise.race([swap, new Promise((cap) => setTimeout(cap, HOLD_CAP_MS))]),
+    "video-frame",
+  );
   const codecName = entry?.codecName ?? null;
   const details: Record<string, RuntimeJson> = {
     asset: originalSrc,

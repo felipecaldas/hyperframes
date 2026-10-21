@@ -8,5 +8,5 @@
     "outDir": "dist/types"
   },
   "include": [],
-  "files": ["src/live.ts", "src/service.ts"]
+  "files": ["src/live.ts", "src/service.ts", "src/server.ts"]
 }

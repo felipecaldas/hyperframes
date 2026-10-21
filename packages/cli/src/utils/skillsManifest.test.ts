@@ -90,6 +90,33 @@ describe("hashSkillBundle", () => {
     expect(hashSkillBundle(dir).files).toBe(3);
   });
 
+  it("ignores Python bytecode a skill script leaves behind, but not a real edit", () => {
+    const dir = writeSkill("a", {
+      "SKILL.md": "hello",
+      "scripts/lib/auth.py": "x = 1\n",
+    });
+    const clean = hashSkillBundle(dir);
+    mkdirSync(join(dir, "scripts/lib/__pycache__"));
+    writeFileSync(join(dir, "scripts/lib/__pycache__/auth.cpython-312.pyc"), "\x00bytecode");
+    writeFileSync(join(dir, "scripts/lib/stray.pyc"), "\x00bytecode");
+    expect(hashSkillBundle(dir)).toEqual(clean);
+
+    writeFileSync(join(dir, "scripts/lib/auth.py"), "x = 2\n");
+    expect(hashSkillBundle(dir).hash).not.toBe(clean.hash);
+  });
+
+  it("ignores dependency installs, OS files, and editor swap files", () => {
+    const dir = writeSkill("a", { "SKILL.md": "hello", "scripts/run.mjs": "run();" });
+    const clean = hashSkillBundle(dir);
+    writeSkill("a", {
+      "node_modules/dep/index.js": "module.exports = 1;",
+      "scripts/.DS_Store": "",
+      "scripts/.run.mjs.swp": "swap",
+      "SKILL.md~": "backup",
+    });
+    expect(hashSkillBundle(dir)).toEqual(clean);
+  });
+
   it("normalises CRLF so a Windows checkout is not flagged as different", () => {
     const lf = writeSkill("lf", { "SKILL.md": "line1\nline2\n" });
     const crlf = writeSkill("crlf", { "SKILL.md": "line1\r\nline2\r\n" });

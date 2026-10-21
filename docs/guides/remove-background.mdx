@@ -84,6 +84,11 @@ The plate keeps the original surroundings and leaves a transparent
 person-shaped hole. It is not an inpainted empty background. Place an opaque
 graphic or scene beneath the hole, then place `subject.webm` above it.
 
+`hyperframes check` judges text behind the cutout by the cutout's own alpha at
+each sample time. A word partly behind the subject is reported as info with the
+share it hides; a word 80% hidden, or two neighbouring words each half hidden,
+is an error. You do not need `data-layout-allow-occlusion` for this layering.
+
 ## Know when it will work well
 
 The included model is designed for people. It works best with a clear human

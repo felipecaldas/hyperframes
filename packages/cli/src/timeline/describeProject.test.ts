@@ -116,6 +116,44 @@ describe("describeProject", () => {
     ]);
   });
 
+  it("lists clips nested in a timed wrapper at their playback time and says when one never shows", async () => {
+    const { rows, text } = await rowsOf(`<html><body>
+<div data-composition-id="main" data-width="1920" data-height="1080" data-duration="10">
+  <div id="shot2" data-start="5" data-duration="5" data-track-index="0">
+    <h1 id="seen" data-start="6" data-duration="2">In</h1>
+    <h1 id="lost" data-start="0" data-duration="2">Out</h1>
+  </div>
+</div></body></html>`);
+    const byId = (id: string) => rows.find((r) => r.id === id)!;
+    const at = (p: { kind: string; index: number }) =>
+      rows.find((r) => r.trackKind === p.kind && r.index === p.index)!.id;
+
+    expect(byId("shot2").children.map(at).sort()).toEqual(["lost", "seen"]);
+    expect(byId("seen")).toMatchObject({ absStart: 6, absEnd: 8, warnings: [], nested: false });
+    expect(at(byId("seen").parentRow!)).toBe("shot2");
+    expect(byId("lost").warnings).toEqual([
+      "never visible: plays 0-2s, but #shot2 only shows 5-10s; a nested data-start counts from the composition, not from #shot2",
+    ]);
+    expect(text).toContain("#lost lost 0-2s warning: never visible");
+    expect(text).not.toContain("no stable name");
+  });
+
+  it("lists a sub-composition mounted inside a timed wrapper with every clip it holds", async () => {
+    const { rows } = await rowsOf(`<html><body>
+<div data-composition-id="main" data-width="1920" data-height="1080" data-duration="10">
+  <div id="shot" data-start="0" data-duration="5" data-track-index="0">
+    <div id="scene" data-composition-src="compositions/title.html" data-start="0" data-duration="5"></div>
+  </div>
+</div></body></html>`);
+    const childIds = (id: string) =>
+      rows
+        .find((r) => r.id === id)!
+        .children.map((p) => rows.find((r) => r.trackKind === p.kind && r.index === p.index)?.id);
+
+    expect(childIds("shot")).toEqual(["scene"]);
+    expect(childIds("scene")).toEqual(["t1", "t2"]);
+  });
+
   it("reports each half's out-of-sync offset from its source pair, at the project fps", async () => {
     const { rows, text } = await rowsOf(`<html><body>
 <div data-composition-id="main" data-duration="10" data-fps="24">
@@ -276,6 +314,31 @@ describe("describeProject", () => {
     );
     // (0.72 - 0.2) / 2, hand-computed
     expect(row!.duration).toBeCloseTo(0.26, 1);
+    expect(row!.mediaStart).toBe(0.2);
+  });
+
+  it("probes a nested scene's media where preview loads it: a root asset with a percent-encoded name", async () => {
+    const probed: string[] = [];
+    const { rows } = await rowsOf(
+      `<div data-composition-id="m" data-duration="5">
+        <div id="scene" data-composition-src="compositions/bed.html" data-start="0" data-duration="5"></div>
+      </div>`,
+      false,
+      (root) => {
+        mkdirSync(join(root, "assets"));
+        copyFileSync(REAL_AUDIO, join(root, "assets", "music bed.mp3"));
+        writeFileSync(
+          join(root, "compositions", "bed.html"),
+          `<template><div data-composition-id="bed"><audio id="bed" src="assets/music%20bed.mp3" data-start="0"></audio></div></template>`,
+        );
+      },
+      async (file, tag) => {
+        probed.push(`${tag}:${basename(file)}`);
+        return POP_SECONDS();
+      },
+    );
+    expect(probed).toEqual(["audio:music bed.mp3"]);
+    expect(rows.find((r) => r.id === "bed")).toMatchObject({ durationSource: "media" });
   });
 
   it("takes a media leaf's duration from the probe when none is authored", async () => {

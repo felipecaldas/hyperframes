@@ -39,7 +39,6 @@ import {
 } from "./services/renderOrchestrator.js";
 import { prepareHyperframeLintBody, runHyperframeLint } from "./services/hyperframeLint.js";
 import { startHealthWorker, type HealthWorkerHandle } from "./services/healthWorker.js";
-import { isVideoFrameFormat } from "@hyperframes/engine";
 import { resolveRenderPaths } from "./utils/paths.js";
 import { defaultLogger, type ProducerLogger } from "./logger.js";
 import { Semaphore } from "./utils/semaphore.js";
@@ -49,6 +48,7 @@ import {
   isAspectAgnosticResolutionAlias,
   type CanvasResolution,
 } from "@hyperframes/core";
+import { parseEncoderOptions } from "@hyperframes/studio-server/encoder-options";
 import { createRenderRequest, renderConfigFromRequest } from "./renderRequest.js";
 
 // ---------------------------------------------------------------------------
@@ -86,6 +86,8 @@ interface RenderInput {
   videoFrameFormat?: RenderConfig["videoFrameFormat"];
   outputDynamicRange?: "auto" | "hdr" | "sdr";
   workers?: number;
+  crf?: number;
+  videoBitrate?: string;
   useGpu: boolean;
   debug: boolean;
   strictness: RenderConfig["strictness"];
@@ -233,9 +235,8 @@ export function parseRenderOptions(body: Record<string, unknown>): Omit<RenderIn
   const outputDynamicRange =
     parseServerOutputDynamicRange(body.outputDynamicRange) ??
     fromRenderHdrMode(parseLegacyServerHdrMode(body.hdrMode));
-  const videoFrameFormat = isVideoFrameFormat(body.videoFrameFormat)
-    ? body.videoFrameFormat
-    : undefined;
+  const encoder = parseEncoderOptions(body, format ?? "mp4");
+  const { crf, videoBitrate, videoFrameFormat } = encoder.ok ? encoder.options : {};
 
   const { variables, outputResolution, outputResolutionAspectAgnostic } =
     parseRenderOverrides(body);
@@ -245,6 +246,8 @@ export function parseRenderOptions(body: Record<string, unknown>): Omit<RenderIn
     fps,
     quality,
     workers,
+    crf,
+    videoBitrate,
     useGpu,
     debug,
     strictness,
@@ -304,6 +307,8 @@ function buildRenderJobConfig(input: RenderInput, outputPath: string, log: Produ
       quality: input.quality,
       format: input.format ?? "mp4",
       workers: input.workers,
+      crf: input.crf,
+      videoBitrate: input.videoBitrate,
       useGpu: input.useGpu,
       debug: input.debug,
       strictness: input.strictness,
@@ -342,6 +347,8 @@ function resolvePreparedRenderOutput(
  * acceptable (including when the fields are simply absent).
  */
 function validateRenderOverrides(body: Record<string, unknown>): string | undefined {
+  const encoder = parseEncoderOptions(body, parseServerFormat(body.format) ?? "mp4");
+  if (!encoder.ok) return encoder.error;
   if (body.variables !== undefined && !isPlainObject(body.variables)) {
     return 'variables must be a JSON object keyed by variable id (e.g. {"title":"Hello"})';
   }

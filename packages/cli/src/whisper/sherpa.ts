@@ -1,11 +1,12 @@
 import { execFile, spawn, type ExecFileException } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { downloadToFile } from "../cloud/download.js";
+import { verifies, type ModelFile } from "./modelFile.js";
 import { stoppedByCancelSignal } from "../utils/renderCancellation.js";
 import {
   CACHE_DIR,
@@ -52,11 +53,7 @@ export const PARAKEET_MODEL_DIR = join(
   "parakeet-tdt-0.6b-v3-int8",
 );
 
-export interface ModelFile {
-  name: string;
-  bytes: number;
-  sha256: string;
-}
+export type { ModelFile };
 
 /** Order matters: encoder, decoder, joiner, tokens (see recognizerConfig). */
 const PARAKEET_MODEL_FILES: readonly ModelFile[] = [
@@ -82,8 +79,9 @@ const PARAKEET_MODEL_FILES: readonly ModelFile[] = [
   },
 ];
 
-/** At least 30 minutes, and twice the audio length for slow CPUs. */
-const decodeTimeoutMs = (audioSeconds: number) => Math.max(1_800_000, audioSeconds * 2000);
+/** At least 30 minutes, twice the audio length for slow CPUs; whole ms, within Node's timer limit. */
+export const decodeTimeoutMs = (audioSeconds: number) =>
+  Math.min(2 ** 31 - 1, Math.max(1_800_000, Math.ceil(audioSeconds * 2000)));
 
 /** The platforms sherpa-onnx-node publishes a native package for. */
 const SUPPORTED_TARGETS = [
@@ -277,17 +275,6 @@ export function sherpaParakeetInstalled(cliUrl = import.meta.url): boolean {
         statSync(join(PARAKEET_MODEL_DIR, f.name), { throwIfNoEntry: false })?.size === f.bytes,
     )
   );
-}
-
-async function sha256File(path: string): Promise<string> {
-  const hash = createHash("sha256");
-  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
-  return hash.digest("hex");
-}
-
-async function verifies(path: string, file: ModelFile): Promise<boolean> {
-  if (statSync(path, { throwIfNoEntry: false })?.size !== file.bytes) return false;
-  return (await sha256File(path)) === file.sha256;
 }
 
 interface EnsureModelOptions {

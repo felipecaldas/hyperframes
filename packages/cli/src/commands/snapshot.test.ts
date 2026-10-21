@@ -48,6 +48,10 @@ describe("formatSnapshotTimestamp", () => {
   it.each([
     [1.12, "1.12s"],
     [0.30000000000000004, "0.3s"],
+    [0, "0s"],
+    [1.5, "1.5s"],
+    [12.25, "12.25s"],
+    [1.5000001, "1.5s"],
   ])("formats %s without discarding useful precision", (time, expected) => {
     expect(formatSnapshotTimestamp(time)).toBe(expected);
   });
@@ -76,16 +80,14 @@ describe("tailFrameTime", () => {
 describe("transparent snapshot capture", () => {
   it("asks Chrome to retain the alpha channel in review PNGs", () => {
     const source = readFileSync(new URL("./snapshot.ts", import.meta.url), "utf8");
-    expect(source).toContain(
-      'page.screenshot({ path: framePath, type: "png", omitBackground: true })',
-    );
+    expect(source).toContain('page.screenshot({ type: "png", omitBackground: true })');
   });
 
-  it("exposes --proxy/--no-proxy and forwards the override to the static server", () => {
+  it("exposes --proxy and forwards it to the snapshot page server", () => {
     const source = readFileSync(new URL("./snapshot.ts", import.meta.url), "utf8");
     expect(source).toContain("proxy: {");
     expect(source).toContain("autoProxy: args.proxy as boolean | undefined");
-    expect(source).toContain("opts.autoProxy");
+    expect(source).toContain("serveCapturePage(projectDir, html, opts.autoProxy)");
   });
 
   it("pairs every frame with the frame-exact reference frame under --against", () => {
@@ -740,6 +742,40 @@ describe("extractVideoFrameToBuffer", () => {
       }
     },
   );
+
+  it.skipIf(noProbe)(
+    "extracts a frame at its displayed size, never larger than the source",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-displayed-"));
+      try {
+        const size = async (clip: string, displayedPixels: number) => {
+          const png = await extractVideoFrameToBuffer(clip, 0.5, false, false, displayedPixels);
+          if (!png) throw new Error(`no frame from ${clip}`);
+          return [png.readUInt32BE(16), png.readUInt32BE(20)];
+        };
+        for (const { name, width, height } of [
+          { name: "landscape", width: 160, height: 90 },
+          { name: "portrait", width: 90, height: 160 },
+        ]) {
+          const clip = join(dir, `${name}.mp4`);
+          const input = [
+            "-f",
+            "lavfi",
+            "-i",
+            `testsrc=d=1:r=24:s=${width}x${height}`,
+            "-pix_fmt",
+            "yuv420p",
+          ];
+          execFileSync(ffmpeg!, ["-hide_banner", "-loglevel", "error", ...input, clip]);
+          expect(await size(clip, 0)).toEqual([width, height]);
+          expect(await size(clip, 1000)).toEqual([width, height]);
+          expect(Math.min(...(await size(clip, 32)))).toBe(32);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe("resolveSnapshotVideoClipStart", () => {
@@ -945,10 +981,7 @@ describe("snapshot composite recapture", () => {
     const injection = source.indexOf("await injectVideoFramesBatch(page, updates)");
     const visibility = source.indexOf("await syncVideoFrameVisibility(", injection);
     const recapture = source.indexOf("await recaptureSnapshotComposite(page)", visibility);
-    const finalCapture = source.indexOf(
-      'page.screenshot({ path: framePath, type: "png"',
-      recapture,
-    );
+    const finalCapture = source.indexOf('page.screenshot({ type: "png"', recapture);
     expect(injection).toBeGreaterThan(-1);
     expect(visibility).toBeGreaterThan(injection);
     expect(recapture).toBeGreaterThan(visibility);

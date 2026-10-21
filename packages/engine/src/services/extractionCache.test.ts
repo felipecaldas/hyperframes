@@ -67,8 +67,8 @@ function seedPartialDir(entry: { dir: string; keyHash: string }, frameContent: s
 }
 
 describe("extractionCache constants", () => {
-  it("exposes the v6 schema prefix", () => {
-    expect(SCHEMA_PREFIX).toBe("hfcache-v6-");
+  it("exposes the v7 schema prefix", () => {
+    expect(SCHEMA_PREFIX).toBe("hfcache-v8-");
   });
 
   it("exposes the frame filename prefix shared with the extractor", () => {
@@ -280,6 +280,19 @@ describe("lookupCacheEntry / markCacheEntryComplete", () => {
     const staleV3Dir = join(tmpRoot, `hfcache-v3-${keyHash.slice(0, 16)}`);
     mkdirSync(staleV3Dir, { recursive: true });
     writeFileSync(join(staleV3Dir, COMPLETE_SENTINEL), "", "utf-8");
+
+    const lookup = lookupCacheEntry(tmpRoot, input);
+    expect(lookup.hit).toBe(false);
+    expect(lookup.entry.dir).toBe(join(tmpRoot, `${SCHEMA_PREFIX}${keyHash.slice(0, 16)}`));
+  });
+
+  it("does not reuse a complete v6 entry, whose VFR frames were sampled by packet duration", () => {
+    const input = base(sourceFile);
+    const keyHash = computeCacheKey(input);
+    const staleV6Dir = join(tmpRoot, `hfcache-v6-${keyHash.slice(0, 16)}`);
+    mkdirSync(staleV6Dir, { recursive: true });
+    writeFileSync(join(staleV6Dir, "frame_00001.jpg"), "old", "utf-8");
+    writeFileSync(join(staleV6Dir, COMPLETE_SENTINEL), "", "utf-8");
 
     const lookup = lookupCacheEntry(tmpRoot, input);
     expect(lookup.hit).toBe(false);

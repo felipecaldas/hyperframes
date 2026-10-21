@@ -212,6 +212,80 @@ describe("timeline edit command", () => {
     }
   });
 
+  it("deletes only the --start/--end range of a video clip, keeping both sides", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-timeline-range-delete-"));
+    try {
+      const indexPath = join(dir, "index.html");
+      writeFileSync(
+        indexPath,
+        `<div data-composition-id="main" data-duration="12"><video id="clip" src="a.mp4" data-start="1" data-duration="4" data-track-index="0"></video></div>`,
+      );
+      const planned = run(dir, "delete", "#clip", "--start", "2", "--end", "3", "--plan");
+      expect(planned.status, planned.stderr).toBe(0);
+      const kept = [
+        expect.objectContaining({ ref: "#clip", start: 1, end: 2 }),
+        expect.objectContaining({ ref: "#clip-2", start: 3, end: 5 }),
+      ];
+      expect(JSON.parse(planned.stdout).after).toEqual(kept);
+      const applied = run(dir, "delete", "#clip", "--start", "2", "--end", "3");
+      expect(applied.status, applied.stderr).toBe(0);
+      expect(JSON.parse(applied.stdout).after).toEqual(kept);
+      const html = readFileSync(indexPath, "utf8");
+      const tag = (id: string) => html.match(new RegExp(`<[^>]*\\sid="${id}"[^>]*>`))?.[0];
+      expect(tag("clip-2")).toContain('data-media-start="2"');
+      expect(html).not.toContain('id="clip-3"');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a delete range that reaches outside the clip, without writing", () => {
+    const dir = project();
+    try {
+      const before = readFileSync(join(dir, "index.html"), "utf8");
+      const result = run(dir, "delete", "#clip", "--start", "2", "--end", "4");
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("is not inside #clip");
+      expect(readFileSync(join(dir, "index.html"), "utf8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["--at", ["delete", "#clip", "--at", "2"]],
+    ["--start", ["split", "#clip", "2", "--start", "1"]],
+    ["--duration", ["move", "#clip", "+1", "--duration", "1"]],
+    ["--overwrite", ["duplicate", "#clip", "--overwrite"]],
+    ["--end", ["set", "#clip", "volume=0.5", "--end", "2"]],
+  ])("refuses a flag its verb does not use (%s), without writing", (flag, args) => {
+    const dir = project();
+    try {
+      const before = readFileSync(join(dir, "index.html"), "utf8");
+      const result = run(dir, ...args);
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(`Unknown flag: ${flag}`);
+      expect(readFileSync(join(dir, "index.html"), "utf8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an apply edit with a key its verb does not use, without writing", () => {
+    const dir = project();
+    try {
+      const before = readFileSync(join(dir, "index.html"), "utf8");
+      const planPath = join(dir, "edits.json");
+      writeFileSync(planPath, JSON.stringify([{ verb: "delete", ref: "#clip", at: "2" }]));
+      const result = run(dir, "apply", planPath);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("delete does not use at");
+      expect(readFileSync(join(dir, "index.html"), "utf8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("uses the next free numeric split suffix on repeat", () => {
     const dir = project();
     try {
@@ -248,6 +322,27 @@ describe("timeline edit command", () => {
   };
   const endOf = (html: string, id: string) =>
     Number(clip(html, id).start) + Number(clip(html, id).duration);
+
+  it.each([
+    ["moves a hidden clip into its wrapper's window", ["move", "#lost", "8"], "lost", "8"],
+    ["moves a wrapper without colliding with its own clips", ["move", "#shot2", "4"], "shot2", "4"],
+    ["duplicates a clip inside its wrapper", ["duplicate", "#seen"], "seen", "6"],
+  ])("%s", (_name, args, id, start) => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-timeline-nested-"));
+    writeFileSync(
+      join(dir, "index.html"),
+      `<div data-composition-id="main" data-duration="12"><div id="shot2" data-hf-id="shot2" data-start="5" data-duration="5" data-track-index="0"><div id="seen" data-hf-id="seen" data-start="6" data-duration="2">In</div><div id="lost" data-hf-id="lost" data-start="0" data-duration="2">Out</div></div></div>`,
+    );
+    try {
+      const result = run(dir, ...args);
+      expect(result.stderr).not.toContain("overlap");
+      expect(result.status).toBe(0);
+      expect(clip(readFileSync(join(dir, "index.html"), "utf8"), id).start).toBe(start);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   const visibleAt = (html: string, time: number, ids: string[]) =>
     ids.filter((id) => isClipVisibleAt(time, Number(clip(html, id).start), endOf(html, id), 40));
 

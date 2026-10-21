@@ -92,6 +92,22 @@ vi.mock("../browser/manager.js", () => ({
   ensureBrowser: async () => ({ executablePath: undefined, source: "system" }),
 }));
 
+const cpuSamplerState = vi.hoisted(() => ({
+  samplers: [] as { requesterOptedIn: boolean; stopped: boolean }[],
+}));
+vi.mock("../telemetry/renderCpu.js", () => ({
+  startRenderCpuSampler: (requesterOptedIn = true) => {
+    const sampler = { requesterOptedIn, stopped: false };
+    cpuSamplerState.samplers.push(sampler);
+    return {
+      stop: () => {
+        sampler.stopped = true;
+        return { cpuBusyAvgPct: 57, cpuBusyPeakPct: 90 };
+      },
+    };
+  },
+}));
+
 // Lets one test hold the project history in its opening; every other test opens the real one.
 const historyState = vi.hoisted(() => ({
   open: null as null | ((...args: unknown[]) => Promise<unknown>),
@@ -787,6 +803,51 @@ describe("createStudioServer shutdown", () => {
     expect(state.audioLoweredDb).toBe(1.44);
     const meta = JSON.parse(readFileSync(outputPath.replace(/\.mp4$/, ".meta.json"), "utf8"));
     expect(meta.audioLoweredDb).toBe(1.44);
+  });
+
+  it("stops measuring CPU however a render ends, and never for an opted-out requester", async () => {
+    cpuSamplerState.samplers = [];
+    const outDir = mkdtempSync(join(tmpdir(), "hf-render-cpu-"));
+    server = createStudioServer({ projectDir: tmpProject() });
+
+    producerState.executeRenderJob = async () => {};
+    const done = server.adapter.startRender(startRenderOpts("job-done", join(outDir, "a.mp4")));
+    await vi.waitFor(() => expect(done.status, done.error).toBe("complete"), { timeout: 5_000 });
+
+    producerState.executeRenderJob = async () => {
+      throw new Error("boom");
+    };
+    const failed = server.adapter.startRender({
+      ...startRenderOpts("job-failed", join(outDir, "b.mp4")),
+      telemetryOptOut: true,
+    });
+    await vi.waitFor(() => expect(failed.status).toBe("failed"), { timeout: 5_000 });
+
+    let started!: () => void;
+    const startedPromise = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    producerState.executeRenderJob = (_job, _dir, _outputPath, _onProgress, signal) => {
+      started();
+      return new Promise((_resolve, reject) => {
+        const onAbort = () => reject(Object.assign(new Error("cancelled"), { name: "AbortError" }));
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort);
+      });
+    };
+    const cancelled = server.adapter.startRender(
+      startRenderOpts("job-cancelled", join(outDir, "c.mp4")),
+    );
+    await untilStarted(startedPromise, cancelled);
+    cancelled.cancel?.();
+    await vi.waitFor(() => expect(cancelled.status).toBe("cancelled"), { timeout: 5_000 });
+
+    expect(cpuSamplerState.samplers).toEqual([
+      { requesterOptedIn: true, stopped: true },
+      { requesterOptedIn: false, stopped: true },
+      { requesterOptedIn: true, stopped: true },
+    ]);
+    rmSync(outDir, { recursive: true, force: true });
   });
 
   it("cancels an in-flight render's signal and waits for it before draining the browser pool", async () => {

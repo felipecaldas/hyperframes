@@ -15,24 +15,46 @@
  * inside the regression harness (`bun run --cwd packages/producer docker:test`).
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
+import { spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyConcreteGpuScreenshotClamp, buildChromeArgs } from "@hyperframes/engine";
+import {
+  applyConcreteGpuScreenshotClamp,
+  buildChromeArgs,
+  FFMPEG_PATH_ENV,
+  getFfmpegBinary,
+} from "@hyperframes/engine";
 import { recomputePlanHashFromPlanDir } from "../render/stages/freezePlan.js";
+import { defaultLogger } from "../../logger.js";
 import { RenderQualityError } from "../renderOrchestrator.js";
 import { CURRENT_PLAN_PROTOCOL } from "./planProtocol.js";
 import {
   applyDistributedAudioWarningPolicy,
   buildLocalExecutionPlan,
+  buildPlanAudio,
   buildChunkSlices,
+  CHUNK_EXCEEDS_WORKER_TIMEOUT,
+  ChunkExceedsWorkerTimeoutError,
   DEFAULT_CHUNK_SIZE,
   DEFAULT_MAX_PARALLEL_CHUNKS,
+  chunkSizingUsesFrameCost,
+  estimateChunkSeconds,
   MIN_CHUNK_SIZE,
   plan,
   resolveDistributedEngineConfig,
   resolveChunkPlan,
+  planNeedsFrameCostMeasurement,
+  resolveMaxParallelChunks,
 } from "./plan.js";
 import { buildSyntheticRenderJob } from "./shared.js";
 
@@ -177,6 +199,150 @@ describe("distributed synthetic render job", () => {
 
     expect(forceScreenshot).toBe(false);
     expect(args).toContain("--enable-begin-frame-control");
+  });
+});
+
+describe("resolveMaxParallelChunks", () => {
+  const MP_1080P = (1920 * 1080) / 1e6;
+  const THIRTY_MIN_30FPS = 54000;
+  const LAMBDA_LIMIT = 900;
+  const recordingLog = () => {
+    const warnings: string[] = [];
+    return { log: { ...defaultLogger, warn: (m: string) => warnings.push(m) }, warnings };
+  };
+
+  it("sizes 30 min of 1080p30 so every chunk fits the Lambda limit with margin", () => {
+    const { log } = recordingLog();
+    const maxParallel = resolveMaxParallelChunks(
+      { workerTimeoutSeconds: LAMBDA_LIMIT, workerConcurrency: 8 },
+      THIRTY_MIN_30FPS,
+      MP_1080P,
+      log,
+    );
+    const { chunkCount, effectiveChunkSize } = resolveChunkPlan(
+      THIRTY_MIN_30FPS,
+      undefined,
+      maxParallel,
+    );
+    expect(chunkCount).toBeGreaterThan(DEFAULT_MAX_PARALLEL_CHUNKS);
+    expect(estimateChunkSeconds(effectiveChunkSize, MP_1080P)).toBeLessThanOrEqual(
+      LAMBDA_LIMIT * 0.75,
+    );
+    // The old fixed 16 planned chunks with no headroom left under the limit.
+    const old = resolveChunkPlan(THIRTY_MIN_30FPS, undefined, DEFAULT_MAX_PARALLEL_CHUNKS);
+    expect(estimateChunkSeconds(old.effectiveChunkSize, MP_1080P)).toBeGreaterThan(
+      LAMBDA_LIMIT * 0.75,
+    );
+  });
+
+  it("tells the user to raise --concurrency when the fitting chunk count exceeds it", () => {
+    const { log, warnings } = recordingLog();
+    const maxParallel = resolveMaxParallelChunks(
+      { workerTimeoutSeconds: LAMBDA_LIMIT, workerConcurrency: 8 },
+      THIRTY_MIN_30FPS,
+      MP_1080P,
+      log,
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(`--concurrency ${maxParallel}`);
+  });
+
+  it("goes one wave wide when concurrency allows, up to the 256 ceiling", () => {
+    const { log, warnings } = recordingLog();
+    const args = [3 * THIRTY_MIN_30FPS, MP_1080P, log] as const;
+    expect(
+      resolveMaxParallelChunks(
+        { workerTimeoutSeconds: LAMBDA_LIMIT, workerConcurrency: 200 },
+        ...args,
+      ),
+    ).toBe(200);
+    expect(
+      resolveMaxParallelChunks(
+        { workerTimeoutSeconds: LAMBDA_LIMIT, workerConcurrency: 1000 },
+        ...args,
+      ),
+    ).toBe(256);
+    expect(warnings).toEqual([]);
+  });
+
+  it("keeps short renders to few chunks so per-chunk overhead does not dominate", () => {
+    const { log } = recordingLog();
+    const worker = { workerTimeoutSeconds: LAMBDA_LIMIT, workerConcurrency: 256 };
+    expect(resolveMaxParallelChunks(worker, 60, MP_1080P, log)).toBe(1);
+    expect(resolveMaxParallelChunks(worker, 300, MP_1080P, log)).toBeLessThanOrEqual(3);
+    expect(resolveMaxParallelChunks(worker, 3600, MP_1080P, log)).toBeLessThan(64);
+  });
+
+  it("explicit maxParallelChunks wins and no worker inputs keeps the old default", () => {
+    const worker = { workerTimeoutSeconds: LAMBDA_LIMIT, workerConcurrency: 200 };
+    const args = [THIRTY_MIN_30FPS, MP_1080P] as const;
+    expect(resolveMaxParallelChunks({ ...worker, maxParallelChunks: 4 }, ...args)).toBe(4);
+    expect(resolveMaxParallelChunks({}, ...args)).toBe(DEFAULT_MAX_PARALLEL_CHUNKS);
+    expect(resolveMaxParallelChunks({ chunkSize: 240 }, ...args)).toBe(DEFAULT_MAX_PARALLEL_CHUNKS);
+  });
+
+  it("caps pinned chunking at one wave across the worker concurrency", () => {
+    const worker = { workerTimeoutSeconds: LAMBDA_LIMIT, workerConcurrency: 900 };
+    const maxParallel = resolveMaxParallelChunks({ ...worker, chunkSize: 30 }, 1800, MP_1080P);
+    expect(resolveChunkPlan(1800, 30, maxParallel).chunkCount).toBe(60);
+    const args = [THIRTY_MIN_30FPS, MP_1080P] as const;
+    expect(resolveMaxParallelChunks({ ...worker, targetChunkFrames: 300 }, ...args)).toBe(256);
+  });
+
+  it("sizes chunks from a measured frame cost so expensive frames fit the limit", () => {
+    // 45 s of 1080x1920 at 24 fps whose frames measured ~10.5 s each (a graded video on software GL).
+    const frames = 45 * 24;
+    const mp = (1080 * 1920) / 1e6;
+    const worker = { workerTimeoutSeconds: LAMBDA_LIMIT, workerConcurrency: 8 };
+    const { log } = recordingLog();
+    const priced = resolveChunkPlan(
+      frames,
+      undefined,
+      resolveMaxParallelChunks(worker, frames, mp),
+    );
+    expect(estimateChunkSeconds(priced.effectiveChunkSize, mp, 10.5)).toBeGreaterThan(LAMBDA_LIMIT);
+
+    const measured = resolveChunkPlan(
+      frames,
+      undefined,
+      resolveMaxParallelChunks(worker, frames, mp, log, 10.5),
+    );
+    expect(estimateChunkSeconds(measured.effectiveChunkSize, mp, 10.5)).toBeLessThanOrEqual(
+      LAMBDA_LIMIT * 0.75,
+    );
+    // A cheap measured frame keeps the per-pixel plan.
+    expect(resolveMaxParallelChunks(worker, frames, mp, log, 0.07)).toBe(
+      resolveMaxParallelChunks(worker, frames, mp, log),
+    );
+  });
+
+  it("measures frame cost only for graded media and only when sizing uses it", () => {
+    expect(planNeedsFrameCostMeasurement('<video data-color-grading=\'{"preset":"x"}\'>')).toBe(
+      true,
+    );
+    expect(planNeedsFrameCostMeasurement("<video src=a.mp4>")).toBe(false);
+    expect(chunkSizingUsesFrameCost({ workerTimeoutSeconds: LAMBDA_LIMIT })).toBe(true);
+    expect(chunkSizingUsesFrameCost({ workerTimeoutSeconds: LAMBDA_LIMIT, chunkSize: 48 })).toBe(
+      false,
+    );
+    expect(chunkSizingUsesFrameCost({})).toBe(false);
+  });
+
+  it("fails fast with a typed error when even 256 chunks cannot fit the limit", () => {
+    const eightHours = 8 * 60 * 60 * 30;
+    let caught: unknown;
+    try {
+      resolveMaxParallelChunks({ workerTimeoutSeconds: LAMBDA_LIMIT }, eightHours, MP_1080P);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(ChunkExceedsWorkerTimeoutError);
+    expect((caught as ChunkExceedsWorkerTimeoutError).code).toBe(CHUNK_EXCEEDS_WORKER_TIMEOUT);
+    expect((caught as Error).message).toContain("900 s worker time limit");
+    // A limit shorter than one chunk's fixed overhead can never fit.
+    expect(() => resolveMaxParallelChunks({ workerTimeoutSeconds: 30 }, 300, MP_1080P)).toThrow(
+      ChunkExceedsWorkerTimeoutError,
+    );
   });
 });
 
@@ -388,6 +554,60 @@ describe("plan() defaults", () => {
     expect(DEFAULT_MAX_PARALLEL_CHUNKS).toBe(16);
     expect(MIN_CHUNK_SIZE).toBe(10);
   });
+
+  it("sizes chunks from the worker inputs the adapter passes", async () => {
+    const config = { fps: 30, width: 320, height: 240, format: "mp4" } as const;
+    const fixed = await plan(projectDir, config, join(runRoot, "plan-fixed-16"));
+    const sized = await plan(
+      projectDir,
+      { ...config, workerTimeoutSeconds: 900, workerConcurrency: 8 },
+      join(runRoot, "plan-worker-sized"),
+    );
+    expect(fixed.chunkCount).toBe(3);
+    expect(sized.chunkCount).toBe(1);
+  }, 30_000);
+
+  it("splits graded media into more chunks from its measured frame cost", async () => {
+    const measuredFor: string[] = [];
+    mock.module("./planFrameCost.js", () => ({
+      measurePlanSecondsPerFrame: async (input: { html: string }) => {
+        measuredFor.push(input.html);
+        return 10;
+      },
+    }));
+    const graded = join(runRoot, "project-graded");
+    mkdirSync(graded, { recursive: true });
+    writeFileSync(
+      join(graded, "index.html"),
+      FIXTURE_HTML.replace("<p>", `<p data-color-grading='{"exposure":0.2}'>`),
+      "utf-8",
+    );
+    const config = {
+      fps: 30,
+      width: 320,
+      height: 240,
+      format: "mp4",
+      workerTimeoutSeconds: 900,
+      workerConcurrency: 8,
+    } as const;
+    const cheap = await plan(projectDir, config, join(runRoot, "plan-cheap"));
+    expect(measuredFor).toHaveLength(0);
+    const costly = await plan(graded, config, join(runRoot, "plan-graded"));
+    expect(measuredFor).toHaveLength(1);
+    expect(cheap.chunkCount).toBe(1);
+    // 30 frames at 10 s each split as far as the 10-frame chunk floor allows.
+    expect(costly.chunkCount).toBe(3);
+  }, 30_000);
+
+  it("rejects at plan time when no chunk can finish inside the worker limit", async () => {
+    await expect(
+      plan(
+        projectDir,
+        { fps: 30, width: 320, height: 240, format: "mp4", workerTimeoutSeconds: 30 },
+        join(runRoot, "plan-too-slow"),
+      ),
+    ).rejects.toBeInstanceOf(ChunkExceedsWorkerTimeoutError);
+  }, 30_000);
 });
 
 describe("plan() — golden planDir + planHash determinism", () => {
@@ -658,10 +878,11 @@ describe("plan() — golden planDir + planHash determinism", () => {
   // variant generates a 1s silent wav via `ffmpeg`, references it from
   // the composition, and runs plan() — exercising the audio-mix path
   // that produced the original bug.
-  const HAS_FFMPEG = (() => {
-    const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
-    return spawnSync("ffmpeg", ["-version"]).status === 0;
-  })();
+  const HAS_FFMPEG = spawnSync("ffmpeg", ["-version"]).status === 0;
+  const ffmpegOrThrow = (args: string[]) => {
+    const ffmpeg = spawnSync("ffmpeg", ["-nostdin", "-loglevel", "error", ...args]);
+    if (ffmpeg.status !== 0) throw new Error(`ffmpeg fixture failed: ${ffmpeg.stderr?.toString()}`);
+  };
 
   it.skipIf(!HAS_FFMPEG)(
     "plan.json.planHash matches recompute on an audio-bearing composition",
@@ -671,11 +892,7 @@ describe("plan() — golden planDir + planHash determinism", () => {
       // Generate a 1s mono silent wav. PCM keeps the file tiny without
       // pulling in an audio asset fixture.
       const audioPath = join(audioProjectDir, "silence.wav");
-      const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
-      const ffmpeg = spawnSync("ffmpeg", [
-        "-nostdin",
-        "-v",
-        "error",
+      ffmpegOrThrow([
         "-f",
         "lavfi",
         "-i",
@@ -686,9 +903,6 @@ describe("plan() — golden planDir + planHash determinism", () => {
         "pcm_s16le",
         audioPath,
       ]);
-      if (ffmpeg.status !== 0) {
-        throw new Error(`ffmpeg silence-wav generation failed: ${ffmpeg.stderr?.toString()}`);
-      }
       writeFileSync(
         join(audioProjectDir, "index.html"),
         `<!doctype html>
@@ -722,6 +936,230 @@ describe("plan() — golden planDir + planHash determinism", () => {
     },
     TIMEOUT_MS,
   );
+
+  it.skipIf(!HAS_FFMPEG)(
+    "plans a video-bearing project to the same planHash from different plan folders",
+    async () => {
+      const videoProjectDir = join(runRoot, "project-with-video");
+      mkdirSync(videoProjectDir, { recursive: true });
+      ffmpegOrThrow([
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=320x240:rate=30:duration=1",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:v",
+        "libx264",
+        join(videoProjectDir, "clip.mp4"),
+      ]);
+      writeFileSync(
+        join(videoProjectDir, "index.html"),
+        `<!doctype html>
+<div data-composition-id="root" data-width="320" data-height="240" data-duration="1">
+  <video id="clip" src="clip.mp4" data-start="0" muted></video>
+</div>`,
+        "utf-8",
+      );
+
+      const config = { fps: 30 as const, width: 320, height: 240, format: "mp4" as const };
+      const dirA = join(runRoot, "plan-video-a");
+      const dirB = join(runRoot, "nested", "plan-video-b");
+      for (const dir of [dirA, dirB]) mkdirSync(dir, { recursive: true });
+      const a = await plan(videoProjectDir, config, dirA);
+      const b = await plan(videoProjectDir, config, dirB);
+
+      expect(a.planHash).toBe(b.planHash);
+      const videosJson = (dir: string) => readFileSync(join(dir, "meta", "videos.json"), "utf-8");
+      expect(videosJson(dirB)).toBe(videosJson(dirA));
+      expect(JSON.parse(videosJson(dirA)).extracted[0].srcPath).toBe("compiled/clip.mp4");
+    },
+    TIMEOUT_MS,
+  );
+});
+
+describe.skipIf(spawnSync("ffmpeg", ["-version"]).status !== 0)("stitched mp4 plans", () => {
+  function audioProject(name: string, amplitude = 0.99, duration = 1): string {
+    const dir = join(runRoot, name);
+    mkdirSync(dir, { recursive: true });
+    const tone = spawnSync("ffmpeg", [
+      "-nostdin",
+      "-v",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      `aevalsrc=${amplitude}*sin(2*PI*440*t):s=48000:d=0.6`,
+      "-c:a",
+      "pcm_s16le",
+      join(dir, "tone.wav"),
+    ]);
+    if (tone.status !== 0) throw new Error(`ffmpeg tone failed: ${tone.stderr}`);
+    writeFileSync(
+      join(dir, "index.html"),
+      `<!doctype html><html><head><meta charset="utf-8"></head><body>
+  <div data-composition-id="root" data-width="320" data-height="240" data-duration="${duration}">
+    <audio data-composition-audio src="tone.wav"></audio>
+  </div></body></html>`,
+    );
+    return dir;
+  }
+
+  it("fits the audio length and peak and records the layout only for mp4 without cfr", async () => {
+    const project = audioProject("project-stitch");
+    const config = { fps: 30, width: 320, height: 240, format: "mp4" } as const;
+    const stitched = join(runRoot, "plan-stitch");
+    await buildLocalExecutionPlan(project, config, stitched, { chunksCarryAudio: true });
+    const encoder = JSON.parse(readFileSync(join(stitched, "meta", "encoder.json"), "utf-8"));
+    expect(encoder.chunksCarryAudio).toBe(true);
+    const probe = spawnSync(
+      "ffprobe",
+      [
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "csv=p=0",
+        join(stitched, "audio.m4a"),
+      ],
+      { encoding: "utf-8" },
+    );
+    expect(Math.abs(Number(probe.stdout) - 1)).toBeLessThan(0.001);
+    const volume = spawnSync(
+      "ffmpeg",
+      ["-nostdin", "-i", join(stitched, "audio.m4a"), "-af", "volumedetect", "-f", "null", "-"],
+      { encoding: "utf-8" },
+    );
+    expect(Number(/max_volume: (-?[\d.]+) dB/.exec(volume.stderr)?.[1])).toBeLessThan(-1);
+
+    const withCfr = join(runRoot, "plan-stitch-cfr");
+    await buildLocalExecutionPlan(project, { ...config, cfr: true }, withCfr, {
+      chunksCarryAudio: true,
+    });
+    const cfrEncoder = JSON.parse(readFileSync(join(withCfr, "meta", "encoder.json"), "utf-8"));
+    expect(cfrEncoder.chunksCarryAudio).toBeUndefined();
+  }, 60_000);
+
+  it("leaves the audio to buildPlanAudio, which makes the track the plan would", async () => {
+    // A hot tone, so the true-peak hold re-encodes as well.
+    const project = audioProject("project-separate-audio");
+    const config = { fps: 30, width: 320, height: 240, format: "mp4" } as const;
+    const carried = join(runRoot, "plan-carried-audio");
+    await buildLocalExecutionPlan(project, config, carried, { chunksCarryAudio: true });
+
+    const separate = join(runRoot, "plan-separate-audio");
+    await buildLocalExecutionPlan(project, config, separate, {
+      chunksCarryAudio: true,
+      deferAudio: true,
+    });
+    const encoder = JSON.parse(readFileSync(join(separate, "meta", "encoder.json"), "utf-8"));
+    expect([encoder.chunksCarryAudio, encoder.separateAudio]).toEqual([undefined, true]);
+    expect(existsSync(join(separate, "audio.m4a"))).toBe(false);
+
+    const work = join(runRoot, "separate-audio-work");
+    mkdirSync(work, { recursive: true });
+    const audio = join(work, "audio.m4a");
+    expect(await buildPlanAudio(project, config, work, audio)).toEqual({ hasAudio: true });
+    expect(readFileSync(audio).equals(readFileSync(join(carried, "audio.m4a")))).toBe(true);
+
+    const withCfr = join(runRoot, "plan-separate-audio-cfr");
+    await buildLocalExecutionPlan(project, { ...config, cfr: true }, withCfr, { deferAudio: true });
+    const cfrEncoder = JSON.parse(readFileSync(join(withCfr, "meta", "encoder.json"), "utf-8"));
+    expect(cfrEncoder.separateAudio).toBeUndefined();
+    expect(existsSync(join(withCfr, "audio.m4a"))).toBe(true);
+  }, 60_000);
+
+  it("gives buildPlanAudio the sound of a video whose src the scene script sets", async () => {
+    const project = join(runRoot, "project-script-src");
+    mkdirSync(project, { recursive: true });
+    const clip = spawnSync("ffmpeg", [
+      "-nostdin",
+      "-v",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "testsrc=s=320x240:r=30:d=1",
+      "-f",
+      "lavfi",
+      "-i",
+      "sine=frequency=440:sample_rate=48000:d=1",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-shortest",
+      join(project, "clip.mp4"),
+    ]);
+    if (clip.status !== 0) throw new Error(`ffmpeg clip failed: ${clip.stderr}`);
+    writeFileSync(
+      join(project, "index.html"),
+      `<!doctype html><html><head><meta charset="utf-8"></head><body>
+  <div data-composition-id="root" data-width="320" data-height="240" data-duration="1" data-no-timeline>
+    <video id="v" data-has-audio="true" data-start="0" data-duration="1" playsinline></video>
+  </div>
+  <script>document.getElementById("v").src = "clip.mp4";</script></body></html>`,
+    );
+    const config = { fps: 30, width: 320, height: 240, format: "mp4" } as const;
+    const carried = join(runRoot, "plan-script-src");
+    await buildLocalExecutionPlan(project, config, carried, { chunksCarryAudio: true });
+    const work = join(runRoot, "script-src-work");
+    mkdirSync(work, { recursive: true });
+    const audio = join(work, "audio.m4a");
+    expect(await buildPlanAudio(project, config, work, audio)).toEqual({ hasAudio: true });
+    expect(readFileSync(audio).equals(readFileSync(join(carried, "audio.m4a")))).toBe(true);
+  }, 60_000);
+
+  it("encodes the audio once, at the frames' exact length", async () => {
+    // 1.01 s at 30 fps is 31 frames: 49,600 samples, 48.4375 AAC frames of 1,024.
+    const project = audioProject("project-one-encode", 0.3, 1.01);
+    const shimDir = join(runRoot, "ffmpeg-shim");
+    mkdirSync(shimDir, { recursive: true });
+    const shim = join(shimDir, "ffmpeg");
+    const calls = join(shimDir, "calls.txt");
+    writeFileSync(shim, `#!/bin/sh\necho "$*" >> "${calls}"\nexec "${getFfmpegBinary()}" "$@"\n`);
+    chmodSync(shim, 0o755);
+    const planDir = join(runRoot, "plan-one-encode");
+    const previous = process.env[FFMPEG_PATH_ENV];
+    process.env[FFMPEG_PATH_ENV] = shim;
+    try {
+      await buildLocalExecutionPlan(
+        project,
+        { fps: 30, width: 320, height: 240, format: "mp4" },
+        planDir,
+        { chunksCarryAudio: true },
+      );
+    } finally {
+      if (previous === undefined) delete process.env[FFMPEG_PATH_ENV];
+      else process.env[FFMPEG_PATH_ENV] = previous;
+    }
+    const aacEncodes = readFileSync(calls, "utf-8")
+      .split("\n")
+      .filter((line) => / aac -b:a /.test(line));
+    expect(aacEncodes).toHaveLength(1);
+    const planAudio = join(planDir, "audio.m4a");
+    const shown = spawnSync(
+      "ffprobe",
+      [
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=duration_ts",
+        "-of",
+        "csv=p=0",
+        "--",
+        planAudio,
+      ],
+      { encoding: "utf-8" },
+    );
+    // The edit list counts in ms, so 49,600 samples (1.0333 s) show as 1.033 s.
+    expect(Math.abs(Number(shown.stdout) - 49_600)).toBeLessThan(48);
+  }, 60_000);
 });
 
 describe("plan() — codec knob", () => {

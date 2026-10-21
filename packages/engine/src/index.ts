@@ -49,6 +49,7 @@ export type {
 // ── Configuration ──────────────────────────────────────────────────────────────
 export {
   resolveConfig,
+  resolvePageNavigationTimeout,
   validateEngineConfigSnapshot,
   DEFAULT_CONFIG,
   scaleProtocolTimeoutForComposition,
@@ -142,6 +143,7 @@ export {
   type DiscardWarmupInnerCapture,
   type StaticVerificationOutcome,
   VfxFailureError,
+  waitForImagesReady,
 } from "./services/frameCapture.js";
 export {
   CaptureFailure,
@@ -263,12 +265,15 @@ export {
   parseMasterFxChain,
   processCompositionAudio,
 } from "./services/audioMixer.js";
+export { audioFailureDiagnostics } from "./services/audioFailureDiagnostic.js";
 export { cloneCaptureWarning, cloneCaptureWarnings } from "./services/captureWarning.js";
 export type {
   AudioElement,
   AudioFailureReason,
   AudioFailureStage,
   AudioProcessingFailure,
+  AudioFailureDiagnostic,
+  AudioSubprocessEvidence,
   AudioTrack,
   AudioVolumeKeyframe,
   MixResult,
@@ -356,6 +361,7 @@ export {
   type RunFfmpegOptions,
   type RunFfmpegResult,
 } from "./utils/runFfmpeg.js";
+export { aacSegmentCount, encodeAac } from "./services/aacEncode.js";
 export {
   ManagedChildProcess,
   type ManagedChildProcessOptions,
@@ -428,6 +434,8 @@ export {
   showVideoElements,
   queryVideoElementBounds,
   queryElementStacking,
+  measureVideoShownBoxes,
+  type ShownBox,
   type VideoElementBounds,
   type ElementStackingInfo,
 } from "./services/videoFrameInjector.js";

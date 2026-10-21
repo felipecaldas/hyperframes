@@ -108,7 +108,7 @@ export function mintHfId(el: Element, assigned: Set<string>): string {
  * inner id would be duplicated across every clone. Form B is distinguished from
  * a clone-source by the presence of a direct `[data-composition-id]` child.
  */
-function getChildElements(parent: Element): Element[] {
+export function getChildElements(parent: Element): Element[] {
   const directChildren = Array.from(parent.children);
   if (directChildren.length || parent.tagName.toLowerCase() !== "template") return directChildren;
   const content = (parent as HTMLTemplateElement).content;

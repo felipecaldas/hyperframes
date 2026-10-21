@@ -1032,6 +1032,63 @@ describe("audio-aware project rules", () => {
       );
       expect(codes).not.toContain("duplicate_audio_track");
     });
+
+    it("stays quiet for back-to-back clips whose start plus duration only rounds past the next start", async () => {
+      // 21.03 + 0.1 is 21.130000000000003 in floating point.
+      const clip = (id: string, start: string, duration: string) =>
+        `<audio id="${id}" src="a.mp3" data-start="${start}" data-duration="${duration}" data-track-index="0"></audio>`;
+      const codes = await codesFor(
+        composition(
+          clip("m1", "0", "21.03") + clip("m2", "21.03", "0.1") + clip("m3", "21.13", "5"),
+        ),
+      );
+      expect(codes).not.toContain("duplicate_audio_track");
+    });
+
+    const scene = (id: string, videoDuration = 5) => `<template id="${id}-template">
+  <div data-composition-id="${id}" data-width="1920" data-height="1080">
+    ${video('data-has-audio="true"')
+      .replace('src="a.mp4"', `src="${id}.mp4"`)
+      .replace('data-duration="5"', `data-duration="${videoDuration}"`)}
+  </div>
+</template>`;
+    const host = (id: string, start: number | string, length: number | null) =>
+      `<div data-composition-id="${id}" data-composition-src="compositions/${id}.html" data-start="${start}"${length === null ? "" : ` data-duration="${length}"`} data-track-index="1"></div>`;
+    const scenesCodes = (
+      starts: Array<number | string>,
+      { videoDuration = 5, hostDuration = 5 as number | null } = {},
+    ) => {
+      const ids = starts.map((_, i) => `s${i}`);
+      const project = makeProject(
+        composition(ids.map((id, i) => host(id, starts[i]!, hostDuration)).join("")),
+        Object.fromEntries(ids.map((id) => [`${id}.html`, scene(id, videoDuration)])),
+      );
+      return lintProject(project).then(({ results }) =>
+        results.flatMap((result) => result.result.findings.map((f) => f.code)),
+      );
+    };
+
+    it("places each scene's audio at its host's start, so scenes played one after another pass", async () => {
+      expect(await scenesCodes([0, 5])).not.toContain("duplicate_audio_track");
+      expect(await scenesCodes([0, 5], { hostDuration: null })).not.toContain(
+        "duplicate_audio_track",
+      );
+    });
+
+    it("still warns when two scenes' hosts overlap", async () => {
+      expect(await scenesCodes([0, 2])).toContain("duplicate_audio_track");
+    });
+
+    it("places a scene chained to the one before it with a reference start", async () => {
+      expect(await scenesCodes([0, "s0"])).not.toContain("duplicate_audio_track");
+      expect(await scenesCodes([0, "s0 - 2"])).toContain("duplicate_audio_track");
+    });
+
+    it("cuts a scene's audio at its host's end, as playback does", async () => {
+      expect(await scenesCodes([0, 5], { videoDuration: 10 })).not.toContain(
+        "duplicate_audio_track",
+      );
+    });
   });
 
   describe("audio_file_without_element", () => {

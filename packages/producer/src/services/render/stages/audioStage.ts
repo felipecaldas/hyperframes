@@ -20,6 +20,7 @@
 import { join } from "node:path";
 import {
   MIXED_AUDIO_FILENAME,
+  audioFailureDiagnostics,
   processCompositionAudio,
   type AudioProcessingFailure,
 } from "@hyperframes/engine";
@@ -41,6 +42,9 @@ export interface AudioStageInput {
   /** Read-only view of `composition.audios`. */
   audios: CompositionMetadata["audios"];
   masterFxChain?: string;
+  urlByAbsentLocalPath?: ReadonlyMap<string, string>;
+  /** Keep the float mix the AAC was encoded from here, for a later re-encode from it. */
+  keepEncoderInputAt?: string;
   abortSignal: AbortSignal | undefined;
   assertNotAborted: () => void;
   /** Where a per-track failure's detail goes. Optional so tests need not pass one. */
@@ -64,6 +68,13 @@ export interface AudioStageResult {
   audioFailures?: AudioProcessingFailure[];
 }
 
+function triggerFirst(
+  failures: readonly AudioProcessingFailure[] | undefined,
+  trigger: AudioProcessingFailure,
+): AudioProcessingFailure[] {
+  return [trigger, ...(failures ?? []).filter((failure) => failure !== trigger)];
+}
+
 export async function runAudioStage(input: AudioStageInput): Promise<AudioStageResult> {
   const {
     projectDir,
@@ -74,6 +85,8 @@ export async function runAudioStage(input: AudioStageInput): Promise<AudioStageR
     audioGain,
     audios,
     masterFxChain,
+    urlByAbsentLocalPath,
+    keepEncoderInputAt,
     abortSignal,
     assertNotAborted,
     log,
@@ -101,7 +114,13 @@ export async function runAudioStage(input: AudioStageInput): Promise<AudioStageR
         audioOutputPath,
         duration,
         abortSignal,
-        { ffmpegProcessTimeout, audioGain, masterFxChain },
+        {
+          ffmpegProcessTimeout,
+          audioGain,
+          masterFxChain,
+          urlByAbsentLocalPath,
+          keepEncoderInputAt,
+        },
         compiledDir,
       );
     } catch (err) {
@@ -140,6 +159,7 @@ export async function runAudioStage(input: AudioStageInput): Promise<AudioStageR
       throw encoderFailureError("Audio processing failed", {
         error: interrupted.detail,
         failureReason: "external_interruption",
+        audioFailures: audioFailureDiagnostics(triggerFirst(audioResult.failures, interrupted)),
       });
     }
 

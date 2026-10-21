@@ -27,11 +27,11 @@ import {
   existsSync,
   mkdirSync,
   copyFileSync,
-  cpSync,
   writeFileSync,
   readFileSync,
   readdirSync,
 } from "node:fs";
+import { copyDirSync } from "../utils/copyDir.js";
 import { resolve, basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
@@ -77,7 +77,7 @@ interface VideoMeta {
   videoCodec: string;
 }
 
-const WEB_CODECS = new Set(["h264", "vp8", "vp9", "av1", "theora"]);
+const WEB_CODECS = new Set(["h264", "vp8", "vp9", "av1"]);
 
 const DEFAULT_META: VideoMeta = {
   durationSeconds: 5,
@@ -211,7 +211,7 @@ export function transcodeToMp4(inputPath: string, outputPath: string): Promise<b
         "-y",
         outputPath,
       ],
-      { stdio: "pipe", windowsHide: true },
+      { stdio: "ignore", windowsHide: true },
     );
 
     child.on("close", (code) => resolvePromise(code === 0));
@@ -394,6 +394,7 @@ async function handleVideoFile(
   videoPath: string,
   destDir: string,
   interactive: boolean,
+  keepOriginal: boolean,
 ): Promise<{ meta: VideoMeta; localVideoName: string }> {
   const probed = probeVideo(videoPath);
   let meta: VideoMeta = { ...DEFAULT_META };
@@ -416,7 +417,7 @@ async function handleVideoFile(
   }
 
   // Check codec compatibility
-  if (probed && !isWebCompatible(probed.videoCodec)) {
+  if (probed && !keepOriginal && !isWebCompatible(probed.videoCodec)) {
     if (interactive) {
       clack.log.warn(
         c.warn(`Video codec "${probed.videoCodec}" is not supported by web browsers.`),
@@ -574,7 +575,7 @@ async function scaffoldProject(
   // build toolchain should not prevent the remote fetch fallback.
   const templateDir = getStaticTemplateDir(templateId);
   if (existsSync(join(templateDir, "index.html"))) {
-    cpSync(templateDir, destDir, { recursive: true });
+    copyDirSync(templateDir, destDir);
   } else {
     await fetchRemoteTemplate(templateId, destDir);
   }
@@ -717,6 +718,10 @@ export default defineCommand({
       type: "boolean",
       description: "Skip whisper transcription",
     },
+    "keep-original": {
+      type: "boolean",
+      description: "Copy the --video file as is, without converting it to H.264 MP4",
+    },
     model: {
       type: "string",
       description:
@@ -781,6 +786,7 @@ export default defineCommand({
     const videoFlag = args.video;
     const audioFlag = args.audio;
     const skipTranscribe = args["skip-transcribe"] === true;
+    const keepOriginal = args["keep-original"] === true;
     // Temporary measure while the skills.sh registry sync lags GitHub main: the
     // `--skip-skills` FLAG is neutered so an agent (or user) that passes it can
     // NOT dodge the GitHub skills freshness check. The "don't pass --skip-skills"
@@ -874,7 +880,7 @@ export default defineCommand({
       // Handle video
       if (videoPath) {
         sourceFilePath = videoPath;
-        const result = await handleVideoFile(videoPath, destDir, false);
+        const result = await handleVideoFile(videoPath, destDir, false, keepOriginal);
         localVideoName = result.localVideoName;
         videoHasAudio = result.meta.hasAudio;
         videoDuration = result.meta.durationSeconds;
@@ -1050,7 +1056,7 @@ export default defineCommand({
       }
       mkdirSync(destDir, { recursive: true });
       sourceFilePath = videoPath;
-      const result = await handleVideoFile(videoPath, destDir, true);
+      const result = await handleVideoFile(videoPath, destDir, true, keepOriginal);
       localVideoName = result.localVideoName;
       videoHasAudio = result.meta.hasAudio;
       videoDuration = result.meta.durationSeconds;

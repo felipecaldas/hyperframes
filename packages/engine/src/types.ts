@@ -4,6 +4,7 @@
  * The engine's page contract. Any web page that wants to be rendered
  * as video must expose `window.__hf` implementing the HfProtocol interface.
  */
+import type { AudioFailureDiagnostic } from "./services/audioMixer.types.js";
 import type { Fps } from "@hyperframes/core";
 import type { ChromeMemoryStats } from "./services/chromeMemorySampler.js";
 import type { MotionBlurOptions } from "./services/motionBlur.js";
@@ -41,6 +42,7 @@ export interface CaptureWarning {
     sources?: string[];
     pendingCompositionIds?: string[];
     timeoutMs?: number;
+    audioFailures?: AudioFailureDiagnostic[];
     failureReasons?: string[];
     failureStages?: string[];
     failureOwner?: "user" | "system";

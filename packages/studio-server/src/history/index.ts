@@ -38,6 +38,7 @@ export {
   recordArtifact,
   recordArtifacts,
   artifactDirectory,
+  finishSnapshotRun,
   type ArtifactCapture,
   type ArtifactInput,
   type ArtifactRecord,
@@ -47,3 +48,5 @@ export {
 } from "./videoState.js";
 
 export { registerRenderOutput } from "../helpers/renderOutputs.js";
+
+export { retainSnapshotOutput } from "./snapshotRuns.js";

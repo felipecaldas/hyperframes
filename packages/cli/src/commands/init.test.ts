@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -17,6 +18,7 @@ import {
   injectTailwindBrowserScript,
   nameTooLongMessage,
   resolveVideoDurationSeconds,
+  transcodeToMp4,
 } from "./init.js";
 
 const cliEntry = resolve(fileURLToPath(import.meta.url), "..", "..", "cli.ts");
@@ -246,6 +248,47 @@ describe("hyperframes init flag rename", () => {
       expect(video).toMatch(/\bmuted\b/);
       expect(video).not.toContain("data-has-audio");
       expect(html).not.toMatch(/<audio\b/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("converts a Theora --video to H.264 MP4", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-init-theora-"));
+    const target = join(dir, "proj");
+    const clip = join(dir, "clip.ogv");
+    copyFileSync(resolve(fileURLToPath(import.meta.url), "../__fixtures__/theora.ogv"), clip);
+    try {
+      const res = runInit([target, "--non-interactive", "--skip-transcribe", "--video", clip]);
+      expect(res.status).toBe(0);
+      const video = readFileSync(join(target, "index.html"), "utf-8").match(/<video\b[^>]*>/)?.[0];
+      expect(video).toContain('src="clip.mp4"');
+      expect(existsSync(join(target, "clip.ogv"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("--keep-original copies a non-web --video as is instead of converting it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-init-keep-"));
+    const target = join(dir, "proj");
+    const clip = join(dir, "clip.mov");
+    const fixture = resolve(fileURLToPath(import.meta.url), "../__fixtures__/mpeg4.mp4");
+    copyFileSync(fixture, clip);
+    try {
+      const res = runInit([
+        target,
+        "--non-interactive",
+        "--skip-transcribe",
+        "--keep-original",
+        "--video",
+        clip,
+      ]);
+      expect(res.status).toBe(0);
+      const video = readFileSync(join(target, "index.html"), "utf-8").match(/<video\b[^>]*>/)?.[0];
+      expect(video).toContain('src="clip.mov"');
+      expect(readFileSync(join(target, "clip.mov"))).toEqual(readFileSync(fixture));
+      expect(existsSync(join(target, "clip.mp4"))).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -656,4 +699,31 @@ describe("applyResolutionPreset", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+describe("transcodeToMp4", () => {
+  it.skipIf(process.platform === "win32")(
+    "finishes when ffmpeg logs far more than a pipe buffer holds",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "hf-init-ffmpeg-log-"));
+      const ffmpeg = join(dir, "ffmpeg");
+      const output = join(dir, "out.mp4");
+      // Blocking writes, like ffmpeg's own log: 1 MB stalls on a pipe nobody reads.
+      const script = `const fs = require("node:fs");
+const line = Buffer.alloc(1024, "x");
+for (let i = 0; i < 1024; i++) fs.writeSync(2, line);
+fs.writeFileSync(process.argv.at(-1), "");`;
+      writeFileSync(ffmpeg, `#!${process.execPath}\n${script}\n`);
+      chmodSync(ffmpeg, 0o755);
+      vi.stubEnv("HYPERFRAMES_FFMPEG_PATH", ffmpeg);
+      try {
+        await expect(transcodeToMp4(join(dir, "in.mov"), output)).resolves.toBe(true);
+        expect(existsSync(output)).toBe(true);
+      } finally {
+        vi.unstubAllEnvs();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    5_000,
+  );
 });

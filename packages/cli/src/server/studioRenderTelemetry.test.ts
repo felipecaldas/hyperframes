@@ -259,6 +259,14 @@ describe("studioRenderTelemetry", () => {
     });
   });
 
+  it("forwards the render's CPU use on both events", () => {
+    const cpu = { cpuBusyAvgPct: 57, cpuBusyPeakPct: 90, cpuCoresBusyPeak: 2 };
+    emitStudioRenderComplete(opts, 5000, fullPerf, cpu);
+    emitStudioRenderError(opts, 100, "encode", new Error("x"), undefined, cpu);
+    expect(trackRenderComplete.mock.calls[0]![0]).toMatchObject(cpu);
+    expect(trackRenderError.mock.calls[0]![0]).toMatchObject(cpu);
+  });
+
   describe("emitStudioRenderError", () => {
     it("tags with source: 'studio' and forwards failedStage + elapsedMs", () => {
       emitStudioRenderError(opts, 1200, "encode", new Error("boom"), undefined);

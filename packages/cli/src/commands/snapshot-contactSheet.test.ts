@@ -1,16 +1,23 @@
 import { runCommand } from "citty";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  linkSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const capture = vi.hoisted(() => ({
   evaluate: vi.fn(),
-  screenshot: vi.fn(async ({ path }: { path: string }) => {
-    const bytes = Buffer.from("captured PNG");
-    writeFileSync(path, bytes);
-    return bytes;
-  }),
+  screenshot: vi.fn(async () => Buffer.from("captured PNG")),
   closeBrowser: vi.fn(async () => undefined),
   closeServer: vi.fn(async () => undefined),
   seek: vi.fn(async () => undefined),
@@ -43,6 +50,21 @@ import snapshotCommand from "./snapshot.js";
 import { historyDeps } from "../utils/historyOwner.js";
 import { openProjectHistory } from "@hyperframes/studio-server/history";
 
+/** The page's answers for one run: asset check, duration, ready, then two per frame. */
+function primePage(frames: number) {
+  capture.evaluate
+    .mockReset()
+    .mockResolvedValueOnce({ loaded: [], errored: [], unused: [] })
+    .mockResolvedValueOnce(2)
+    .mockResolvedValueOnce(true);
+  for (let i = 0; i < frames; i++) {
+    capture.evaluate.mockResolvedValueOnce([]).mockResolvedValueOnce(undefined);
+  }
+}
+
+const PROJECT_HTML =
+  '<html><body><div id="root" data-composition-id="main" data-width="640" data-height="360" data-start="0" data-duration="2">Visible</div><script>window.__timelines = { main: { duration() { return 2; }, seek() {} } };</script></body></html>';
+
 describe("snapshot contact sheet failures", () => {
   let project: string;
 
@@ -50,19 +72,8 @@ describe("snapshot contact sheet failures", () => {
     vi.resetModules();
     vi.clearAllMocks();
     project = mkdtempSync(join(tmpdir(), "hf-snapshot-contact-sheet-"));
-    writeFileSync(
-      join(project, "index.html"),
-      '<html><body><div id="root" data-composition-id="main" data-width="640" data-height="360" data-start="0" data-duration="2">Visible</div><script>window.__timelines = { main: { duration() { return 2; }, seek() {} } };</script></body></html>',
-    );
-    capture.evaluate
-      .mockReset()
-      .mockResolvedValueOnce({ loaded: [], errored: [], unused: [] })
-      .mockResolvedValueOnce(2)
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(undefined);
+    writeFileSync(join(project, "index.html"), PROJECT_HTML);
+    primePage(2);
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -70,7 +81,7 @@ describe("snapshot contact sheet failures", () => {
 
   afterEach(() => {
     vi.doUnmock("../capture/contactSheet.js");
-    vi.doUnmock("sharp");
+    vi.doUnmock("../utils/optionalPackages.js");
     vi.restoreAllMocks();
     rmSync(project, { recursive: true, force: true });
   });
@@ -86,8 +97,9 @@ describe("snapshot contact sheet failures", () => {
         throw new Error(message);
       });
       if (failure === "import") {
-        vi.doMock("sharp", () => ({
-          get default() {
+        vi.doMock("../utils/optionalPackages.js", async (importOriginal) => ({
+          ...(await importOriginal<typeof import("../utils/optionalPackages.js")>()),
+          loadSharp: async () => {
             throw new Error(message);
           },
         }));
@@ -141,7 +153,7 @@ describe("snapshot contact sheet failures", () => {
     expect(console.error).not.toHaveBeenCalled();
   });
 
-  it("keeps the captured frames when another process holds history", async () => {
+  it("keeps and records the captured frames when another process holds history", async () => {
     const args = {
       rawArgs: [
         project,
@@ -161,20 +173,8 @@ describe("snapshot contact sheet failures", () => {
       historyRoot: historyDeps.historyRoot,
       ownerWaitMs: 0,
     });
-    capture.screenshot.mockImplementation(async ({ path }: { path: string }) => {
-      const bytes = Buffer.from("replaced PNG");
-      writeFileSync(path, bytes);
-      return bytes;
-    });
-    capture.evaluate
-      .mockReset()
-      .mockResolvedValueOnce({ loaded: [], errored: [], unused: [] })
-      .mockResolvedValueOnce(2)
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(undefined);
+    capture.screenshot.mockImplementation(async () => Buffer.from("replaced PNG"));
+    primePage(2);
     try {
       await runCommand(snapshotCommand, args);
       for (const [index, time] of ["0.5", "1"].entries()) {
@@ -182,15 +182,126 @@ describe("snapshot contact sheet failures", () => {
         expect(readFileSync(frame)).toEqual(Buffer.from("replaced PNG"));
       }
       const after = JSON.parse(readFileSync(statePath, "utf8"));
-      expect(after.snapshots.unversioned).toEqual([]);
-      expect(after.snapshots.latest).toBeNull();
-      expect(console.error).not.toHaveBeenCalled();
-      expect(console.warn).toHaveBeenCalledWith(
-        expect.stringContaining("Snapshots were not recorded"),
+      expect(after.snapshots.unversioned.map((record: { image: string }) => record.image)).toEqual(
+        ["0.5", "1"].map((time, index) =>
+          join(project, "snapshots", `frame-0${index}-at-${time}s.png`),
+        ),
       );
+      expect(console.error).not.toHaveBeenCalled();
+      expect(console.warn).not.toHaveBeenCalledWith(expect.stringContaining("not recorded"));
     } finally {
       historyDeps.ownerWaitMs = previousWait;
       await held.close();
+    }
+  });
+
+  it("describes frames without resizing when sharp is absent and installs are off", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "test-key");
+    vi.stubEnv("HYPERFRAMES_NO_OPTIONAL_INSTALL", "sharp");
+    const generateContent = vi.fn(async (_request: unknown) => ({ text: "a described frame" }));
+    const loadSharp = vi.fn(async () => {
+      throw new Error(
+        "sharp is not installed, and HYPERFRAMES_NO_OPTIONAL_INSTALL turns off installing it",
+      );
+    });
+    vi.doMock("../utils/optionalPackages.js", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../utils/optionalPackages.js")>()),
+      loadInstalledSharp: () => null,
+      loadSharp,
+      loadOptionalPackage: async () => ({
+        GoogleGenAI: class {
+          models = { generateContent };
+        },
+      }),
+    }));
+    const { default: command } = await import("./snapshot.js");
+
+    try {
+      await runCommand(command, {
+        rawArgs: [
+          project,
+          ...["--at", "0.5,1", "--no-end", "--describe", "true"],
+          ...["--output", join(project, "snapshots")],
+        ],
+      });
+
+      expect(generateContent).toHaveBeenCalledTimes(2);
+      expect(JSON.stringify(generateContent.mock.calls[0]?.[0])).toContain(
+        '"mimeType":"image/png"',
+      );
+      expect(readFileSync(join(project, "snapshots", "descriptions.md"), "utf8")).toContain(
+        "a described frame",
+      );
+      expect(loadSharp).not.toHaveBeenCalledWith("--describe");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe("snapshot --keep", () => {
+  let project: string;
+  let stills: string;
+
+  beforeEach(() => {
+    project = mkdtempSync(join(tmpdir(), "hf-snapshot-keep-"));
+    stills = join(project, "boards", "stills");
+    writeFileSync(join(project, "index.html"), PROJECT_HTML);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(project, { recursive: true, force: true });
+  });
+
+  async function snapshot(at: string, bytes: string) {
+    capture.screenshot.mockImplementation(async () => Buffer.from(bytes));
+    primePage(at.split(",").length);
+    await runCommand(snapshotCommand, {
+      rawArgs: [project, "--keep", "--at", at, "--no-end", "--describe", "false", "-o", stills],
+    });
+  }
+
+  it("redoes one moment and keeps every other still", async () => {
+    await snapshot("0,0.5,1.5", "first PNG");
+    await snapshot("0.5", "redo PNG");
+
+    expect(readdirSync(stills).sort()).toEqual(["at-0.5s.png", "at-0s.png", "at-1.5s.png"]);
+    expect(readFileSync(join(stills, "at-0s.png"), "utf8")).toBe("first PNG");
+    expect(readFileSync(join(stills, "at-0.5s.png"), "utf8")).toBe("redo PNG");
+    expect(readFileSync(join(stills, "at-1.5s.png"), "utf8")).toBe("first PNG");
+    expect(existsSync(join(stills, "contact-sheet.jpg"))).toBe(false);
+  });
+
+  it("refuses two times that would share a still, before touching the folder", async () => {
+    await snapshot("1.5", "first PNG");
+    capture.screenshot.mockClear();
+
+    await expect(snapshot("1.5,1.5004", "second PNG")).rejects.toThrow(
+      "--keep would name both 1.5 and 1.5004 at-1.5s.png",
+    );
+    expect(capture.screenshot).not.toHaveBeenCalled();
+    expect(readFileSync(join(stills, "at-1.5s.png"), "utf8")).toBe("first PNG");
+  });
+
+  it("replaces a linked still without writing through the link", async () => {
+    mkdirSync(stills, { recursive: true });
+    const hardVictim = join(project, "hard-victim.png");
+    writeFileSync(hardVictim, "hard victim");
+    linkSync(hardVictim, join(stills, "at-0.5s.png"));
+    const softVictim = join(project, "soft-victim.png");
+    writeFileSync(softVictim, "soft victim");
+    if (process.platform !== "win32") symlinkSync(softVictim, join(stills, "at-1.5s.png"));
+
+    await snapshot("0.5,1.5", "new PNG");
+
+    expect(readFileSync(hardVictim, "utf8")).toBe("hard victim");
+    expect(readFileSync(softVictim, "utf8")).toBe("soft victim");
+    for (const still of ["at-0.5s.png", "at-1.5s.png"]) {
+      expect(lstatSync(join(stills, still)).isFile()).toBe(true);
+      expect(readFileSync(join(stills, still), "utf8")).toBe("new PNG");
     }
   });
 });

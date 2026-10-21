@@ -31,20 +31,16 @@ import { isElementNode, isMediaElement } from "./domRealm";
 import { LOOP_INFLATED_TIMELINE_SECONDS } from "./compositionLength";
 import { cutToHostSlots } from "../mediaTiming";
 
-export function isRuntimeElementVisibleAt(
-  rawNode: HTMLElement,
+export function runtimeElementWindow(
+  rawNode: Element,
   options: {
-    currentTime: number;
-    compositionDuration: number;
-    canonicalFps: number;
-    exportRenderSeek: boolean;
     timelineRegistry: Record<string, RuntimeTimelineLike | undefined>;
     resolver: ReturnType<typeof createRuntimeStartTimeResolver>;
   },
-): boolean {
+): { start: number; end: number } | null {
   const tag = rawNode.tagName.toLowerCase();
   if (tag === "script" || tag === "style" || tag === "link" || tag === "meta") {
-    return false;
+    return null;
   }
 
   const isMedia = tag === "video" || tag === "audio";
@@ -70,12 +66,29 @@ export function isRuntimeElementVisibleAt(
       duration = liveDuration;
     }
   }
-  const computedEnd =
-    duration != null && duration > 0 ? start + duration : Number.POSITIVE_INFINITY;
+  return {
+    start,
+    end: duration != null && duration > 0 ? start + duration : Number.POSITIVE_INFINITY,
+  };
+}
+
+export function isRuntimeElementVisibleAt(
+  rawNode: Element,
+  options: {
+    currentTime: number;
+    compositionDuration: number;
+    canonicalFps: number;
+    exportRenderSeek: boolean;
+    timelineRegistry: Record<string, RuntimeTimelineLike | undefined>;
+    resolver: ReturnType<typeof createRuntimeStartTimeResolver>;
+  },
+): boolean {
+  const span = runtimeElementWindow(rawNode, options);
+  if (!span) return false;
   // Export seeks snap to frame boundaries; interactive visibility uses authored seconds.
   const clipWindow = options.exportRenderSeek
-    ? exportClipWindow(start, computedEnd, options.canonicalFps)
-    : { start, end: computedEnd };
+    ? exportClipWindow(span.start, span.end, options.canonicalFps)
+    : span;
   return isClipVisibleAt(
     options.currentTime,
     clipWindow.start,
@@ -249,6 +262,7 @@ function buildTimelineClipLabel(node: Element, kind: RuntimeTimelineClip["kind"]
 export function collectRuntimeTimelinePayload(params: {
   canonicalFps: number;
 }): RuntimeTimelineMessage {
+  const stackingByParent = new Map<Element | null, string>();
   const runtimeWindow = window as Window & {
     __timelines?: Record<string, RuntimeTimelineLike | undefined>;
   };
@@ -477,7 +491,7 @@ export function collectRuntimeTimelinePayload(params: {
       duration,
       track: parseAuthoredTrack(node, i),
       zIndex: readInlineZIndex(node),
-      stackingContextId: resolveCssStackingContextId(node),
+      stackingContextId: resolveCssStackingContextId(node, stackingByParent),
       kind,
       tagName: tag,
       compositionId: node.getAttribute("data-composition-id"),
@@ -588,7 +602,7 @@ export function collectRuntimeTimelinePayload(params: {
             duration: clampedDuration,
             track: parseAuthoredTrack(el, gsapTrack),
             zIndex: readInlineZIndex(el),
-            stackingContextId: resolveCssStackingContextId(el),
+            stackingContextId: resolveCssStackingContextId(el, stackingByParent),
             kind: "element",
             tagName: el.tagName.toLowerCase(),
             compositionId: el.getAttribute("data-composition-id"),
@@ -645,7 +659,7 @@ export function collectRuntimeTimelinePayload(params: {
         duration: clampedDuration,
         track: parseAuthoredTrack(el, overlayTrack),
         zIndex: readInlineZIndex(el),
-        stackingContextId: resolveCssStackingContextId(el),
+        stackingContextId: resolveCssStackingContextId(el, stackingByParent),
         kind: "element",
         tagName: tag,
         compositionId: el.getAttribute("data-composition-id"),

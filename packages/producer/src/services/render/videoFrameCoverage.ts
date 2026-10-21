@@ -134,9 +134,9 @@ export function resolveVideoCoverageThreshold(
 }
 
 /**
- * Count frames in a clip's authored `[start,end)` window. CFR extraction uses
- * FFmpeg's `-vf fps=<fps>` and rounds to the nearest output-frame boundary;
- * VFR extraction uses `-fps_mode cfr -r <fps>` and rounds up. Missing entries
+ * Count frames in a clip's authored `[start,end)` window. CFR extraction
+ * rounds to the nearest output-frame boundary and VFR extraction rounds up,
+ * as `extractionFrameCountForDuration` does. Missing entries
  * retain the fail-closed `ceil` default. Positive sub-frame clips emit one.
  */
 export function expectedFramesForClip(

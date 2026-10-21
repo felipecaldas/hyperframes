@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/studio-server",
-  "version": "0.8.154",
+  "version": "0.8.183",
   "repository": {
     "type": "git",
     "url": "https://github.com/heygen-com/hyperframes",
@@ -98,6 +98,12 @@
       "node": "./dist/helpers/mediaProxyPreview.js",
       "import": "./src/helpers/mediaProxyPreview.ts",
       "types": "./src/helpers/mediaProxyPreview.ts"
+    },
+    "./encoder-options": {
+      "bun": "./src/helpers/encoderOptions.ts",
+      "node": "./dist/helpers/encoderOptions.js",
+      "import": "./src/helpers/encoderOptions.ts",
+      "types": "./src/helpers/encoderOptions.ts"
     }
   },
   "publishConfig": {
@@ -159,6 +165,10 @@
       "./media-proxy-preview": {
         "import": "./dist/helpers/mediaProxyPreview.js",
         "types": "./dist/helpers/mediaProxyPreview.d.ts"
+      },
+      "./encoder-options": {
+        "import": "./dist/helpers/encoderOptions.js",
+        "types": "./dist/helpers/encoderOptions.d.ts"
       }
     },
     "main": "./dist/index.js",
@@ -181,8 +191,7 @@
     "hono": "^4.0.0",
     "linkedom": "^0.18.12",
     "postcss": "^8.5.8",
-    "postcss-selector-parser": "^7.1.2",
-    "sharp": "^0.35.0"
+    "postcss-selector-parser": "^7.1.2"
   },
   "devDependencies": {
     "@types/node": "^25.0.10",
@@ -190,5 +199,8 @@
     "tsx": "^4.21.0",
     "typescript": "^5.0.0",
     "vitest": "^4.1.11"
+  },
+  "optionalDependencies": {
+    "sharp": "^0.35.0"
   }
 }

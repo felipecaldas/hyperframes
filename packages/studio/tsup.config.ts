@@ -28,7 +28,6 @@ export default defineConfig({
     "@hyperframes/sdk",
     "@lezer/highlight",
     "@phosphor-icons/react",
-    "bpm-detective",
     "mediabunny",
     "react",
     "react-dom",

@@ -28,3 +28,12 @@ describe("grid fixtures", () => {
     expect([...new Set(unserved)]).toEqual([]);
   }, 30_000);
 });
+
+describe("grid size", () => {
+  it("holds 747 cases, 271 of them in the pull request slice, each id once", () => {
+    const full = buildGrid("full");
+    expect(full).toHaveLength(747);
+    expect(new Set(full.map((c) => c.id)).size).toBe(747);
+    expect(buildGrid("pr")).toHaveLength(271);
+  });
+});

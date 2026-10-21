@@ -12,6 +12,7 @@ export interface PageRunner {
 export interface PageTimeline extends TimelineRuntimeResult {
   following: TimelineEvent[];
   generation: string | null;
+  duration?: number;
 }
 
 export interface PageRuntimeResponse extends RuntimeResponse {
@@ -64,7 +65,8 @@ export function timelinePage(request: TimelineRequest): PageTimeline {
   const result = inspection.timeline(request);
   const following: TimelineEvent[] = [];
   const generation = inspected.__hfLiveInspection?.generation ?? null;
-  if (request.boundary === undefined) return { ...result, following, generation };
+  const duration = inspected.__player?.getDuration();
+  if (request.boundary === undefined) return { ...result, following, generation, duration };
   const boundary = request.boundary;
   const schedule = inspection.timeline({ ...request, boundary: undefined });
   for (const crossing of result.events) {
@@ -82,7 +84,7 @@ export function timelinePage(request: TimelineRequest): PageTimeline {
       if (next && !following.includes(next)) following.push(next);
     }
   }
-  return { ...result, following, generation };
+  return { ...result, following, generation, duration };
 }
 
 export function liveGenerationPage(): string | null {

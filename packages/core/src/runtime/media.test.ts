@@ -742,6 +742,12 @@ describe("syncRuntimeMedia", () => {
       expect(await barrierSettled(barrier)).toBe(true);
     });
 
+    it("does not hold a geometry read for a seeking video's frame", async () => {
+      seekColdVideo();
+      expect(await barrierSettled(waitForSeekCompletion({ videoFrames: false }))).toBe(true);
+      expect(await barrierSettled(waitForSeekCompletion())).toBe(false);
+    });
+
     function seekLoadingVideo(): RuntimeMediaClip {
       const clip = createMockClip({ start: 7.1, end: 18.24 });
       Object.defineProperty(clip.el, "readyState", { value: 0, configurable: true });
@@ -1379,6 +1385,46 @@ describe("syncRuntimeMedia", () => {
     syncRuntimeMedia({ clips: [clip], timeSeconds: 0.5, playing: false, playbackRate: 1 });
 
     expect(clip.el.volume).toBe(0.5);
+  });
+
+  it("writes volume and muted only when they change, not on every tick", () => {
+    const clip = createMockClip({ start: 0, end: 10, volume: 0.7 });
+    const writes = { volume: 0, muted: 0 };
+    for (const prop of ["volume", "muted"] as const) {
+      const native = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, prop)!;
+      Object.defineProperty(clip.el, prop, {
+        configurable: true,
+        get() {
+          return native.get!.call(this);
+        },
+        set(value) {
+          writes[prop]++;
+          native.set!.call(this, value);
+        },
+      });
+    }
+    for (const timeSeconds of [1, 1.04, 1.08, 1.12]) {
+      syncRuntimeMedia({
+        clips: [clip],
+        timeSeconds,
+        playing: false,
+        playbackRate: 1,
+        outputMuted: true,
+      });
+    }
+    expect(clip.el.volume).toBe(0.7);
+    expect(clip.el.muted).toBe(true);
+    expect(writes).toEqual({ volume: 0, muted: 1 });
+
+    clip.el.muted = false;
+    syncRuntimeMedia({
+      clips: [clip],
+      timeSeconds: 1.16,
+      playing: false,
+      playbackRate: 1,
+      outputMuted: true,
+    });
+    expect(clip.el.muted).toBe(true);
   });
 
   it("reports effective and author-only volume to external audio transports", () => {

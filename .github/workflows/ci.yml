@@ -39,9 +39,18 @@ jobs:
   test-reachability:
     name: Test reachability
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 4
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # A history fetch now and then stalls until the job's limit; a second fetch gets through.
+      - id: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+      - if: steps.checkout.outcome != 'success'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 1
         with:
           fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -64,7 +73,7 @@ jobs:
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 4
     permissions:
       actions: read
       contents: read
@@ -79,12 +88,21 @@ jobs:
       codex_plugin: ${{ steps.filter.outputs.codex_plugin }}
       gcp_beginframe: ${{ steps.filter.outputs.gcp_beginframe }}
       studio: ${{ steps.filter.outputs.studio }}
-      edit_accuracy: ${{ steps.filter.outputs.edit_accuracy }}
+      edit_accuracy: ${{ steps.edit_accuracy_filter.outputs.edit_accuracy }}
     steps:
       # Force git-based change detection instead of the pull_request REST API.
       # The API path can fail the whole workflow on transient listFiles
       # timeouts before any real CI work starts.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # A history fetch now and then stalls until the job's limit; a second fetch gets through.
+      - id: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+      - if: steps.checkout.outcome != 'success'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 1
         with:
           fetch-depth: 0
       - name: Check whether this commit already passed before a title or body edit
@@ -189,38 +207,6 @@ jobs:
               - "packages/studio-server/**"
               - "bun.lock"
               - ".github/workflows/ci.yml"
-            edit_accuracy:
-              - "packages/studio/src/**"
-              - "packages/studio-server/src/**"
-              - "packages/core/src/**"
-              - "packages/core/scripts/**"
-              - "packages/cli/src/**"
-              - "packages/player/src/**"
-              - "packages/parsers/src/**"
-              - "packages/producer/src/**"
-              - "packages/engine/src/**"
-              - "packages/lint/src/**"
-              - "packages/sdk/src/**"
-              - "packages/studio/index.html"
-              - "packages/studio/vite.config.ts"
-              - "packages/studio/public/**"
-              - "packages/cli/scripts/**"
-              - "packages/cli/tsup.config.ts"
-              - "packages/studio/package.json"
-              - "packages/cli/package.json"
-              - "packages/core/package.json"
-              - "packages/producer/package.json"
-              - "packages/engine/package.json"
-              - "packages/parsers/package.json"
-              - "packages/lint/package.json"
-              - "packages/sdk/package.json"
-              - "packages/studio-server/package.json"
-              - "packages/player/package.json"
-              - "packages/*/package-subpaths.json"
-              - "scripts/package-subpaths.mjs"
-              - "packages/studio/tests/e2e/edit-accuracy/**"
-              - "bun.lock"
-              - ".github/workflows/ci.yml"
             gcp_beginframe:
               - "packages/gcp-cloud-run/Dockerfile"
               - "packages/aws-lambda/scripts/probe-beginframe.ts"
@@ -228,6 +214,65 @@ jobs:
               - "package.json"
               - "bun.lock"
               - ".github/workflows/ci.yml"
+      # Only what the edit accuracy bench runs: the Studio it drives, the preview server the CLI hosts it from,
+      # and the engine and producer modules it captures frames with (the import closure of browserManager,
+      # frameCapture and both fileServers). Encoders, renders and other CLI commands are not on its path.
+      # Its own base: the merge queue's is the event's base_sha, since that run's HEAD is not a PR merge commit.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
+        id: edit_accuracy_filter
+        if: steps.edit.outputs.passed != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+        with:
+          token: ""
+          base: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || steps.base.outputs.sha }}
+          predicate-quantifier: some-with-excludes
+          filters: |
+            edit_accuracy:
+              - "packages/studio/src/**"
+              - "packages/studio/index.html"
+              - "packages/studio/vite.*.ts"
+              - "packages/studio/public/**"
+              - "packages/studio/tests/e2e/edit-accuracy/**"
+              - "packages/studio/tests/e2e/webmcp-host.mjs"
+              - "packages/studio-server/src/**"
+              - "packages/core/src/**"
+              - "packages/core/scripts/**"
+              - "packages/core/schemas/**"
+              - "packages/parsers/src/**"
+              - "packages/player/src/**"
+              - "packages/sdk/src/**"
+              - "packages/lint/src/**"
+              - "packages/cli/src/{cli,help,version}.ts"
+              - "packages/cli/src/renderSetupWorker*.ts"
+              - "packages/cli/src/commands/{preview*,add,browser}.ts"
+              - "packages/cli/src/server/**"
+              - "packages/cli/src/browser/**"
+              - "packages/cli/src/utils/**"
+              - "packages/cli/src/ui/**"
+              - "packages/cli/src/{background-removal,registry,telemetry}/**"
+              - "packages/cli/src/capture/{captureCompositionFrame,captureTimeout,navigateForCapture,readBoundedResponse}.ts"
+              - "packages/cli/src/media-use/lib/config-lock.mjs"
+              - "packages/cli/scripts/**"
+              - "packages/core/stubs/**"
+              - "packages/engine/src/**"
+              - "packages/producer/src/**"
+              - "packages/producer/stubs/**"
+              - "packages/producer/scripts/build-hf-early-stub.ts"
+              - "packages/producer/build*.mjs"
+              - "packages/player/scripts/verify-runtime-pin.mjs"
+              - "packages/{studio,studio-server,core,parsers,player,sdk,lint,cli,engine,producer}/{package.json,tsconfig.json,tsup.config.ts}"
+              - "packages/*/package-subpaths.json"
+              - "scripts/package-subpaths.mjs"
+              - "scripts/rewrite-relative-import-extensions.mjs"
+              - "scripts/ci/base-file.sh"
+              - "scripts/ci/edit-accuracy-shard.sh"
+              - "scripts/ci/install-workspace-dependencies.sh"
+              - ".github/actions/prepare-ffmpeg-bin/**"
+              - "package.json"
+              - "bun.lock"
+              - ".github/workflows/ci.yml"
+              - "!**/*.{test,spec}.{ts,tsx,mjs,js}"
+              - "!**/{__tests__,__fixtures__}/**"
+              - "!**/*.md"
 
   gcp-beginframe-contract:
     name: GCP BeginFrame image contract
@@ -263,7 +308,7 @@ jobs:
     name: Build
     needs: changes
     # A skipped required check passes, so a broken change detection must fail it instead.
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true' || needs.changes.outputs.cli_bundle == 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true' || needs.changes.outputs.cli_bundle == 'true' || needs.changes.outputs.edit_accuracy == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -285,8 +330,9 @@ jobs:
       - run: bash scripts/ci/install-workspace-dependencies.sh
       - run: bun run build
       - run: bun run verify:packed-manifests
+      - run: bun run check:cli-lazy-deps
       - name: Share the built CLI with the edit accuracy shards
-        if: github.event_name == 'pull_request' && needs.changes.outputs.edit_accuracy == 'true'
+        if: needs.changes.outputs.edit_accuracy == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: edit-accuracy-cli
@@ -1102,17 +1148,22 @@ jobs:
             /tmp/undo-socket-pool.json
           if-no-files-found: error
 
-  # Manual editing accuracy in the built Studio, gated against the base branch's baseline.json.
+  # Manual editing accuracy in the built Studio, gated against the base branch's baseline.json. A pull request
+  # runs the `pr` slice in 5 shards; the merge queue runs the full grid in 20, so nothing reaches main unmeasured.
+  # The gate job below repeats both shard counts.
   studio-edit-accuracy:
-    name: "Studio: edit accuracy (${{ matrix.shard }}/20)"
+    name: "Studio: edit accuracy (${{ matrix.shard }}/${{ strategy.job-total }})"
     needs: [changes, build]
-    if: github.event_name == 'pull_request' && needs.changes.outputs.edit_accuracy == 'true'
+    if: needs.changes.outputs.edit_accuracy == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Healthy shards take 6-9 min; 25 leaves a cancelled shard's fresh re-run inside the queue's 60 min check wait.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+        shard: ${{ fromJSON(github.event_name == 'merge_group' && '[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]' || '[1, 2, 3, 4, 5]') }}
+    env:
+      EDIT_ACCURACY_GRID: ${{ github.event_name == 'merge_group' && 'full' || 'pr' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -1134,15 +1185,14 @@ jobs:
           bash scripts/ci/base-file.sh packages/studio/tests/e2e/edit-accuracy/baseline.json /tmp/base-edit-accuracy.json
           [ -f /tmp/base-edit-accuracy.json ] || echo '{"cases":{}}' > /tmp/base-edit-accuracy.json
       - name: Run this shard, then re-run twice each case whose verdict differs from the base branch
+        run: bash scripts/ci/edit-accuracy-shard.sh "${{ matrix.shard }}/${{ strategy.job-total }}"
+      # A slow runner stops the bench (slow-runner.json) or runs into the timeout; either gets one fresh re-run.
+      - name: Mark a slow or cancelled shard for a re-run
+        if: always()
         run: |
-          set -euo pipefail
-          bench() { bun run --cwd packages/studio test:edit-accuracy -- --grid full --jobs 2 "$@"; }
-          bench --shard "${{ matrix.shard }}/20" --out /tmp/edit-accuracy/run1
-          mapfile -t FLIPPED < <(node packages/studio/tests/e2e/edit-accuracy/ratchet.mjs flipped \
-            /tmp/base-edit-accuracy.json /tmp/edit-accuracy/run1/results.json)
-          if (( ${#FLIPPED[@]} > 0 )); then
-            FILTER="^($(IFS='|'; echo "${FLIPPED[*]}"))$"
-            for run in 2 3; do bench --filter "$FILTER" --rerun --out "/tmp/edit-accuracy/run${run}"; done
+          mkdir -p /tmp/edit-accuracy
+          if [ "${{ job.status }}" = cancelled ] || [ -n "$(find /tmp/edit-accuracy -name slow-runner.json)" ]; then
+            touch /tmp/edit-accuracy/retry
           fi
       - name: Upload shard evidence
         if: always()
@@ -1152,10 +1202,73 @@ jobs:
           path: /tmp/edit-accuracy
           if-no-files-found: error
 
+  studio-edit-accuracy-retry-plan:
+    name: "Studio: edit accuracy retry plan"
+    needs: [changes, studio-edit-accuracy]
+    if: ${{ !cancelled() && needs.changes.outputs.edit_accuracy == 'true' && needs.studio-edit-accuracy.result != 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: edit-accuracy-shard-*
+          path: /tmp/edit-accuracy-shards
+      - name: List the shards marked for a re-run
+        id: plan
+        run: |
+          shards=$(find /tmp/edit-accuracy-shards -path '*/edit-accuracy-shard-*/retry' |
+            sed -E 's#.*/edit-accuracy-shard-([0-9]+)/retry$#\1#' | sort -n | paste -sd, -)
+          echo "shards=[${shards}]" >> "$GITHUB_OUTPUT"
+
+  # Each marked shard runs once more on a fresh runner and replaces its evidence before the gate reads it.
+  studio-edit-accuracy-retry:
+    name: "Studio: edit accuracy retry (${{ matrix.shard }})"
+    needs: [changes, build, studio-edit-accuracy-retry-plan]
+    if: ${{ !cancelled() && needs.studio-edit-accuracy-retry-plan.outputs.shards != '[]' && needs.studio-edit-accuracy-retry-plan.outputs.shards != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.studio-edit-accuracy-retry-plan.outputs.shards) }}
+    env:
+      EDIT_ACCURACY_GRID: ${{ github.event_name == 'merge_group' && 'full' || 'pr' }}
+      SHARDS: ${{ github.event_name == 'merge_group' && 20 || 5 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - uses: ./.github/actions/prepare-ffmpeg-bin
+      - run: bash scripts/ci/install-workspace-dependencies.sh
+      - run: bun run --cwd packages/core build
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: edit-accuracy-cli
+          path: packages/cli/dist
+      - run: node packages/cli/dist/cli.js browser ensure
+      - name: Read the base branch's edit accuracy baseline
+        run: |
+          bash scripts/ci/base-file.sh packages/studio/tests/e2e/edit-accuracy/baseline.json /tmp/base-edit-accuracy.json
+          [ -f /tmp/base-edit-accuracy.json ] || echo '{"cases":{}}' > /tmp/base-edit-accuracy.json
+      - name: Run the shard again
+        run: bash scripts/ci/edit-accuracy-shard.sh "${{ matrix.shard }}/${SHARDS}"
+      - name: Replace the shard's evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: edit-accuracy-shard-${{ matrix.shard }}
+          path: /tmp/edit-accuracy
+          if-no-files-found: error
+          overwrite: true
+
   studio-edit-accuracy-gate:
     name: "Studio: edit accuracy gate"
-    needs: [changes, studio-edit-accuracy]
-    if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.changes.outputs.edit_accuracy == 'true' }}
+    needs: [changes, studio-edit-accuracy, studio-edit-accuracy-retry]
+    if: ${{ !cancelled() && needs.changes.outputs.edit_accuracy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -1176,16 +1289,19 @@ jobs:
           path: /tmp/edit-accuracy-shards
       - name: Compare every run with the base branch
         id: gate
-        # Smoothness is reported, not gated; a case fails only if it fails 2 of its 3 runs.
+        # Smoothness and newly passing cases are reported, not gated; a case fails only if it fails 2 of its 3 runs.
+        env:
+          SHARDS: ${{ github.event_name == 'merge_group' && 20 || 5 }}
         run: |
           set +e
           mapfile -t RESULTS < <(find /tmp/edit-accuracy-shards -name results.json | sort)
-          node packages/studio/tests/e2e/edit-accuracy/ratchet.mjs gate /tmp/base-edit-accuracy.json \
+          node packages/studio/tests/e2e/edit-accuracy/ratchet.mjs gate --shards "$SHARDS" /tmp/base-edit-accuracy.json \
             packages/studio/tests/e2e/edit-accuracy/baseline.json /tmp/edit-accuracy-gate "${RESULTS[@]}"
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
           cat /tmp/edit-accuracy-gate/comment.md >> "$GITHUB_STEP_SUMMARY" || true
       - name: Post sticky comment
-        # Fork PRs get a read-only token; the gate below still fires.
+        # Fork PRs get a read-only token; the gate below still fires. The merge queue has no PR to comment on.
+        if: github.event_name == 'pull_request'
         continue-on-error: true
         uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405 # v2.9.4
         with:
@@ -1407,9 +1523,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
+      # A pull request checks out its merge commit, whose first parent is the base: two commits are the whole diff.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0
+          fetch-depth: 2
       - name: Check file sizes (max 600 lines)
         # Scoped to files THIS PR changed under packages/studio. Walking the
         # whole tree blamed every unrelated PR for pre-existing offenders.
@@ -1420,7 +1537,7 @@ jobs:
           if [ -n "${{ github.base_ref }}" ]; then
             mapfile -t files < <(
               git diff --name-only --diff-filter=ACMR \
-                "origin/${{ github.base_ref }}...HEAD" -- \
+                HEAD^1 HEAD -- \
                 'packages/studio/**/*.ts' 'packages/studio/**/*.tsx' \
                 | grep -vE '\.(test|spec)\.(ts|tsx)$|\.generated\.' || true
             )

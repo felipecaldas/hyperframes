@@ -38,9 +38,12 @@ export {
   plan,
   rejectUnsupportedDistributedFormat,
   resolveChunkPlan,
+  buildPlanAudio,
+  plansSeparateAudio,
   // Types
   type DistributedRenderConfig,
   type PlanResult,
+  type RemoteProjectFile,
   // Constants
   DEFAULT_CHUNK_SIZE,
   DEFAULT_MAX_PARALLEL_CHUNKS,
@@ -48,6 +51,8 @@ export {
   PLAN_DIR_SIZE_LIMIT_BYTES,
   PLAN_PROJECT_DIR_SKIP_SEGMENTS,
   // Error codes + classes
+  CHUNK_EXCEEDS_WORKER_TIMEOUT,
+  ChunkExceedsWorkerTimeoutError,
   FORMAT_NOT_SUPPORTED_IN_DISTRIBUTED,
   FormatNotSupportedInDistributedError,
   PLAN_TOO_LARGE,
@@ -59,6 +64,7 @@ export {
   createPlanV2FromExecutionPlan,
   createPlanV2FromV1,
   getPlanV2ExecutionPlanHash,
+  isPlanV2DeferredSourceArtifact,
   listPlanV2ArtifactsForTarget,
   materializePlanV2Target,
   planV2,
@@ -73,8 +79,10 @@ export {
   type PlanV2Artifact,
   type PlanV2Limitations,
   type PlanV2Manifest,
+  type PlanV2MaterializeOptions,
   type PlanV2MaterializationResult,
   type PlanV2MaterializationTarget,
+  type PlanV2RemoteSources,
   type PlanV2Result,
   type PlanV2WithPublisherOptions,
 } from "./services/distributed/planV2.js";
@@ -92,10 +100,13 @@ export {
   readWebGlVendorInfoFromCanvas,
   renderChunk,
   // Types
+  type ChunkFrameRange,
   type ChunkRenderer,
   type ChunkResult,
   type EffectiveChunkResult,
+  type RenderChunkOptions,
   // Error codes + classes
+  CHUNK_FRAME_RANGE_INVALID,
   FFMPEG_VERSION_MISMATCH,
   INVALID_VIDEO_METADATA,
   PLAN_HASH_MISMATCH,
@@ -103,7 +114,20 @@ export {
 } from "./services/distributed/renderChunk.js";
 
 // ── Assemble (Activity C) ───────────────────────────────────────────────────
-export { assemble, type AssembleResult } from "./services/distributed/assemble.js";
+export {
+  assemble,
+  chunksAreStitchedMp4,
+  stitchesSeparateAudio,
+  type AssembleChunkPaths,
+  type AssembleResult,
+} from "./services/distributed/assemble.js";
+export { muxChunkWithAudio } from "./services/distributed/chunkAudio.js";
+export {
+  buildStitchedHeader,
+  readMp4Layout,
+  type Mp4Layout,
+  type ReadRange,
+} from "./services/distributed/mp4Stitch.js";
 
 // ── Cloud-agnostic adapter helpers ──────────────────────────────────────────
 // Shared by the distributed-render adapters (aws-lambda, gcp-cloud-run, …) so
@@ -115,7 +139,7 @@ export {
   validateDistributedRenderConfig,
   validateVariablesPayload,
 } from "./services/distributed/renderConfigValidation.js";
-export { hashProjectDir } from "./services/distributed/projectHash.js";
+export { hashProjectDir, listSiteFiles } from "./services/distributed/projectHash.js";
 
 // ── Plan protocol compatibility ────────────────────────────────────────────
 // Workers validate this descriptor before consuming layout-specific

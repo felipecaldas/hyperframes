@@ -23,19 +23,22 @@ export interface SourceMutationTarget {
   selectorIndex?: number;
 }
 
+const pinnedInSource = new WeakMap<Document, ReadonlySet<string>>();
+
 export function parseSourceDocument(raw: string): {
   document: Document;
   wrappedFragment: boolean;
 } {
   const source = ensureHfIds(raw);
   const hasDocumentShell = /<!doctype|<html[\s>]/i.test(source);
-  if (hasDocumentShell) {
-    return { document: parseHTML(source).document, wrappedFragment: false };
-  }
-  return {
-    document: parseHTML(`<!DOCTYPE html><html><head></head><body>${source}</body></html>`).document,
-    wrappedFragment: true,
-  };
+  const document = hasDocumentShell
+    ? parseHTML(source).document
+    : parseHTML(`<!DOCTYPE html><html><head></head><body>${source}</body></html>`).document;
+  pinnedInSource.set(
+    document,
+    new Set(Array.from(raw.matchAll(/\bdata-hf-id\s*=\s*["']?([^"'\s>]+)/gi), (m) => m[1]!)),
+  );
+  return { document, wrappedFragment: !hasDocumentShell };
 }
 
 function duplicateCssRulesForId(document: Document, originalId: string, newId: string): void {
@@ -129,16 +132,19 @@ export function findTargetElement(
     const el = findByHfId(document, target.hfId);
     if (el) return el;
   }
+  const pinned = pinnedInSource.get(document);
+  const unlessPinnedElsewhere = (el: Element | null | undefined) =>
+    el && !(target.hfId && pinned?.has(el.getAttribute("data-hf-id") ?? "")) ? el : null;
 
   if (target.id) {
-    const byId = document.getElementById(target.id);
+    const byId = unlessPinnedElsewhere(document.getElementById(target.id));
     if (byId) return byId;
   }
 
   if (!target.selector) return null;
   try {
     const matches = querySelectorAllWithTemplates(document, target.selector);
-    return matches[target.selectorIndex ?? 0] ?? null;
+    return unlessPinnedElsewhere(matches[target.selectorIndex ?? 0]);
   } catch {
     return null;
   }
@@ -173,9 +179,20 @@ export function isHTMLElement(el: Node): el is HTMLElement {
   return HTMLEl ? el instanceof HTMLEl : el.nodeType === 1 && "style" in el;
 }
 
+// A mount's id names the root it mounts; the runtime numbers repeated mounts (id__hf1, id__hf2).
+function mountsComposition(document: Document, host: Element, compositionId: string): boolean {
+  if (host.hasAttribute("data-composition-src")) return true;
+  return (
+    host.children.length === 0 &&
+    querySelectorAllWithTemplates(document, "template").some(
+      (template) => template.id === `${compositionId}-template`,
+    )
+  );
+}
+
 export function dedupeClonedCompositionId(document: Document, clone: Element): void {
   const compositionId = clone.getAttribute("data-composition-id");
-  if (!compositionId) return;
+  if (!compositionId || mountsComposition(document, clone, compositionId)) return;
   const usedCompositionIds = new Set(
     querySelectorAllWithTemplates(document, "[data-composition-id]").map((node) =>
       node.getAttribute("data-composition-id"),

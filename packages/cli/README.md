@@ -47,6 +47,16 @@ previews with `--status`, `--stop`, `--list`, and `--kill-all`. Add `--json` to
 managed lifecycle commands for machine-readable output. `--foreground --json`
 prints the ready-session envelope once, then remains attached until stopped.
 
+### `audio`
+
+Measure where sounds land: onsets, the moment each sound peaks, loudness and
+silence. Give files, or query the film's own clips in film time:
+
+```bash
+npx hyperframes audio sfx/whoosh.mp3
+npx hyperframes audio --at 12 --json
+```
+
 ### `normalize-audio`
 
 Measure two local authored audio clips with integrated LUFS and match the target
@@ -74,6 +84,20 @@ npx hyperframes render -c ./my-composition.html -o output.mp4
 A render stops when the process that started it exits. To keep one running after
 its launcher exits, set `HYPERFRAMES_RENDER_DETACHED=1` and start it in its own
 process group, e.g. `bash -c 'set -m; HYPERFRAMES_RENDER_DETACHED=1 npx hyperframes render -o out.mp4 < /dev/null > render.log 2>&1 &'`.
+
+Piped, non-quiet renders emit a single `@hf-diagnostic ` JSON line when an audio
+failure reaches the CLI error handler. Version 1 has `operation: "render"` and
+at most 16 `audioFailures`: allowlisted stage, reason, owner, retryable, and
+optional subprocess exit code, signal, termination reason and OS code. It omits
+messages, stderr, source paths/URLs, element IDs and command arguments. Consumers
+must ignore unknown versions and fields. This is local CLI output; uploading it
+requires the caller's existing consent and privacy checks. Quiet mode (including
+batch JSON mode) emits no diagnostic line.
+
+This covers audio preparation and mix failures, including the typed external
+interruption path. Probe failures retain their existing stage/reason but do not
+gain subprocess evidence here; browser/FX failures remain classified as internal.
+Desktop ingestion and live report delivery are separate changes.
 
 ### `publish`
 

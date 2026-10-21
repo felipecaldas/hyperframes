@@ -48,6 +48,7 @@ function holdSeekBarrierUntilVideoLands(el: HTMLMediaElement): void {
       for (const type of HOLD_END_EVENTS) el.addEventListener(type, done, true);
       releaseHeldVideo.set(el, done);
     }),
+    "video-frame",
   );
 }
 
@@ -263,6 +264,46 @@ export function hasMediaSyncStateForTest(el: HTMLMediaElement): boolean {
 }
 
 export const MEDIA_HARD_SYNC_SECONDS = 0.5;
+export const VIDEO_PRESEEK_SECONDS = 1.5;
+
+function prepareUpcomingVideo(
+  clip: RuntimeMediaClip,
+  time: number,
+  playing: boolean,
+  rate: number,
+): void {
+  const { el } = clip;
+  const dueIn = clip.start - time;
+  if (
+    !playing ||
+    el.tagName !== "VIDEO" ||
+    dueIn <= 0 ||
+    dueIn > VIDEO_PRESEEK_SECONDS * rate ||
+    !el.paused ||
+    el.seeking ||
+    el.readyState < el.HAVE_METADATA ||
+    findInjectedRenderFrame(el) ||
+    ("__HF_EXPORT_RENDER_SEEK_CONFIG" in window && window.__HF_EXPORT_RENDER_SEEK_CONFIG)
+  )
+    return;
+  let target =
+    clip.mediaStart +
+    sourceTimeAt(clip.rate ?? clip.playbackRate, clip.start - (clip.origin ?? clip.start));
+  if (clip.sourceDuration != null) {
+    const loopLength = clip.sourceDuration - clip.mediaStart;
+    if (clip.loop && loopLength > 0 && target >= clip.sourceDuration)
+      target = clip.mediaStart + ((target - clip.mediaStart) % loopLength);
+    else if (!clip.loop) target = Math.min(target, clip.sourceDuration);
+  }
+  if (!Number.isFinite(target) || target < 0 || Math.abs(el.currentTime - target) <= 0.001) return;
+  try {
+    // A trimmed video exposed during its in-point seek has no current frame at the cut.
+    // Hidden preparation must not hold the visible-frame seek barrier.
+    el.currentTime = target;
+  } catch (err) {
+    swallow("runtime.media.preseek", err);
+  }
+}
 
 /** Drift a playing audio element may carry before sync pulls it back onto the playhead. */
 export const MEDIA_SYNC_TOLERANCE_SECONDS = 0.04;
@@ -477,12 +518,12 @@ export function syncRuntimeMedia(params: {
       const silencedByHidden =
         el.closest("[data-hidden]") !== null || isMemberGroupHidden(el.ownerDocument, el);
       const effectiveVolume = silencedByHidden ? 0 : clampVolume(authorVolume * userVol);
-      el.volume = effectiveVolume;
+      if (Math.abs(el.volume - effectiveVolume) > 1e-6) el.volume = effectiveVolume;
       lastRuntimeAppliedVolume.set(el, effectiveVolume);
       params.onElementVolume?.(el, effectiveVolume, authorVolume);
       // Mute only when force-muted or the transport owns this element; an unclaimed
       // track stays audible via the HTMLMedia fallback.
-      if (forceMuteAll || params.isWebAudioOwned?.(el)) el.muted = true;
+      if ((forceMuteAll || params.isWebAudioOwned?.(el)) && !el.muted) el.muted = true;
       // Ensure full preload for every active media element. Streaming
       // formats (MP3) may arrive with preload="metadata", which only
       // buffers the first few seconds and causes seeks to silently fail
@@ -657,5 +698,6 @@ export function syncRuntimeMedia(params: {
     evictMediaSyncState(el);
     if (remainsInsideAuthoredWindow) lastRelativeTime.set(el, relTime);
     if (!el.paused) el.pause();
+    prepareUpcomingVideo(clip, params.timeSeconds, params.playing, params.playbackRate);
   }
 }

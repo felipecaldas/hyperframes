@@ -335,6 +335,62 @@ export function renderBrowserConsumer(specifiers) {
   ].join("\n");
 }
 
+/** Name every typed export in a type-only import: a bare `import "x"` lets tsc skip unresolved targets. */
+export function renderTypeConsumer(specifiers) {
+  return `${specifiers
+    .map(
+      (specifier, index) =>
+        `import type * as packedTypes${index} from ${JSON.stringify(specifier)};`,
+    )
+    .join("\n")}\nexport {};\n`;
+}
+
+/** Strict Node ESM, with declarations checked: skipLibCheck hides unresolvable imports inside .d.ts files. */
+export const CONSUMER_TSCONFIG = {
+  compilerOptions: {
+    target: "ES2022",
+    module: "NodeNext",
+    moduleResolution: "NodeNext",
+    lib: ["ESNext", "DOM", "DOM.Iterable"],
+    types: ["node"],
+    strict: true,
+    skipLibCheck: false,
+    noEmit: true,
+  },
+  include: ["consumer.ts"],
+};
+
+/** Count tsc errors by the installed package they come from, so a failure names its owner. */
+export function countTypeErrorsByPackage(output) {
+  const counts = {};
+  for (const line of output.split("\n")) {
+    const match = /^(\S+?)\(\d+,\d+\): error TS\d+/.exec(line);
+    if (!match) continue;
+    const owner = /(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)\//.exec(match[1])?.[1] ?? match[1];
+    counts[owner] = (counts[owner] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function typecheckPackedConsumer(fixtureDir) {
+  try {
+    execFileSync(process.execPath, [join(fixtureDir, "node_modules", "typescript", "bin", "tsc")], {
+      cwd: fixtureDir,
+      encoding: "utf8",
+      stdio: "pipe",
+    });
+  } catch (error) {
+    const output = `${error.stdout ?? ""}${error.stderr ?? ""}`;
+    const counts = Object.entries(countTypeErrorsByPackage(output))
+      .map(([owner, count]) => `${owner}: ${count}`)
+      .join(", ");
+    throw new Error(
+      `Packed declarations fail a NodeNext consumer (module/moduleResolution nodenext, skipLibCheck false). ` +
+        `Errors by package: ${counts || "unknown"}\n${output.split("\n").slice(0, 20).join("\n")}`,
+    );
+  }
+}
+
 function writeConsumerFixture(packDir, packedWorkspaces) {
   const fixtureDir = join(packDir, "consumer");
   mkdirSync(fixtureDir);
@@ -356,6 +412,9 @@ function writeConsumerFixture(packDir, packedWorkspaces) {
     readFileSync(join(ROOT, "packages/studio/package.json"), "utf8"),
   );
   dependencies.vite = studioPackage.devDependencies.vite;
+  // Studio's declarations name React types; a React consumer brings these itself.
+  dependencies["@types/react"] = studioPackage.devDependencies["@types/react"];
+  dependencies["@types/react-dom"] = studioPackage.devDependencies["@types/react-dom"];
   writeFileSync(
     join(fixtureDir, "package.json"),
     JSON.stringify(
@@ -377,30 +436,11 @@ function writeConsumerFixture(packDir, packedWorkspaces) {
   );
 
   const contracts = listPackedExportContracts(packedWorkspaces);
-  const typeImports = contracts
+  const typedSpecifiers = contracts
     .filter(({ typechecked }) => typechecked)
-    .map(({ specifier }) => `import ${JSON.stringify(specifier)};`)
-    .join("\n");
-  writeFileSync(join(fixtureDir, "consumer.ts"), `${typeImports}\n`);
-  writeFileSync(
-    join(fixtureDir, "tsconfig.json"),
-    JSON.stringify(
-      {
-        compilerOptions: {
-          target: "ES2022",
-          module: "NodeNext",
-          moduleResolution: "NodeNext",
-          lib: ["ES2022", "DOM", "DOM.Iterable"],
-          strict: true,
-          skipLibCheck: true,
-          noEmit: true,
-        },
-        include: ["consumer.ts"],
-      },
-      null,
-      2,
-    ),
-  );
+    .map(({ specifier }) => specifier);
+  writeFileSync(join(fixtureDir, "consumer.ts"), renderTypeConsumer(typedSpecifiers));
+  writeFileSync(join(fixtureDir, "tsconfig.json"), JSON.stringify(CONSUMER_TSCONFIG, null, 2));
 
   const specifiers = contracts.map(({ specifier }) => specifier);
   const nodeSpecifiers = contracts
@@ -434,18 +474,45 @@ function writeConsumerFixture(packDir, packedWorkspaces) {
   return fixtureDir;
 }
 
+// npm lists a new version before every mirror serves its tarball, so resolving one published minutes ago
+// can 404 and fail the install. The consumer gets the third-party versions that were on npm a day ago.
+export const CONSUMER_MIN_RELEASE_AGE_SECONDS = 24 * 60 * 60;
+
+const BLOCKED_BY_AGE =
+  /No version matching "([^"]+)" found for specifier "[^"]*" \(blocked by minimum-release-age/g;
+
+export function installConsumer(dir, { args = [], env = process.env } = {}) {
+  const install = () =>
+    execFileSync(
+      "bun",
+      [
+        "install",
+        "--ignore-scripts",
+        `--minimum-release-age=${CONSUMER_MIN_RELEASE_AGE_SECONDS}`,
+        ...args,
+      ],
+      { cwd: dir, encoding: "utf8", stdio: "pipe", env },
+    );
+  try {
+    install();
+  } catch (error) {
+    // A same-day dependency bump: every version its range allows is younger than the age, and the repo
+    // installed it already, so its tarball is served. Only those packages skip the age.
+    const blocked = [...`${error.stderr ?? ""}`.matchAll(BLOCKED_BY_AGE)].map((m) => m[1]);
+    if (!blocked.length) throw error;
+    console.log(`Consumer install: newer than the release age, allowed: ${blocked.join(", ")}`);
+    writeFileSync(
+      join(dir, "bunfig.toml"),
+      `[install]\nminimumReleaseAgeExcludes = ${JSON.stringify(blocked)}\n`,
+    );
+    install();
+  }
+}
+
 function verifyPackedConsumer(packDir, packedWorkspaces) {
   const fixtureDir = writeConsumerFixture(packDir, packedWorkspaces);
-  execFileSync("bun", ["install", "--ignore-scripts"], {
-    cwd: fixtureDir,
-    encoding: "utf8",
-    stdio: "pipe",
-  });
-  execFileSync(process.execPath, [join(fixtureDir, "node_modules", "typescript", "bin", "tsc")], {
-    cwd: fixtureDir,
-    encoding: "utf8",
-    stdio: "pipe",
-  });
+  installConsumer(fixtureDir);
+  typecheckPackedConsumer(fixtureDir);
   const smokeOutput = execFileSync("node", ["consumer-smoke.mjs"], {
     cwd: fixtureDir,
     encoding: "utf8",
@@ -469,7 +536,7 @@ function verifyPackedConsumer(packDir, packedWorkspaces) {
   }
   console.log(smokeOutput.trim());
   console.log(
-    "Verified clean packed consumer install, Node execution, TypeScript/Vite resolution, and CLI startup.",
+    "Verified clean packed consumer install, Node execution, NodeNext declaration check, Vite resolution, and CLI startup.",
   );
 }
 

@@ -11,6 +11,7 @@ export function allocateId(
   type: string,
   ext: string,
 ): Omit<Reservation, "fullPath">;
+export function withMediaLock<T>(projectDir: string, fn: () => T): T;
 export function withReservedFileSync<T>(
   projectDir: string,
   type: string,

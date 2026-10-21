@@ -66,6 +66,7 @@ type GsapWindow = {
 };
 
 const SCENE_BOUNDARY_EPSILON_SECONDS = 0.05;
+const TWEEN_ENDPOINT_EPSILON_SECONDS = 0.001;
 
 // Sentinel the GSAP parser assigns to a tween whose target it cannot statically
 // resolve to a concrete element (a computed variable, a helper call, etc.). It is
@@ -178,6 +179,17 @@ function stringValue(value: string | number | undefined): string | null {
   if (typeof value === "string") return value;
   if (typeof value === "number") return String(value);
   return null;
+}
+
+function fromToGroupSharesFromProperty(windows: GsapWindow[]): boolean {
+  if (windows.some((win) => win.fromPropertyValues === undefined)) return true;
+  const counts = new Map<string, number>();
+  for (const win of windows) {
+    for (const key of Object.keys(win.fromPropertyValues ?? {})) {
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+  }
+  return [...counts.values()].some((count) => count >= 2);
 }
 
 function zeroValue(value: string | number | undefined): boolean {
@@ -1091,7 +1103,7 @@ export const gsapRules: LintRule<LintContext>[] = [
           if (leftIdentity !== rightIdentity) continue;
           const overlapStart = Math.max(left.position, right.position);
           const overlapEnd = Math.min(left.end, right.end);
-          if (overlapEnd <= overlapStart) continue;
+          if (overlapEnd - overlapStart <= TWEEN_ENDPOINT_EPSILON_SECONDS) continue;
           if (left.overwriteAuto || right.overwriteAuto) continue;
           const sharedProperties = left.properties.filter((prop) =>
             right.properties.includes(prop),
@@ -1119,7 +1131,7 @@ export const gsapRules: LintRule<LintContext>[] = [
       }
 
       const repeatedFromToGroups = [...fromToWindowsBySelector.values()].filter(
-        (windows) => windows.length >= 2,
+        (windows) => windows.length >= 2 && fromToGroupSharesFromProperty(windows),
       );
       for (const fromToWindows of repeatedFromToGroups) {
         const firstFromTo = fromToWindows[0];

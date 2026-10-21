@@ -26,6 +26,7 @@ import { withMeta } from "../utils/updateCheck.js";
 import {
   DEFAULT_CHECK_OPTIONS,
   checkExitCode,
+  prelaunchBrowserForNextCheck,
   runCheckPipeline,
   selectFindingCropRequests,
   type CheckFinding,
@@ -55,11 +56,12 @@ export interface CheckCommandDependencies {
 const DEFAULT_COMMAND_DEPENDENCIES: CheckCommandDependencies = {
   resolveProject,
   async runPipeline(project, options) {
-    const capture = await captureArtifactRevision(project.dir).catch(warnNotRecorded);
+    const capturing = captureArtifactRevision(project.dir).catch(warnNotRecorded);
     const report = await runCheckPipeline(project, options);
     const images = (files: readonly string[]) => files.map((file) => resolve(project.dir, file));
     reportArtifacts("check", "frame", images(report.snapshots.files));
     reportArtifacts("check", "finding", images(report.snapshots.findingFiles));
+    const capture = await capturing;
     if (!capture) return report;
     try {
       return { ...report, saved: await saveCheckReport(project, options, report, capture) };
@@ -314,6 +316,11 @@ function parseCheckOptions(args: Record<string, unknown>): CheckOptions {
     autoProxy: args.proxy as boolean | undefined,
     browserGpuMode: resolveLocalBrowserGpuMode(args["browser-gpu"] as boolean | undefined),
   };
+}
+
+export function prelaunchBrowserForCheck(rawArgs: string[]) {
+  const args = parseArgs(rawArgs, CHECK_COMMAND_ARGS);
+  return prelaunchBrowserForNextCheck(resolveProject(args.dir), parseCheckOptions(args));
 }
 
 export function parseCheckRange(value: unknown): [number, number] | undefined {

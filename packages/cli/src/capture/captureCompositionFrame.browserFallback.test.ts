@@ -5,7 +5,7 @@ const mocks = vi.hoisted(() => ({
   ensureBrowser: vi.fn(),
   findSystemBrowser: vi.fn(),
   launch: vi.fn(),
-  buildChromeArgs: vi.fn(() => []),
+  buildChromeArgs: vi.fn((): string[] => []),
   resolveBrowserGpuMode: vi.fn(async () => "software" as const),
   compositionRequiresWebGpu: vi.fn(() => false),
   assertWebGpuAdapterAvailable: vi.fn(async () => undefined),
@@ -18,7 +18,10 @@ vi.mock("../browser/manager.js", () => ({
   findSystemBrowser: mocks.findSystemBrowser,
 }));
 
-vi.mock("puppeteer-core", () => ({ default: { launch: mocks.launch } }));
+vi.mock("puppeteer-core", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("puppeteer-core")>()),
+  default: { launch: mocks.launch },
+}));
 
 // captureCompositionFrame.js imports these two from ../browser/gpuPolicy.js,
 // which re-exports them from this mocked module — unmocked here, they'd read
@@ -30,9 +33,17 @@ vi.mock("@hyperframes/engine", () => ({
   assertWebGpuAdapterAvailable: mocks.assertWebGpuAdapterAvailable,
   resolveConfig: mocks.resolveConfig,
   usesSoftwareWebGpu: mocks.usesSoftwareWebGpu,
+  DEFAULT_CONFIG: { pageNavigationTimeout: 60_000 },
+  resolvePageNavigationTimeout: () => 60_000,
+  waitForImagesReady: async () => true,
 }));
 
 import { openSettledCompositionPage } from "./captureCompositionFrame.js";
+import { Server } from "node:http";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { serveStaticProjectHtml } from "../utils/staticProjectServer.js";
 
 const HTML = '<div data-composition-id="main" data-width="1920" data-height="1080"></div>';
 const OPTIONS = {
@@ -52,8 +63,15 @@ function fakeBrowser() {
     evaluateOnNewDocument: vi.fn(async () => undefined),
     setViewport: vi.fn(async () => undefined),
     goto: vi.fn(async () => undefined),
+    createCDPSession: async () => ({
+      send: async () => undefined,
+      on: () => undefined,
+      detach: async () => undefined,
+    }),
     waitForFunction: vi.fn(async () => undefined),
     evaluate: vi.fn(async () => undefined),
+    setRequestInterception: vi.fn(async (_on: boolean) => undefined),
+    on: vi.fn((_event: string, _handler: (request: unknown) => void) => undefined),
   };
   return {
     browser: {
@@ -176,5 +194,75 @@ describe("openSettledCompositionPage Windows bundled-browser recovery", () => {
     );
     expect(mocks.findSystemBrowser).not.toHaveBeenCalled();
     expect(mocks.launch).toHaveBeenCalledOnce();
+  });
+});
+
+describe("openSettledCompositionPage when nothing may listen", () => {
+  const launched = () =>
+    mocks.launch.mock.calls.at(-1)?.[0] as unknown as { pipe?: boolean; args: string[] };
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mocks.ensureBrowser.mockResolvedValue({ executablePath: BUNDLED, source: "cache" });
+    mocks.buildChromeArgs.mockReturnValue(["--headless"]);
+    mocks.resolveBrowserGpuMode.mockResolvedValue("software");
+    mocks.resolveConfig.mockReturnValue({ allowSoftwareWebGpu: false });
+    mocks.usesSoftwareWebGpu.mockReturnValue(false);
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("drives Chrome over a pipe in one process and answers the page from the project", async () => {
+    vi.spyOn(Server.prototype, "listen").mockImplementation(function (this: Server) {
+      process.nextTick(() =>
+        this.emit("error", Object.assign(new Error("listen EPERM"), { code: "EPERM" })),
+      );
+      return this;
+    });
+    const dir = mkdtempSync(join(tmpdir(), "hf-nolisten-"));
+    const server = await serveStaticProjectHtml(dir, "<html><body>composition</body></html>");
+    const opened = fakeBrowser();
+    mocks.launch.mockResolvedValue(opened.browser);
+    try {
+      await openSettledCompositionPage(HTML, server.url, OPTIONS);
+
+      expect(launched().pipe).toBe(true);
+      expect(launched().args).toEqual([
+        "--headless",
+        "--single-process",
+        "--disable-gpu-compositing",
+      ]);
+      expect(opened.page.setRequestInterception).toHaveBeenCalledWith(true);
+      const onRequest = opened.page.on.mock.calls.find(([event]) => event === "request")![1];
+      const respond = vi.fn(async (_response: { status: number; body: Buffer }) => undefined);
+      const proceed = vi.fn(async () => undefined);
+      const request = (url: string) => ({
+        url: () => url,
+        method: () => "GET",
+        headers: () => ({}),
+        isInterceptResolutionHandled: () => false,
+        respond,
+        continue: proceed,
+        abort: vi.fn(async () => undefined),
+      });
+      onRequest(request(`${server.url}index.html`));
+      await vi.waitFor(() => expect(respond).toHaveBeenCalledOnce());
+      expect(respond.mock.calls[0]![0]).toMatchObject({ status: 200 });
+      expect(String(respond.mock.calls[0]![0].body)).toContain("composition");
+      onRequest(request("https://cdn.example/gsap.js"));
+      expect(proceed).toHaveBeenCalledOnce();
+    } finally {
+      await server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the usual launch for a project served on a port", async () => {
+    const opened = fakeBrowser();
+    mocks.launch.mockResolvedValue(opened.browser);
+    await openSettledCompositionPage(HTML, "http://127.0.0.1:3000", OPTIONS);
+    expect(launched().pipe).toBe(true);
+    expect(launched().args).toEqual(["--headless"]);
+    expect(opened.page.setRequestInterception).not.toHaveBeenCalled();
   });
 });

@@ -123,11 +123,6 @@ export interface WorkerSizingConfig extends Partial<
 
 type WorkerBrowserPoolDecision = {
   parallel?: boolean;
-  platform: NodeJS.Platform;
-  // Deliberately accepted but not used: forceScreenshot is not an exclusion.
-  forceScreenshot?: boolean;
-  deviceScaleFactor?: number;
-  headlessShellPath?: string;
 };
 
 // System-memory budget per parallel worker. Each worker is a full Chrome
@@ -165,19 +160,13 @@ function defaultSafeMaxWorkers(): number {
 }
 const MIN_FRAMES_PER_WORKER = 30;
 
-// Linux/headless parallel workers need isolated browser processes: BeginFrame
-// crashes when shared, while forceScreenshot is safe but serializes
-// Page.captureScreenshot per browser. Supersampling keeps the existing path
-// until browser-pool compatibility is keyed by DPR.
+// Every parallel worker gets its own browser: pages in one browser share six
+// connections to the file server, which a media-heavy page holds (#5548), and
+// sharing also crashes BeginFrame and serializes screenshots.
 export function shouldDisableBrowserPoolForParallelWorker({
   parallel,
-  platform,
-  deviceScaleFactor,
-  headlessShellPath,
 }: WorkerBrowserPoolDecision): boolean {
-  return Boolean(
-    parallel && platform === "linux" && headlessShellPath && (deviceScaleFactor ?? 1) <= 1,
-  );
+  return Boolean(parallel);
 }
 
 export function selectWorkerDiagnostics(
@@ -850,13 +839,7 @@ async function executeWorkerTask(
   let session: CaptureSession | null = null;
   let perf: CapturePerfSummary | undefined;
 
-  const needsSeparateBrowsers = shouldDisableBrowserPoolForParallelWorker({
-    parallel,
-    platform: process.platform,
-    forceScreenshot: config?.forceScreenshot,
-    deviceScaleFactor: captureOptions.deviceScaleFactor,
-    headlessShellPath: resolveHeadlessShellPath(config),
-  });
+  const needsSeparateBrowsers = shouldDisableBrowserPoolForParallelWorker({ parallel });
   const workerConfig: Partial<EngineConfig> | undefined = needsSeparateBrowsers
     ? { ...config, enableBrowserPool: false }
     : config;

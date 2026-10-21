@@ -37,13 +37,13 @@ export function formatTimeline(
   view: { generation: string; map: SourceMap; reused: boolean },
 ): TimelineReport {
   const offset = request.offset ?? 0;
-  const allGroups = groupEvents(raw.events);
+  const allGroups = byComponent(groupEvents(raw.events));
   const groups = allGroups.slice(offset, offset + GROUPS_PER_PAGE);
   const label = labeler();
   const events = groups.flat().map((event, index) => ({
     ...event,
     stack: undefined,
-    sources: (event.stack ? view.map(event.stack, index) : []).map((s) => ({
+    sources: onePerSourceLine(event.stack ? view.map(event.stack, index) : []).map((s) => ({
       file: s.file,
       line: s.startLine,
     })),
@@ -52,11 +52,17 @@ export function formatTimeline(
   const lines = [
     `Timeline · global seconds · ${raw.status}`,
     `generation: ${view.generation}`,
-    ...(raw.status !== "found" ? raw.candidates.map((c) => `${c.ref} #${c.id} ${c.tag}`) : []),
+    ...(raw.status !== "found"
+      ? raw.candidates.map(
+          (c) =>
+            `${c.ref} ${targetSummary([c])[0]} ${c.tag}${c.composition ? ` in ${c.composition}` : ""}`,
+        )
+      : []),
+    ...pastTheEnd(request, raw.duration),
     ...(request.boundary !== undefined ? [`Boundary ${request.boundary}s: ${BOUNDARY_NOTE}`] : []),
     ...describeGroups(groups, request, view.map, label),
     ...describeFollowing(raw, view.map, label),
-    ...describeRelations(events),
+    ...describeRelations(groups),
     ...(nextOffset !== null
       ? [`More groups: repeat with offset=${nextOffset} and generation.`]
       : []),
@@ -103,6 +109,25 @@ function groupEvents(events: TimelineEvent[]): TimelineEvent[][] {
   return [...groups.values()];
 }
 
+const headingOf = (event: TimelineEvent) =>
+  event.component?.id ? `#${event.component.id}` : (event.component?.composition ?? "unassigned");
+
+function byComponent(groups: TimelineEvent[][]): TimelineEvent[][] {
+  const owners = new Map<string, TimelineEvent[][]>();
+  for (const group of groups) {
+    const heading = headingOf(group[0]!);
+    owners.set(heading, [...(owners.get(heading) ?? []), group]);
+  }
+  return [...owners.values()].flat();
+}
+
+function pastTheEnd(request: TimelineRequest, duration: number | undefined): string[] {
+  const from = request.range?.[0] ?? request.at ?? request.boundary;
+  const filmLength = duration !== undefined && duration > 0 ? duration : undefined;
+  if (filmLength === undefined || from === undefined || from < filmLength) return [];
+  return [`Requested time is past the end: the film is ${Number(filmLength.toFixed(4))}s long.`];
+}
+
 function labeler(): Labeler {
   const labels = new Map<string, string>();
   return (ref) => {
@@ -112,12 +137,19 @@ function labeler(): Labeler {
 }
 
 const at = (seconds: number) => seconds.toFixed(4);
+function onePerSourceLine<T extends { file: string; startLine: number }>(sources: T[]): T[] {
+  return [...new Map(sources.map((s) => [`${s.file}:${s.startLine}`, s])).values()];
+}
 const located = (sources: { file: string; startLine: number }[]) =>
-  sources.map((s) => `${s.file}:${s.startLine}`).join(", ");
+  onePerSourceLine(sources)
+    .map((s) => `${s.file}:${s.startLine}`)
+    .join(", ");
 
 function describeValue(value: DeclaredValue): string {
   if (value.kind === "unknown") return "?";
-  return `${value.value}${value.kind === "literal" ? "" : ` (${value.kind})`}`;
+  if (value.kind === "expression" && value.value === "custom function") return "custom function";
+  const shown = typeof value.value === "number" ? Number(value.value.toFixed(4)) : value.value;
+  return `${shown}${value.kind === "literal" ? "" : ` (${value.kind})`}`;
 }
 function describeValues(values: AnimationValues): string {
   return `    authored: ${values.properties.map((p) => `${p.property}: ${describeValue(p.from)} → ${describeValue(p.to)}`).join("; ")}; ease: ${describeValue(values.ease)}`;
@@ -140,7 +172,7 @@ function describeGroups(
       targets: [...new Map(members.flatMap((e) => e.targets).map((t) => [t.ref, t])).values()],
     };
     const component = event.component;
-    const heading = component?.id ? `#${component.id}` : (component?.composition ?? "unassigned");
+    const heading = headingOf(event);
     if (owner !== heading) {
       lines.push(`\n${heading}${component ? ` [${component.ref}]` : ""}`);
       owner = heading;
@@ -170,9 +202,10 @@ function describeGroups(
 function targetSummary(targets: TimelineEvent["targets"]): string[] {
   const counts = new Map<string, number>();
   for (const target of targets) {
-    const name = target.id
+    const own = target.id
       ? `#${target.id}`
       : (target.hfId ?? (target.classes.length ? `.${target.classes.join(".")}` : target.tag));
+    const name = !target.id && target.withinId ? `${own} in #${target.withinId}` : own;
     counts.set(name, (counts.get(name) ?? 0) + 1);
   }
   return [...counts].map(([name, count]) => (count > 1 ? `${name} ×${count}` : name));
@@ -233,12 +266,16 @@ function describeFollowing(raw: PageTimeline, map: SourceMap, label: Labeler): s
   return lines;
 }
 
-function describeRelations(events: TimelineReport["events"]): string[] {
+function describeRelations(groups: TimelineEvent[][]): string[] {
   const lines: string[] = [];
+  const events = groups.flatMap((members, group) => members.map((event) => ({ event, group })));
+  const described = new Set<string>();
   for (let a = 0; a < events.length; a++)
     for (let b = a + 1; b < events.length; b++) {
-      const left = events[a]!;
-      const right = events[b]!;
+      const left = events[a]!.event;
+      const right = events[b]!.event;
+      const pair = `${events[a]!.group}:${events[b]!.group}`;
+      if (described.has(pair)) continue;
       if (left.kind !== "animation" || right.kind !== "animation") continue;
       if (left.end < right.start || right.end < left.start) continue;
       const shared = left.targets.some((t) => right.targets.some((r) => r.ref === t.ref));
@@ -250,6 +287,7 @@ function describeRelations(events: TimelineReport["events"]): string[] {
           : Math.min(left.end, right.end) > Math.max(left.start, right.start)
             ? "intervals overlap"
             : "touch at an endpoint only, no positive-duration overlap";
+      described.add(pair);
       lines.push(
         `Relation: ${at(left.start)}–${at(left.end)} and ${at(right.start)}–${at(right.end)} share targets and ${properties.join(",")}; ${kind}; not necessarily an error.`,
       );

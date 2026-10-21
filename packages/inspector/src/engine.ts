@@ -1,8 +1,9 @@
 import type { TimelineRequest } from "../../core/src/runtime/timelineInspection";
+import { withAuthoredState } from "./authoredState";
 import { collectElementDom, formatElementMap, type ElementMap } from "./elementMap.js";
 import { mapInspection } from "./mapInspection";
 import { queryPage, timelinePage, type PageRunner } from "./pageQueries";
-import type { Sources } from "./sources";
+import type { AuthoredHtml, Sources } from "./sources";
 import { formatTimeline, type TimelineReport } from "./timelineReport";
 import type { InspectRequest, Snippet } from "./types";
 
@@ -16,6 +17,7 @@ export interface InspectionView {
   readonly sourceVersion: string;
   readonly pageGeneration?: string;
   sourceContext(): SourceContext;
+  authoredHtml?(): AuthoredHtml;
   assertCurrent(): Promise<void>;
 }
 
@@ -78,7 +80,10 @@ export async function inspectElementMap(
 ): Promise<ElementMapReport> {
   const snapshot = await runner.run(collectElementDom, undefined);
   assertPageGeneration(view, snapshot.generation);
-  const map = formatElementMap(snapshot, { file });
+  const authored = view.authoredHtml?.();
+  const map = formatElementMap(authored ? withAuthoredState(snapshot, authored) : snapshot, {
+    file,
+  });
   await view.assertCurrent();
   return { ...map, sourceVersion: view.sourceVersion, generation: view.generation };
 }

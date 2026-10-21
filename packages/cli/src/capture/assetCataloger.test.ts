@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { publicRequest } from "./publicNetwork.js";
+
+vi.mock("./publicNetwork.js", () => ({ publicRequest: vi.fn() }));
+afterEach(() => vi.mocked(publicRequest).mockReset());
 import { annotateGifAssetMetadata, type CatalogedAsset } from "./assetCataloger.js";
 
 function u16(value: number): number[] {
@@ -101,4 +105,41 @@ describe("annotateGifAssetMetadata", () => {
     expect(annotated[0]?.notes).toBe("single-frame GIF");
     expect(annotated[1]?.notes).toBe("hero");
   });
+});
+
+it("uses safe redirects for GIF metadata and never follows a private redirect", async () => {
+  const assets: CatalogedAsset[] = [
+    { url: "https://cdn.example/animated.gif", type: "Image", contexts: ["img[src]"] },
+    { url: "https://cdn.example/private.gif", type: "Image", contexts: ["img[src]"] },
+  ];
+  const canceled = vi.fn();
+  vi.mocked(publicRequest).mockImplementation(async (url) => {
+    if (String(url).endsWith("animated.gif"))
+      return new Response(null, {
+        status: 302,
+        headers: { location: "https://images.example/final.gif" },
+      });
+    if (String(url).endsWith("private.gif"))
+      return new Response(new ReadableStream({ cancel: canceled }), {
+        status: 302,
+        headers: { location: "http://127.0.0.1/private.gif" },
+      });
+    if (String(url) === "https://images.example/final.gif")
+      return new Response(new Uint8Array(gif([...frame(5), ...frame(15)], 0)));
+    throw new Error(`Unexpected request: ${url}`);
+  });
+  const annotated = await annotateGifAssetMetadata(assets);
+  expect(annotated[0]?.notes).toBe("animated GIF: 2 frames, 0.200s, loops forever");
+  expect(annotated[1]?.notes).toBeUndefined();
+  expect(
+    vi
+      .mocked(publicRequest)
+      .mock.calls.map(([url]) => String(url))
+      .sort(),
+  ).toEqual([
+    "https://cdn.example/animated.gif",
+    "https://cdn.example/private.gif",
+    "https://images.example/final.gif",
+  ]);
+  expect(canceled).toHaveBeenCalledOnce();
 });

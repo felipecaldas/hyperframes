@@ -2,7 +2,7 @@
 
 Recover original HTML/CSS/GSAP context for **known elements before an edit**. This is not a video check, screenshot, diff, or affected-component verifier. It combines the I002 runtime/compiler provenance approach with the I003 HF-owned service boundary. The agent adapter holds no DOM or animation state.
 
-This source-only experimental package is private. It does not modify the shared installation or register itself in a harness. Base: HF 0.8.127, commit `b3d2b82fe`.
+Published as `@hyperframes/inspector`. It does not modify the shared installation or register itself in a harness.
 
 ## Start
 
@@ -17,13 +17,9 @@ export HF_INSPECT_CHROME=/absolute/path/to/chrome
 bun packages/inspector/src/server.ts /absolute/video/project
 ```
 
-The service prints its loopback URL. Starting it does **not** start a browser. First inspection loads the project once. Configure the harness's MCP server to execute:
+The service prints its loopback URL. Starting it does **not** start a browser. First inspection loads the project once.
 
-```sh
-HF_INSPECT_URL=http://127.0.0.1:PRINTED_PORT bun packages/inspector/src/mcp.ts
-```
-
-Tool: `inspect_components`. Direct HTTP equivalent: `POST /inspect` with the same JSON. The service is bound to one project at startup, so no per-call project path is needed. `GET /info` returns project identity and startup/query counters. Stop with SIGINT/SIGTERM; the service disposes its own pages/browser.
+The package ships the capability, not agent tools: a harness defines its own tool names, descriptions and schemas, and calls `POST /inspect` with the JSON below. The service is bound to one project at startup, so no per-call project path is needed. `GET /info` returns project identity and startup/query counters. Stop with SIGINT/SIGTERM; the service disposes its own pages/browser.
 
 ## Input
 
@@ -46,7 +42,7 @@ Tool: `inspect_components`. Direct HTTP equivalent: `POST /inspect` with the sam
 
 ## Output
 
-The default JSON is capped at 12,000 UTF-8 bytes, including metadata. `snippets` contain file, start/end line, kinds, associated input target indices, **unmodified full source lines**, and whether that exact block occurs only once in the file. No pretty-printing or ellipses are inserted into code. Adjacent/overlapping blocks merge across targets.
+The default JSON is capped at 12,000 UTF-8 bytes, including metadata. Each snippet's `id` names its file and its start and end lines (`file:start-end`); a snippet also carries its kinds, **unmodified full source lines**, and whether that exact block occurs only once in the file. When a query names more than one target, `targets` gives the input target indices it serves. No pretty-printing or ellipses are inserted into code. Adjacent/overlapping blocks merge across targets.
 
 ```json
 {
@@ -55,9 +51,6 @@ The default JSON is capped at 12,000 UTF-8 bytes, including metadata. `snippets`
   "snippets": [
     {
       "id": "scene.html:20-24",
-      "file": "scene.html",
-      "startLine": 20,
-      "endLine": 24,
       "kind": ["animation creation"],
       "targets": [0, 1],
       "code": "the exact original source lines, including whitespace",
@@ -69,7 +62,7 @@ The default JSON is capped at 12,000 UTF-8 bytes, including metadata. `snippets`
 
 This illustration omits metadata. Actual files in the implementation report show the full output.
 
-Shared helpers appear once with all **queried** targets using them. `coTargets` names observed additional DOM targets of the same tween; it does not claim to enumerate all separate calls to a helper. Creation statements and authored caller statements are mapped; small named helper functions are returned whole. Variable assignments are not a stack/data-flow history. A missing source origin increments `unmappedAnimations`, rather than guessing an editable location.
+Shared helpers appear once with all **queried** targets using them. `coTargets` names up to three observed additional DOM targets of the same tween, prioritizing elements outside the query, and `coTargetsOmitted` counts the rest; it does not claim to enumerate all separate calls to a helper. Creation statements and authored caller statements are mapped; small named helper functions are returned whole. Variable assignments are not a stack/data-flow history. A missing source origin increments `unmappedAnimations`, rather than guessing an editable location.
 
 HTML snippets are uniquely identified authored opening tags (their full source lines); dynamically generated markup may have no authored tag match. CSS is an authored-selector candidate scan, not proof of active cascade, media-query state, or inherited styles. In particular, a class reused in different scoped scene styles can have multiple candidate source rules.
 
@@ -83,7 +76,25 @@ Code blocks are atomic. `omitted`, `omittedCount`, and `nextOffset` describe mis
 
 `maxBytes` can be raised explicitly (2,048–256,000). A block larger than the budget is not cut in half: request that ID with a larger budget or read its file/range. Pagination can therefore remain at the same offset until the budget increases. Old-generation continuations are rejected.
 
-Full runtime evidence is only available by an explicit HTTP request with `debug: true`; it is deliberately not part of the agent tool schema or its default output budget.
+Full runtime evidence is only available by an explicit HTTP request with `debug: true`; it is deliberately not part of the default request or its output budget.
+
+## Timeline
+
+`POST /timeline` answers which animations are scheduled when, from the same browser, page and generation as `/inspect`. It never seeks, renders or edits files.
+
+```json
+{ "component": { "selector": "#title" }, "boundary": 7.9 }
+```
+
+`component` is optional and resolves like an `/inspect` target; omit it for every registered HF timeline. Give at most one of `at`, `range: [start, end]` or `boundary`, in global seconds; omit all three for the schedule overview. Results are short text grouped by component, with event times, targets, properties and source locations; `generation` and `offset` page through them. Coverage is registered DOM-target GSAP animations and explicit HF items only; anything outside that, or past the expansion limits, is reported as incomplete coverage rather than guessed.
+
+## Element map
+
+`POST /element-map` returns the composition's element map from the same page. It reads no query fields. A project with no `index.html` answers `404` `{ "error": "no-composition", "code": "no-composition" }`.
+
+## Errors
+
+Every refusal is JSON `{ "error", "code" }`. `code` is the stable token (`no-composition`, `stale_generation`, `source_changed_during_query`, `request_too_large`); a sentence with no token is `invalid_request`. A missing browser is `503` `browser_unavailable`, and an unexpected failure is `500` `internal_error`. Importing the module does not listen; `createInspectorServer(project)` builds one. An unknown route is `404` `{ "error": "not_found", "code": "not_found" }`. `GET /info` adds `version`, this package's version. The process listens on `127.0.0.1` and refuses a `Host` that is not loopback, so a rebinding request cannot read the project path. Install the server with the package: `hyperframes-inspector <project> [port]`, or `node dist/server.js`.
 
 ## Lifecycle and overhead
 

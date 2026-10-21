@@ -10,11 +10,14 @@ import { captureArtifactRevision } from "../utils/artifactCapture.js";
 import { randomUUID } from "node:crypto";
 import {
   artifactDirectory,
+  finishSnapshotRun,
+  retainSnapshotOutput,
   forgetRecordedArtifacts,
   recordArtifacts,
   type ArtifactCapture,
 } from "@hyperframes/studio-server/history";
 import { pngDimensions } from "../utils/pngDimensions.js";
+import { runWithConcurrencyLimit } from "../utils/concurrency.js";
 import { failCommand } from "../utils/commandResult.js";
 // fallow-ignore-file complexity
 import { defineCommand } from "citty";
@@ -49,11 +52,12 @@ import { formatLintFindings } from "../utils/lintFormat.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { serveStaticProjectHtml } from "../utils/staticProjectServer.js";
 import { c } from "../ui/colors.js";
+import { writeCaptureFileSync } from "../capture/captureFile.js";
 import { runCancellableProcess } from "../utils/cancellableProcess.js";
 import { findFFmpeg, findFFprobe, getFFmpegInstallHint } from "../browser/ffmpeg.js";
 import { parseAngle, type Camera } from "./motionShotLayout.js";
 import type { Example } from "./_examples.js";
-import { loadOptionalPackage } from "../utils/optionalPackages.js";
+import { loadInstalledSharp, loadOptionalPackage } from "../utils/optionalPackages.js";
 import { resolveLocalBrowserGpuMode, type BrowserGpuMode } from "../browser/gpuPolicy.js";
 
 // Runs IN THE BROWSER (serialized into page.evaluate). Tilt the whole stage so
@@ -94,10 +98,27 @@ function orbitStageSource(): string {
  * clip (corrupt media, stalled network mount, codec edge case) cannot wedge
  * `hyperframes snapshot` indefinitely. */
 const FFMPEG_EXTRACT_TIMEOUT_MS = 30_000;
+/** Each 4K decode is already multi-threaded, so a few at once fill the cores without exhausting memory. */
+const VIDEO_FRAME_EXTRACT_CONCURRENCY = 4;
 
 /** Keep millisecond-level snapshot timing proof without leaking floating-point noise. */
 export function formatSnapshotTimestamp(time: number): string {
   return `${Number(time.toFixed(3))}s`;
+}
+
+/** --keep names a still by its millisecond label, so two distinct times may not share one. */
+function assertDistinctKeepNames(times: number[]): void {
+  const timeByLabel = new Map<string, number>();
+  for (const time of times) {
+    const label = formatSnapshotTimestamp(time);
+    const other = timeByLabel.get(label);
+    if (other !== undefined && other !== time) {
+      throw new Error(
+        `--keep would name both ${other} and ${time} at-${label}.png; pass times at least 1 ms apart`,
+      );
+    }
+    timeByLabel.set(label, time);
+  }
 }
 
 /** Shows media by the runtime's visibility rule. A clip held at the composition end, or past the end of a source
@@ -337,6 +358,7 @@ export async function extractVideoFrameToBuffer(
   timeSeconds: number,
   useVp9AlphaDecoder = false,
   holdLastFrame = false,
+  displayedPixels = 0,
 ): Promise<Buffer | null> {
   const tmp = mkdtempSync(join(tmpdir(), "hf-snapshot-frame-"));
   const outPath = join(tmp, "frame.png");
@@ -352,7 +374,15 @@ export async function extractVideoFrameToBuffer(
     if (useVp9AlphaDecoder) args.push("-c:v", "libvpx-vp9");
     if (seek.seek !== undefined) args.push("-ss", String(seek.seek));
     args.push("-i", videoPath, "-map", "0:v:0");
-    if (seek.select !== undefined) args.push("-vf", `select=gte(t-start_t\\,${seek.select})`);
+    const filters: string[] = [];
+    if (seek.select !== undefined) filters.push(`select=gte(t-start_t\\,${seek.select})`);
+    // Shrink so the short side still covers the displayed box at any rotation or fit; never enlarge.
+    if (displayedPixels > 0) {
+      filters.push(
+        `scale='min(iw,${displayedPixels})':'min(ih,${displayedPixels})':force_original_aspect_ratio=increase`,
+      );
+    }
+    if (filters.length > 0) args.push("-vf", filters.join(","));
     args.push("-frames:v", "1", "-q:v", "2", "-y", outPath);
     const result = await runFfmpegOnce(ffmpegPath, args, FFMPEG_EXTRACT_TIMEOUT_MS);
     if (result.code !== 0 || result.timedOut || !existsSync(outPath)) return null;
@@ -447,6 +477,10 @@ export function computeSnapshotTimes(
   return { times: times.map(round).sort((a, b) => a - b), appendedTail: false };
 }
 
+export function serveCapturePage(projectDir: string, html: string, proxy: boolean | undefined) {
+  return serveStaticProjectHtml(projectDir, html, undefined, [], proxy === true);
+}
+
 /**
  * Render key frames from a composition as PNG screenshots.
  * The agent can Read these to verify its output visually.
@@ -476,6 +510,8 @@ export async function captureSnapshots(
     browserGpuMode?: BrowserGpuMode;
     /** Reference video: save its frame at each captured time plus a render|reference pair. */
     against?: string;
+    /** Add to outputDir without clearing it; name each still by its time, not its place in the run. */
+    keep?: boolean;
   },
 ): Promise<string[]> {
   const { bundleWithLocalizedFonts } = await import("../utils/bundleWithLocalizedFonts.js");
@@ -496,7 +532,7 @@ export async function captureSnapshots(
   // Localize fonts (embed remote @font-face as data URIs, matching the render
   // path) so snapshots render the real font instead of a fallback sans.
   const html = await bundleWithLocalizedFonts(projectDir);
-  const server = await serveStaticProjectHtml(projectDir, html, undefined, [], opts.autoProxy);
+  const server = await serveCapturePage(projectDir, html, opts.autoProxy);
 
   const savedPaths: string[] = [];
 
@@ -614,7 +650,7 @@ export async function captureSnapshots(
       mkdirSync(snapshotDir, { recursive: true });
       try {
         const { readdirSync } = await import("node:fs");
-        for (const file of readdirSync(snapshotDir)) {
+        for (const file of opts.keep ? [] : readdirSync(snapshotDir)) {
           if (/\.(png|jpg|jpeg)$/i.test(file)) {
             const path = resolve(snapshotDir, file);
             replaced.push(path);
@@ -694,6 +730,7 @@ export async function captureSnapshots(
             };
             return Array.from(document.querySelectorAll("video")).map((el) => {
               const v = el as HTMLVideoElement;
+              const box = v.getBoundingClientRect();
               const authoredStart = parseFloat(v.dataset.start ?? "0") || 0;
               const runtimeResolvedStart = runtimeWindow.__hfResolveMediaStartSeconds?.(v);
               const mediaStart =
@@ -716,6 +753,8 @@ export async function captureSnapshots(
                 srcDuration: srcDur,
                 mediaStart,
                 loop: v.loop,
+                displayedSize: Math.max(box.width, box.height),
+                devicePixelRatio: window.devicePixelRatio,
               };
             });
           });
@@ -755,51 +794,49 @@ export async function captureSnapshots(
               : [{ ...candidate, start, playbackRate, duration, relTime: frameTime }];
           });
 
-          const updates: Array<{ videoId: string; dataUri: string }> = [];
-          for (const v of active) {
-            // Resolve the <video> src to an FFmpeg input. Prefer a project-local
-            // file (fast, sandboxed); fall back to the absolute http(s) URL for
-            // remote assets (e.g. an S3-hosted clip embedded by an upstream agent)
-            // — FFmpeg reads http(s) input directly, and Chrome-headless can't seek
-            // it either, so without this those videos render blank in snapshots.
-            let ffmpegInput: string | null = null;
-            let inputIsLocal = false;
-            try {
-              const url = new URL(v.src);
-              const decodedPath = decodeURIComponent(url.pathname).replace(/^\//, "");
-              const candidate = resolve(projectDir, decodedPath);
-              const rel = relative(projectDir, candidate);
-              if (!rel.startsWith("..") && !isAbsolute(rel) && existsSync(candidate)) {
-                ffmpegInput = candidate;
-                inputIsLocal = true;
-              } else if (url.protocol === "http:" || url.protocol === "https:") {
-                ffmpegInput = url.href;
+          const extracted = await runWithConcurrencyLimit(
+            active,
+            VIDEO_FRAME_EXTRACT_CONCURRENCY,
+            async (v) => {
+              // Prefer the project-local file; remote http(s) clips go to FFmpeg directly,
+              // since headless Chrome can't seek them and they would render blank.
+              let ffmpegInput: string | null = null;
+              let inputIsLocal = false;
+              try {
+                const url = new URL(v.src);
+                const decodedPath = decodeURIComponent(url.pathname).replace(/^\//, "");
+                const candidate = resolve(projectDir, decodedPath);
+                const rel = relative(projectDir, candidate);
+                if (!rel.startsWith("..") && !isAbsolute(rel) && existsSync(candidate)) {
+                  ffmpegInput = candidate;
+                  inputIsLocal = true;
+                } else if (url.protocol === "http:" || url.protocol === "https:") {
+                  ffmpegInput = url.href;
+                }
+              } catch {
+                /* unresolvable src (e.g. blob:, data:) — skip */
               }
-            } catch {
-              /* unresolvable src (e.g. blob:, data:) — skip */
-            }
-            if (!ffmpegInput) continue;
-            // VP9-alpha detection shells out to ffprobe, which has no timeout.
-            // Only probe local files (filesystem-bounded); for remote URLs skip it
-            // (pass false) so a stalled host can't wedge snapshot in ffprobe before
-            // the bounded extractVideoFrameToBuffer below ever runs. Remote
-            // VP9-alpha overlays aren't a current path — revisit with a bounded
-            // ffprobe if one appears.
-            const useVp9AlphaDecoder = inputIsLocal
-              ? await shouldUseVp9AlphaDecoder(ffmpegInput)
-              : false;
-            const png = await extractVideoFrameToBuffer(
-              ffmpegInput,
-              Math.max(0, v.relTime),
-              useVp9AlphaDecoder,
-              v.srcDuration > 0 && v.relTime >= v.srcDuration - 1,
-            );
-            if (!png) continue;
-            updates.push({
-              videoId: v.id,
-              dataUri: `data:image/png;base64,${png.toString("base64")}`,
-            });
-          }
+              if (!ffmpegInput) return null;
+              // The VP9-alpha probe has no timeout, so only local files get it;
+              // a stalled remote host must not wedge snapshot before the bounded extract.
+              const useVp9AlphaDecoder = inputIsLocal
+                ? await shouldUseVp9AlphaDecoder(ffmpegInput)
+                : false;
+              const png = await extractVideoFrameToBuffer(
+                ffmpegInput,
+                Math.max(0, v.relTime),
+                useVp9AlphaDecoder,
+                v.srcDuration > 0 && v.relTime >= v.srcDuration - 1,
+                Math.ceil(
+                  v.displayedSize *
+                    (opts.zoom ? (opts.zoomScale ?? DEFAULT_ZOOM_SCALE) : v.devicePixelRatio),
+                ),
+              );
+              if (!png) return null;
+              return { videoId: v.id, dataUri: `data:image/png;base64,${png.toString("base64")}` };
+            },
+          );
+          const updates = extracted.filter((update) => update !== null);
 
           if (active.length > 0 && updates.length < active.length) {
             const missed = active.length - updates.length;
@@ -829,8 +866,10 @@ export async function captureSnapshots(
         await recaptureSnapshotComposite(page);
 
         const timeLabel = formatSnapshotTimestamp(time);
-        const index = String(i).padStart(2, "0");
-        const filename = `frame-${index}-at-${timeLabel}.png`;
+        const slot = opts.keep
+          ? `at-${timeLabel}`
+          : `${String(i).padStart(2, "0")}-at-${timeLabel}`;
+        const filename = opts.keep ? `${slot}.png` : `frame-${slot}.png`;
         const framePath = join(snapshotDir, filename);
 
         let crop: { x: number; y: number; width: number; height: number } | undefined;
@@ -855,9 +894,12 @@ export async function captureSnapshots(
             region,
             opts.zoomScale ?? DEFAULT_ZOOM_SCALE,
           );
-          writeFileSync(framePath, buffer);
+          writeCaptureFileSync(framePath, buffer);
         } else {
-          await page.screenshot({ path: framePath, type: "png", omitBackground: true });
+          writeCaptureFileSync(
+            framePath,
+            await page.screenshot({ type: "png", omitBackground: true }),
+          );
         }
         artifacts.push({
           id: `${invocation}-${i}`,
@@ -881,9 +923,9 @@ export async function captureSnapshots(
               `   ${c.warn("⚠")} --against has no frame at ${timeLabel} — reference pair skipped`,
             );
           } else {
-            const refPath = join(snapshotDir, `ref-${index}-at-${timeLabel}.png`);
-            writeFileSync(refPath, refPng);
-            const pairPath = join(snapshotDir, `pair-${index}-at-${timeLabel}.jpg`);
+            const refPath = join(snapshotDir, `ref-${slot}.png`);
+            writeCaptureFileSync(refPath, refPng);
+            const pairPath = join(snapshotDir, `pair-${slot}.jpg`);
             const { createContactSheet } = await import("../capture/contactSheet.js");
             await createContactSheet([framePath, refPath], pairPath, {
               cols: 2,
@@ -1008,6 +1050,12 @@ export default defineCommand({
         "Always include a readable end-of-timeline frame (default: true). Pass --no-end to capture only your exact --at times.",
       default: true,
     },
+    keep: {
+      type: "boolean",
+      description:
+        "Add to --output instead of clearing it, naming each still at-<seconds>s.png (at-0s, at-1.5s, at-12.25s: no trailing zeros), so snapshotting one moment again replaces only that still. Times less than 1 ms apart share a name, so one run may not pass two of them. No contact sheet.",
+      default: false,
+    },
     zoom: {
       type: "string",
       description:
@@ -1031,7 +1079,7 @@ export default defineCommand({
     proxy: {
       type: "boolean",
       description:
-        "Auto-transcode browser-hostile video codecs for snapshots (default: on; overrides hyperframes.json media.autoProxy)",
+        "Serve browser-playable copies of hostile video codecs to the snapshot page (default: off; frames come from FFmpeg, and each copy transcodes the whole clip)",
       default: undefined,
     },
     "browser-gpu": {
@@ -1084,6 +1132,7 @@ export default defineCommand({
           .map((s) => parseFloat(s.trim()))
           .filter((n) => !isNaN(n))
       : undefined;
+    if (args.keep === true && atTimestamps) assertDistinctKeepNames(atTimestamps);
     // Gemini frame analysis runs by default (silently skipped if
     // GEMINI_API_KEY is not set). `--describe "custom question"` overrides
     // the default prompt with a targeted question. `--describe false` opts
@@ -1113,10 +1162,13 @@ export default defineCommand({
         : "";
     console.log(`${c.accent("◆")}  Capturing ${label} from ${c.accent(project.name)}${angleLabel}`);
 
+    let managedSnapshotDir: string | undefined;
     try {
       const snapshotDir = args.output
         ? resolve(String(args.output))
         : artifactDirectory(project.dir, "snapshots");
+      if (!args.output) managedSnapshotDir = snapshotDir;
+      if (args.output) retainSnapshotOutput(project.dir, snapshotDir);
       await withProjectLock(project.dir, "snapshot", async () => {
         const paths = await captureSnapshots(project.dir, {
           frames,
@@ -1132,6 +1184,7 @@ export default defineCommand({
           autoProxy: args.proxy as boolean | undefined,
           browserGpuMode: resolveLocalBrowserGpuMode(args["browser-gpu"] as boolean | undefined),
           against,
+          keep: args.keep === true,
         });
         reportArtifacts(
           "snapshot",
@@ -1156,13 +1209,16 @@ export default defineCommand({
           );
         }
 
-        // Generate contact sheet for quick AI review
+        // Generate contact sheet for quick AI review; a --keep folder mixes runs, so it gets none.
         try {
           const { createSnapshotContactSheet } = await import("../capture/contactSheet.js");
-          const sheets = await createSnapshotContactSheet(
-            snapshotDir,
-            join(snapshotDir, "contact-sheet.jpg"),
-          );
+          const sheets =
+            args.keep === true
+              ? []
+              : await createSnapshotContactSheet(
+                  snapshotDir,
+                  join(snapshotDir, "contact-sheet.jpg"),
+                );
           reportArtifacts("snapshot", "contact-sheet", sheets);
           for (const sheet of sheets) {
             console.log(`   ${resolve(sheet)} (grid view for AI review)`);
@@ -1202,17 +1258,13 @@ export default defineCommand({
               ];
 
               // Scale down PNGs before sending to stay under Gemini's 4 MB inline
-              // limit. Full 1920×1080 PNGs are typically 3-6 MB. Use sharp if
-              // available; otherwise skip files over the limit.
-              type SharpFn = (buf: Buffer) => {
-                resize: (w: number) => { jpeg: () => { toBuffer: () => Promise<Buffer> } };
-              };
-              let sharpFn: SharpFn | null = null;
+              // limit. Full 1920×1080 PNGs are typically 3-6 MB. Use sharp if it is
+              // already there (never installed for this); otherwise skip files over the limit.
+              let sharp: ReturnType<typeof loadInstalledSharp> = null;
               try {
-                const s = await import("sharp");
-                sharpFn = (s.default ?? s) as unknown as SharpFn;
+                sharp = loadInstalledSharp("--describe");
               } catch {
-                /* sharp not installed — fall back to size check */
+                /* a copy that cannot load — fall back to size check */
               }
 
               const results = await Promise.allSettled(
@@ -1223,8 +1275,8 @@ export default defineCommand({
                   const raw = readFileSync(filePath);
                   let imageData: Buffer;
                   let mimeType = "image/png";
-                  if (sharpFn) {
-                    imageData = await sharpFn(raw).resize(960).jpeg().toBuffer();
+                  if (sharp) {
+                    imageData = await sharp(raw).resize(960).jpeg().toBuffer();
                     mimeType = "image/jpeg";
                   } else {
                     if (raw.length > 3_800_000)
@@ -1280,6 +1332,9 @@ export default defineCommand({
       const msg = normalizeErrorMessage(err);
       console.error(`\n${c.error("✗")} Snapshot failed: ${msg}`);
       failCommand();
+    } finally {
+      if (managedSnapshotDir)
+        await finishSnapshotRun(project.dir, managedSnapshotDir).catch(warnSnapshotsNotRecorded);
     }
   },
 });

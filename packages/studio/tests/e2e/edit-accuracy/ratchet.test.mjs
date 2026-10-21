@@ -62,7 +62,7 @@ describe("quarantine", () => {
     const fresh = baseline({});
     expect(gate(fresh, fresh, [run("a"), run("b")], q)).toMatchObject({
       unbanked: ["b"],
-      ok: false,
+      ok: true,
     });
     expect(
       gate(base, baseline({ a: good, b: good }), [run("a", 9), run("b")], q).overclaimed,
@@ -120,7 +120,7 @@ describe("gate", () => {
     expect(lucky.ok).toBe(true);
     const real = gate(before, before, [run("a"), run("b"), run("b"), run("b", 9)]);
     expect(real.unbanked).toEqual(["b"]);
-    expect(real.ok).toBe(false);
+    expect(real.ok).toBe(true);
   });
 
   it("fails a regression that fails 2 of 3 runs", () => {
@@ -138,10 +138,12 @@ describe("gate", () => {
     expect(g.ok).toBe(true);
   });
 
-  it("fails a newly passing case until baseline.json banks it", () => {
+  it("reports a newly passing case that baseline.json does not bank, without failing on it", () => {
     const before = baseline({ a: good, b: { ...good, drop: 9 } });
-    expect(gate(before, before, [run("a"), run("b")]).unbanked).toEqual(["b"]);
-    expect(gate(before, base, [run("a"), run("b")]).ok).toBe(true);
+    const g = gate(before, before, [run("a"), run("b")]);
+    expect(g).toMatchObject({ unbanked: ["b"], ok: true });
+    expect(comment(g)).toContain("- b");
+    expect(gate(before, base, [run("a"), run("b")]).unbanked).toEqual([]);
   });
 
   it("fails when baseline.json claims a pass the run does not reproduce", () => {
@@ -154,6 +156,19 @@ describe("gate", () => {
     const g = gate(base, base, [run("a")]);
     expect(g.missing).toEqual(["b"]);
     expect(g.reasons.join()).toContain("fell from 2 to 1");
+  });
+
+  it("does not count a case retired from the grid with its baseline.json entry, and lists it", () => {
+    const g = gate(base, baseline({ a: good }), [run("a")]);
+    expect(g).toMatchObject({ basePassing: 1, missing: [], retired: ["b"], ok: true });
+    expect(comment(g)).toContain("Retired");
+  });
+
+  it("counts only the cases that ran when a run covers part of the grid, still failing a regression", () => {
+    const slice = new Set(["a"]);
+    expect(gate(base, base, [run("a")], {}, slice)).toMatchObject({ missing: [], ok: true });
+    const g = gate(base, base, [run("a", 3), run("a", 3), run("a")], {}, slice);
+    expect(g).toMatchObject({ regressed: ["a"], ok: false });
   });
 });
 

@@ -14,7 +14,9 @@ import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DownloadOptions } from "../cloud/download.js";
+import { execFileSync } from "node:child_process";
 import {
+  decodeTimeoutMs,
   ensureParakeetModel,
   installSherpaRuntime,
   SHERPA_RUNTIME_DIR,
@@ -469,4 +471,17 @@ describe("sherpaUnsupportedReason", () => {
       /this system is linux-arm/,
     );
   });
+});
+
+describe("decodeTimeoutMs", () => {
+  // 1851.245125 s of audio once gave 3702490.25, which execFile refused as out of range.
+  it.each([1851.245125, 10_000_000])(
+    "gives execFile a timeout it accepts for %s s of audio",
+    (seconds) => {
+      const timeout = decodeTimeoutMs(seconds);
+      expect(Number.isInteger(timeout)).toBe(true);
+      expect(timeout).toBeGreaterThanOrEqual(Math.min(seconds * 2000, 2 ** 31 - 1));
+      expect(() => execFileSync(process.execPath, ["-e", ""], { timeout })).not.toThrow();
+    },
+  );
 });

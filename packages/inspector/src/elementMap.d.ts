@@ -13,8 +13,10 @@ export interface ElementNode {
   text: string;
   media: string | null;
   relative: string;
+  position: number;
   groupSelector: string;
   siblingMatchCount: number;
+  generated?: boolean;
   children: number[];
 }
 export interface ElementDom {

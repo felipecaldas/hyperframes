@@ -38,6 +38,25 @@ describe("parseRenderOptions — outputResolution", () => {
   });
 });
 
+describe("parseRenderOptions — encoder options", () => {
+  it("forwards crf, videoBitrate and videoFrameFormat from a valid body", () => {
+    expect(parseRenderOptions({ crf: 12, format: "webm", videoFrameFormat: "png" })).toMatchObject({
+      crf: 12,
+      videoFrameFormat: "png",
+    });
+    expect(parseRenderOptions({ videoBitrate: "10M" }).videoBitrate).toBe("10M");
+  });
+
+  it("drops every encoder override when any of them is invalid, and for mov rate control", () => {
+    expect(parseRenderOptions({ crf: 52 }).crf).toBeUndefined();
+    expect(parseRenderOptions({ crf: 12, videoBitrate: "10M" })).toMatchObject({
+      crf: undefined,
+      videoBitrate: undefined,
+    });
+    expect(parseRenderOptions({ crf: 12, format: "mov" }).crf).toBeUndefined();
+  });
+});
+
 describe("parseRenderOptions — render strictness", () => {
   it("preserves best-effort compatibility and requires an explicit strict opt-in", () => {
     expect(parseRenderOptions({}).strictness).toBe("best-effort");
@@ -103,6 +122,18 @@ describe("prepareRenderBody — validation", () => {
     expect((result as { error: string }).error).toContain(
       'outputDynamicRange must be one of: "auto", "hdr", "sdr"',
     );
+  });
+
+  it("rejects an out-of-range crf with the studio-server message", async () => {
+    const result = await prepareRenderBody({ format: "webm", crf: 64, html: "<html></html>" });
+    expect((result as { error: string }).error).toBe(
+      "crf must be an integer from 0 to 63 for webm",
+    );
+  });
+
+  it("rejects crf together with videoBitrate", async () => {
+    const result = await prepareRenderBody({ crf: 12, videoBitrate: "10M", html: "<html></html>" });
+    expect((result as { error: string }).error).toBe("use either crf or videoBitrate, not both");
   });
 
   it("rejects conflicting canonical and legacy policies", async () => {

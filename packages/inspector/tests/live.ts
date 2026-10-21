@@ -1,3 +1,4 @@
+import { snippetSource } from "./snippetSource";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -89,22 +90,23 @@ try {
   assert.equal(result.results[0]!.unmappedAnimations, 0);
   assert(
     result.snippets.some(
-      (s) => s.code.includes("function move") && s.targets.includes(0) && s.targets.includes(1),
+      (s) => s.code.includes("function move") && s.targets?.includes(0) && s.targets.includes(1),
     ),
   );
-  for (const s of result.snippets)
-    assert.equal(
-      s.code,
-      readFileSync(join(dir, s.file), "utf8")
-        .split(/(?<=\n)/)
-        .slice(s.startLine - 1, s.endLine)
-        .join(""),
-    );
+  for (const s of result.snippets) assert.equal(s.code, snippetSource(dir, s.id));
   const timeline = await live.timeline(runner, { at: 2, component: { selector: "#title" } });
   assert.equal(timeline.status, "found");
   assert(timeline.text.includes("index.html:"), "timeline maps its animations to source lines");
   const map = await live.elementMap(runner);
   assert(map.text.includes("#title") && map.generation === live.generation);
+  const advance = (on: boolean) => {
+    const h1 = document.querySelector("#other")!;
+    h1.classList.toggle("on", on);
+    h1.textContent = on ? "9.9" : "Two";
+  };
+  await runner.run(advance, true);
+  assert.equal((await live.elementMap(runner)).text, map.text, "runtime class and text");
+  await runner.run(advance, false);
   const reloadDuringQuery = async (
     run: (inspection: typeof live, racingRunner: PageRunner) => Promise<unknown>,
   ) => {

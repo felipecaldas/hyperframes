@@ -81,6 +81,8 @@ export {
   getDefaultStageZoom,
 } from "./core.types";
 
+export { DISTRIBUTED_FPS, type DistributedFps, isDistributedFps } from "./distributedFps";
+
 // Templates
 export { generateBaseHtml, getStageStyles } from "./templates/base";
 export {
@@ -297,7 +299,11 @@ export {
   quantizeTimeToFrame,
   type MediaVisualStyleProperty,
 } from "./inline-scripts/parityContract";
-export { redactKnownPaths, redactTelemetryString } from "./telemetryRedaction";
+export {
+  redactKnownPaths,
+  redactTelemetryString,
+  redactUrlQueryStrings,
+} from "./telemetryRedaction";
 export {
   folderGone,
   isProjectRootMissing,

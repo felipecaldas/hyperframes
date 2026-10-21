@@ -3,7 +3,12 @@ import { platform } from "node:os";
 import { findFfBinary } from "@hyperframes/parsers/ff-binaries";
 import { ensureBrowser, findBrowser, type BrowserResult } from "./manager.js";
 import { describeBrowserInstall, type BrowserInstallFacts } from "./installFacts.js";
-import { FFMPEG_PATH_ENV, FFPROBE_PATH_ENV, getFFmpegInstallHint } from "./ffmpeg.js";
+import {
+  FFMPEG_PATH_ENV,
+  FFPROBE_PATH_ENV,
+  FIRST_LAUNCH_TIMEOUT_MS,
+  getFFmpegInstallHint,
+} from "./ffmpeg.js";
 import {
   chromeDepsInstallCommand,
   detectLinuxDistro,
@@ -49,13 +54,13 @@ export interface EnvironmentCheckOptions {
 }
 
 export function parseToolVersion(raw: string): string {
-  const m = raw.match(/(ffmpeg|ffprobe)\s+version\s+([\d][\d.\-\w]*)/i);
+  const m = raw.match(/(ffmpeg|ffprobe)\s+version\s+(n?\d[\d.\-\w]*)/i);
   return m ? `${m[1]} ${m[2]}` : raw.trim();
 }
 
-/** First `X.Y`-shaped number in a version banner (ffmpeg/ffprobe/Chrome all share this shape). */
+/** First `X.Y`-shaped number in a version banner, allowing the "n" of release-branch ffmpeg builds (n8.0.1). */
 export function extractMajorVersion(raw: string): number | undefined {
-  const m = raw.match(/\b(\d+)\.\d+/);
+  const m = raw.match(/\bn?(\d+)\.\d+/);
   return m?.[1] ? Number(m[1]) : undefined;
 }
 
@@ -78,7 +83,7 @@ async function readToolVersion(
     const output = (
       await runCancellableProcess(binaryPath, ["-version"], {
         signal,
-        timeoutMs: 5000,
+        timeoutMs: FIRST_LAUNCH_TIMEOUT_MS,
       })
     ).stdout;
     const raw = output.split("\n")[0] ?? "";
@@ -260,7 +265,7 @@ async function chromeLaunchOutcome(
   try {
     const { stdout } = await runCancellableProcess(executablePath, ["--version"], {
       signal,
-      timeoutMs: 5000,
+      timeoutMs: FIRST_LAUNCH_TIMEOUT_MS,
       maxBufferBytes: 64 * 1024,
     });
     return { ...found, versionMajor: extractMajorVersion(stdout) };

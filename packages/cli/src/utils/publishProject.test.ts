@@ -1124,6 +1124,22 @@ describe("publishProjectArchive with a credential the server rejects", () => {
     await publishExpecting(fetchMock, EXPIRED);
   });
 
+  it("asks a signed-out publish to log in when the upload route answers 401, with no fallback", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(unauthorized());
+    vi.stubGlobal("fetch", fetchMock);
+    const dir = makeProjectDir();
+    try {
+      writeFileSync(join(dir, "index.html"), "<html></html>", "utf-8");
+      await expect(publishProjectArchive(dir)).rejects.toThrow(
+        "Publishing needs an account. Run hyperframes auth login to publish.",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![0]).toMatch(/\/publish\/upload$/);
+  });
+
   it("does not blame the login for a 401 from the storage upload, which carries no credential", async () => {
     const fetchMock = vi
       .fn()

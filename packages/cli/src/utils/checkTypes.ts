@@ -6,6 +6,7 @@ import type { MotionSpec } from "./motionSpec.js";
 import type { ProjectDir } from "./project.js";
 import type { BrowserGpuMode } from "../browser/gpuPolicy.js";
 import type { HdrAutoPromotion } from "@hyperframes/engine";
+import type { PrelaunchedBrowser } from "../capture/captureCompositionFrame.js";
 
 export interface CheckOptions {
   samples: number;
@@ -77,6 +78,7 @@ export interface CheckAnchor {
 }
 
 export interface CheckFinding extends CheckAnchor {
+  timeRange?: [number, number];
   code: string;
   severity: CheckSeverity;
   message: string;
@@ -108,7 +110,7 @@ export interface CheckContrastFinding extends CheckFinding {
 
 export interface ContrastCapture {
   entries: ContrastAuditEntry[];
-  pngBase64: string;
+  pngBase64?: string;
 }
 
 export interface GeometryCandidateRequest {
@@ -190,14 +192,16 @@ export type MotionSpecResolution =
 
 export interface CheckAuditDriver {
   initialize(contrast: boolean): Promise<void>;
+  markSamples?(phase: "start" | "end" | "drop"): void;
   matchComponents?(components: string[], findings: CheckFinding[]): Promise<boolean[]>;
   getDuration(): Promise<number>;
   /** True when the root composition explicitly declares that it is intentionally timeline-free. */
   hasNoTimelineDeclaration(): Promise<boolean>;
   getTransitionBoundaries(): Promise<number[]>;
+  getClipEdges(): Promise<number[]>;
   getCanvas(): Promise<Canvas>;
   findAmbiguousSelectors(selectors: string[]): Promise<AnchoredLayoutIssue[]>;
-  seek(time: number): Promise<void>;
+  seek(time: number, screenshotFollows?: boolean): Promise<void>;
   /** Settle-free seek for the geometry-only dense content_overlap pass; only collectOverlap consumes it, and getBoundingClientRect is valid synchronously after setTime. */
   seekGeometry(time: number): Promise<void>;
   collectLayout(
@@ -207,9 +211,12 @@ export interface CheckAuditDriver {
   ): Promise<AnchoredLayoutIssue[]>;
   /** content_overlap only, for the dense re-sampling grid — catches transient text collisions the sparse grid seeks past. */
   collectOverlap(time: number): Promise<AnchoredLayoutIssue[]>;
+  collectOverlapGrid(times: number[]): Promise<AnchoredLayoutIssue[][]>;
   /** Frozen-sweep guard (#U10): an opaque fingerprint of the seeked visual state, from
    * motion-signature.browser.js (shared with motion-sample's liveness). Legacy name kept. */
   collectLayoutGeometry(): Promise<string>;
+  captureFrame(scope?: string): Promise<string>;
+  framesDiffer(first: string, second: string): Promise<boolean>;
   collectSeekClock(): Promise<SeekClock[]>;
   /** rotation_pivot_drift: every rotatable element's bbox center/size/angle at
    * the current seeked state. Accumulated across the grid — see checkPipeline. */
@@ -228,7 +235,10 @@ export interface CheckAuditDriver {
     livenessScopes: string[],
   ): Promise<MotionFrame>;
   anchorMotionIssues(issues: LayoutIssue[]): Promise<AnchoredLayoutIssue[]>;
-  collectContrast(time: number, annotations?: CheckAnnotationBox[]): Promise<ContrastCapture>;
+  collectContrast(
+    time: number,
+    snapshotAnnotations?: CheckAnnotationBox[],
+  ): Promise<ContrastCapture>;
 }
 
 export interface CheckScreenshot {
@@ -265,6 +275,7 @@ export type RunAuditGrid = (
   driver: CheckAuditDriver,
   options: CheckOptions,
   motion: MotionSpecResolution,
+  helpers?: Promise<CheckAuditDriver[]>,
 ) => Promise<CheckBrowserResult>;
 
 export interface CheckSection<T extends CheckFinding = CheckFinding> {
@@ -315,7 +326,12 @@ export interface CheckDependencies {
     options: CheckOptions,
     motion: MotionSpecResolution,
     deadline?: CheckDeadline,
+    prelaunched?: PrelaunchedBrowser,
   ): Promise<CheckBrowserResult>;
+  prelaunchBrowser?(
+    project: ProjectDir,
+    options: CheckOptions,
+  ): Promise<PrelaunchedBrowser | undefined>;
   writeSnapshot(
     projectDir: string,
     index: number,

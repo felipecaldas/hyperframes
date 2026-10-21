@@ -177,12 +177,29 @@ describe("runAudioStage", () => {
           reason: "external_interruption",
           owner: "system",
           retryable: true,
-          detail: "ffmpeg handled signal 15",
+          detail: "private ffmpeg handled signal 15",
+          elementId: "private-element",
+          subprocess: { exitCode: 255, terminationReason: "exit" },
         },
       ],
     });
 
-    await expect(runAudioStage(makeInput())).rejects.toBeInstanceOf(EncoderInterruptedError);
+    const pending = runAudioStage(makeInput());
+    await expect(pending).rejects.toBeInstanceOf(EncoderInterruptedError);
+    await expect(pending).rejects.toMatchObject({
+      audioFailures: [
+        {
+          stage: "mix",
+          reason: "external_interruption",
+          owner: "system",
+          retryable: true,
+          subprocess: { exitCode: 255, terminationReason: "exit" },
+        },
+      ],
+    });
+    await pending.catch((error: EncoderInterruptedError) => {
+      expect(JSON.stringify(error.audioFailures)).not.toContain("private");
+    });
   });
 
   it("does not set audioError when there is no audio to mix", async () => {

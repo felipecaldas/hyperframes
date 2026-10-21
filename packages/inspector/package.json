@@ -1,14 +1,18 @@
 {
   "name": "@hyperframes/inspector",
-  "version": "0.8.154",
+  "version": "0.8.183",
   "repository": {
     "type": "git",
     "url": "https://github.com/heygen-com/hyperframes",
     "directory": "packages/inspector"
   },
+  "bin": {
+    "hyperframes-inspector": "./dist/server.js"
+  },
   "files": [
     "dist/service.js",
     "dist/live.js",
+    "dist/server.js",
     "dist/inspection.js",
     "dist/types",
     "README.md"
@@ -24,6 +28,12 @@
     "./live": {
       "types": "./dist/types/inspector/src/live.d.ts",
       "default": "./dist/live.js"
+    },
+    "./server": {
+      "bun": "./src/server.ts",
+      "import": "./src/server.ts",
+      "types": "./src/server.ts",
+      "default": "./dist/server.js"
     }
   },
   "publishConfig": {
@@ -36,6 +46,10 @@
       "./live": {
         "types": "./dist/types/inspector/src/live.d.ts",
         "default": "./dist/live.js"
+      },
+      "./server": {
+        "types": "./dist/types/inspector/src/server.d.ts",
+        "default": "./dist/server.js"
       }
     }
   },
@@ -44,7 +58,6 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "serve": "bun run build && bun src/server.ts",
-    "mcp": "bun run build && bun src/mcp.ts",
     "test:timeline": "bun tests/timeline.ts",
     "test:timeline-compositions": "bun tests/timelineCompositions.ts",
     "test:live": "bun run build && bun tests/live.ts",
@@ -58,6 +71,7 @@
     "acorn": "^8.17.0",
     "esbuild": "^0.25.12",
     "eslint-scope": "^9.1.2",
+    "htmlparser2": "^10.1.0",
     "postcss": "^8.5.8",
     "puppeteer-core": "^25.8.0"
   },

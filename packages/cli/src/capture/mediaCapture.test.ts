@@ -1,3 +1,5 @@
+import { publicRequest } from "./publicNetwork.js";
+vi.mock("./publicNetwork.js", () => ({ publicRequest: vi.fn() }));
 import {
   existsSync,
   lstatSync,
@@ -31,7 +33,7 @@ function tempDir(): string {
 
 afterEach(() => {
   vi.useRealTimers();
-  vi.unstubAllGlobals();
+  vi.mocked(publicRequest).mockReset();
   for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
   tempDirs.length = 0;
 });
@@ -44,7 +46,7 @@ describe("Lottie capture budget", () => {
       remainingMs = 0;
       return new Response(JSON.stringify({ w: 100, h: 100, layers: [] }), { status: 200 });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.mocked(publicRequest).mockImplementation(fetchMock);
 
     const saved = await saveLottieAnimations(
       [{ url: "https://one.example/a.json" }, { url: "https://two.example/b.json" }],
@@ -173,7 +175,7 @@ describe("video capture live budget", () => {
           headers: { "content-type": "video/mp4" },
         }),
     );
-    vi.stubGlobal("fetch", fetchMock);
+    vi.mocked(publicRequest).mockImplementation(fetchMock);
 
     const capture = captureVideoManifest(page, dir, () => {}, {
       sampleMs: 10_000,
@@ -205,10 +207,7 @@ describe("remainingVideoDownloadTimeoutMs", () => {
 describe("Lottie capture rejects unsafe persistence", () => {
   it("does not write corrupt archives as raw Lottie files", async () => {
     const dir = tempDir();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => new Response("not a zip")),
-    );
+    vi.mocked(publicRequest).mockImplementation(vi.fn(async () => new Response("not a zip")));
     expect(
       await saveLottieAnimations([{ url: "https://public.example/bad.lottie" }], dir, dir),
     ).toBe(0);
@@ -216,8 +215,7 @@ describe("Lottie capture rejects unsafe persistence", () => {
   });
   it("does not publish truthy non-array layers", async () => {
     const dir = tempDir();
-    vi.stubGlobal(
-      "fetch",
+    vi.mocked(publicRequest).mockImplementation(
       vi.fn(async () => new Response('{"w":100,"h":100,"layers":true}')),
     );
     expect(await saveLottieAnimations([{ url: "https://public.example/bad.json" }], dir, dir)).toBe(
@@ -292,8 +290,7 @@ describe("media previews replace pre-planted links", () => {
         typeof expression === "function" ? { x: 0, y: 0, width: 640, height: 360 } : [descriptor],
       );
       const page = { evaluate, screenshot: vi.fn(async () => PNG) } as unknown as Page;
-      vi.stubGlobal(
-        "fetch",
+      vi.mocked(publicRequest).mockImplementation(
         vi.fn(async () => new Response(null, { status: 404 })),
       );
 
@@ -327,8 +324,7 @@ describe("media folders refuse a planted directory link (#4304)", () => {
       const { dir, outside } = plantedCapture(link);
       const screenshot = vi.fn();
       const page = { evaluate: vi.fn(async () => [descriptor]), screenshot } as unknown as Page;
-      vi.stubGlobal(
-        "fetch",
+      vi.mocked(publicRequest).mockImplementation(
         vi.fn(async () => new Response(null, { status: 404 })),
       );
 
@@ -364,7 +360,7 @@ describe("media folders refuse a planted directory link (#4304)", () => {
     async () => {
       const { dir, outside } = plantedCapture("assets/lottie");
       const fetchMock = vi.fn();
-      vi.stubGlobal("fetch", fetchMock);
+      vi.mocked(publicRequest).mockImplementation(fetchMock);
 
       await expect(
         saveLottieAnimations(

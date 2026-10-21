@@ -25,7 +25,7 @@ import { usePlayerStore } from "../store/playerStore";
 
 // One wait budget for a shadow: the player's 8s asset cap plus its 0.42s loader fade
 // leaves about 6.5s for the document load and runtime boot. Nothing shorter may fail the swap.
-// It only runs while the tab is visible: readiness is frame-driven, and a hidden tab renders none.
+// Spent only while frames are drawn (readiness needs them); a hidden tab or a covered Linux window draws none.
 export const SHADOW_READY_TIMEOUT_MS = 15_000;
 // A busy machine can need more than one budget; the shadow keeps loading for this many before it is dropped.
 export const SHADOW_READY_BUDGETS = 3;
@@ -35,13 +35,26 @@ function restoreSeekPainted(iframe: HTMLIFrameElement | null): Promise<void> | u
   return win?.__hfWaitForSeekCompletion?.().catch(() => {});
 }
 
+function shadowPlayerReachable(iframe: HTMLIFrameElement | null): boolean {
+  try {
+    return Boolean((iframe?.contentWindow as IframeWindow | null | undefined)?.__player);
+  } catch {
+    return false;
+  }
+}
+
 function isDocumentHidden(): boolean {
   return typeof document !== "undefined" && document.visibilityState === "hidden";
 }
 
 type UseShadowPreviewReloadParams = Omit<
   UseTimelineSyncCallbacksParams,
-  "probeIntervalRef" | "onAdapterReady" | "getAdapter" | "isCurrent" | "onLoadGiveUp"
+  | "probeIntervalRef"
+  | "onAdapterReady"
+  | "getAdapter"
+  | "isCurrent"
+  | "onLoadGiveUp"
+  | "hostOwnsDeadline"
 > & {
   getAdapter: (overrideIframe?: HTMLIFrameElement | null) => PlaybackAdapter | null;
   /** Runs right after a shadow becomes the live iframe (iframeRef already points at it). */
@@ -104,6 +117,11 @@ export function useShadowPreviewReload({
   const failShadow = useCallback(
     (gen: number, cause: string) => {
       if (gen !== shadowGenRef.current) return;
+      const waitingFor = !shadowPlayerReachable(shadowIframeRef.current)
+        ? "the page and its runtime to load"
+        : pendingCommitRef.current?.gen !== gen
+          ? "its timeline to be ready"
+          : "its loaders to clear";
       shadowGenRef.current += 1;
       stopPendingShadow();
       shadowIframeRef.current = null;
@@ -111,8 +129,8 @@ export function useShadowPreviewReload({
       pendingSeekRef.current = null;
       setPreviewSlots(planShadowDiscard);
       setPreviewReloading(false);
-      const message = `The preview did not reload (${cause}). The previous preview is still showing.`;
-      logReload("shadow-failed", { cause });
+      const message = `The preview did not reload (${cause}). It was still waiting for ${waitingFor}. The previous preview is still showing.`;
+      logReload("shadow-failed", { cause, waitingFor });
       console.error(`[studio] ${message}`);
       onReloadFailedRef.current?.(message);
     },
@@ -236,6 +254,7 @@ export function useShadowPreviewReload({
     applyPreviewAudioState: () => {},
     onAdapterReady: markAdapterReady,
     isCurrent: isCurrentShadow,
+    hostOwnsDeadline: true,
   });
   cancelPendingLoadRef.current = cancelPendingLoad;
 
@@ -257,8 +276,19 @@ export function useShadowPreviewReload({
     (gen: number) => {
       clearTimeout(readyTimerRef.current);
       if (isDocumentHidden()) return;
+      let drew = false;
+      let starved = false;
+      requestAnimationFrame(() => {
+        if (!starved) drew = true;
+        else if (budgetGenRef.current === gen) armReadyTimerRef.current(gen);
+      });
       readyTimerRef.current = setTimeout(() => {
         if (gen !== shadowGenRef.current) return;
+        if (!drew) {
+          starved = true;
+          logReload("shadow-starved", { gen });
+          return;
+        }
         budgetsSpentRef.current += 1;
         if (budgetsSpentRef.current < SHADOW_READY_BUDGETS) {
           logReload("shadow-slow", { budgetsSpent: budgetsSpentRef.current });

@@ -153,16 +153,28 @@ function contrastEntry(overrides: Partial<ContrastAuditEntry> = {}): ContrastAud
   };
 }
 
+// A rendered frame that is a function of the last seek, as a seek-driven film's is.
+function framesOfSeekedTime(): Pick<CheckAuditDriver, "seek" | "captureFrame"> {
+  let seeked = 0;
+  return {
+    seek: vi.fn(async (time: number) => {
+      seeked = time;
+    }),
+    captureFrame: vi.fn(async () => `frame@${seeked}`),
+  };
+}
+
 function fakeDriver(overrides: Partial<CheckAuditDriver> = {}): CheckAuditDriver {
   // A distinct string per call so the frozen-sweep guard (#U10) never fires
   // by accident in unrelated scenarios — tests that want it force a constant
   // via `collectLayoutGeometry: vi.fn(async () => "same")`.
   let geometryCallCount = 0;
-  return {
+  const driver: CheckAuditDriver = {
     initialize: vi.fn(async (_contrast: boolean) => undefined),
     getDuration: vi.fn(async () => 9),
     hasNoTimelineDeclaration: vi.fn(async () => false),
     getTransitionBoundaries: vi.fn(async () => []),
+    getClipEdges: vi.fn(async () => []),
     getCanvas: vi.fn(async () => ({ width: 1920, height: 1080 })),
     findAmbiguousSelectors: vi.fn(async (_selectors: string[]) => []),
     seek: vi.fn(async (_time: number) => undefined),
@@ -170,6 +182,8 @@ function fakeDriver(overrides: Partial<CheckAuditDriver> = {}): CheckAuditDriver
     collectLayout: vi.fn(async (_time: number, _tolerance: number) => []),
     collectOverlap: vi.fn(async (_time: number) => []),
     collectLayoutGeometry: vi.fn(async () => `geometry-${geometryCallCount++}`),
+    captureFrame: vi.fn(async (_scope?: string) => "frame"),
+    framesDiffer: vi.fn(async (first: string, second: string) => first !== second),
     collectSeekClock: vi.fn(async () => [{ id: 1, time: 0, done: false }]),
     collectRotationSample: vi.fn(async (_time: number) => []),
     collectOffPivotRotationSample: vi.fn(async (time: number) => ({ time, samples: [] })),
@@ -182,8 +196,17 @@ function fakeDriver(overrides: Partial<CheckAuditDriver> = {}): CheckAuditDriver
       })),
     ),
     collectContrast: vi.fn(async (_time: number) => ({ entries: [], pngBase64: PNG_BASE64 })),
+    collectOverlapGrid: vi.fn(async (times: number[]) => {
+      const issues: AnchoredLayoutIssue[][] = [];
+      for (const time of times) {
+        await driver.seekGeometry(time);
+        issues.push(await driver.collectOverlap(time));
+      }
+      return issues;
+    }),
     ...overrides,
   };
+  return driver;
 }
 
 interface GeometryFixture {
@@ -1007,6 +1030,16 @@ it("keeps contrast and snapshot sampling on the pre-gate layout grid", async () 
   expect(collectContrast).toHaveBeenCalledWith(5);
 });
 
+it("waits for paint only on the grid seeks a contrast screenshot follows", async () => {
+  const driver = fakeDriver({ getDuration: vi.fn(async () => 10) });
+  await runScenario(driver, { samples: 1, captionZone: { x0: 0, y0: 0.8, x1: 1, y1: 1 } });
+
+  expect(vi.mocked(driver.seek).mock.calls).toEqual([
+    [5, true],
+    [10, false],
+  ]);
+});
+
 function layoutFindingOf(
   code: LayoutIssueCode,
   severity: "error" | "warning" | "info",
@@ -1187,6 +1220,28 @@ describe("check pipeline", () => {
     expect(report.browserSkipped).toBe(true);
     expect(report.runtime.findings[0]?.code).toBe("check_lint_failure");
   });
+
+  it.each([
+    { lint: cleanLint(), handed: true },
+    { lint: lintWith("error", "lint_error", "Lint error."), handed: false },
+  ])(
+    "closes the browser started during lint unless the browser pass took it",
+    async ({ lint, handed }) => {
+      const prelaunched = {
+        launched: Promise.resolve(undefined),
+        take: vi.fn(async () => undefined),
+        discard: vi.fn(async () => undefined),
+      };
+      const { deps, runBrowserCheck } = dependencies(fakeDriver(), { lint });
+      deps.prelaunchBrowser = vi.fn(async () => prelaunched);
+      await runCheckPipeline(PROJECT, DEFAULT_CHECK_OPTIONS, deps);
+
+      expect(runBrowserCheck.mock.calls.map((call) => call[4])).toEqual(
+        handed ? [prelaunched] : [],
+      );
+      expect(prelaunched.discard).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("marks browserSkipped false once a browser session actually runs", async () => {
     const { report } = await runScenario(fakeDriver());
@@ -1593,6 +1648,117 @@ describe("check pipeline", () => {
     expect(checkExitCode(strict.report)).toBe(1);
   });
 
+  it("splits samples over a helper page and returns what one page seeking every sample returns", async () => {
+    const pageOfTime = () => {
+      let seeked = 0;
+      return fakeDriver({
+        seek: vi.fn(async (time: number) => {
+          seeked = time;
+        }),
+        collectLayout: vi.fn(async (time: number) => [layoutIssue("error", { time })]),
+        collectLayoutGeometry: vi.fn(async () => `geometry-${seeked}`),
+        collectContrast: vi.fn(async (time: number) => ({
+          entries: [contrastEntry({ ...anchor("#hero", time), ratio: 1 + time })],
+          pngBase64: `${PNG_BASE64}-${time}`,
+        })),
+      });
+    };
+    const options = { ...DEFAULT_CHECK_OPTIONS, contrast: true };
+    const { timings: _serialTimings, ...serial } = await runAuditGrid(
+      pageOfTime(),
+      options,
+      noMotion(),
+    );
+    const primary = pageOfTime();
+    const helper = pageOfTime();
+    const { timings: _splitTimings, ...split } = await runAuditGrid(
+      primary,
+      options,
+      noMotion(),
+      Promise.resolve([helper]),
+    );
+
+    expect(split).toEqual(serial);
+    expect(serial.layoutIssues.length).toBeGreaterThan(2);
+    expect(helper.initialize).toHaveBeenCalledWith(true);
+    const seeks = (driver: CheckAuditDriver) =>
+      vi.mocked(driver.seek).mock.calls.map(([time]) => time);
+    expect(seeks(helper).length).toBeGreaterThan(0);
+    expect(seeks(primary).filter((time) => seeks(helper).includes(time))).toEqual([]);
+  });
+
+  it("redoes a crashed helper page's samples on the first page and returns the serial result", async () => {
+    let helperSeeks = 0;
+    const pageOfTime = (crashOnSeek?: number) => {
+      let seeked = 0;
+      return fakeDriver({
+        markSamples: vi.fn(),
+        seek: vi.fn(async (time: number) => {
+          if (crashOnSeek !== undefined && ++helperSeeks === crashOnSeek)
+            throw new Error("Target closed");
+          await new Promise((resolve) => setImmediate(resolve));
+          seeked = time;
+        }),
+        collectLayout: vi.fn(async (time: number) => [layoutIssue("error", { time })]),
+        collectLayoutGeometry: vi.fn(async () => `geometry-${seeked}`),
+      });
+    };
+    const { timings: _serialTimings, ...serial } = await runAuditGrid(
+      pageOfTime(),
+      DEFAULT_CHECK_OPTIONS,
+      noMotion(),
+    );
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    const primary = pageOfTime();
+    const helper = pageOfTime(2);
+    const { timings: _splitTimings, ...split } = await runAuditGrid(
+      primary,
+      DEFAULT_CHECK_OPTIONS,
+      noMotion(),
+      Promise.resolve([helper]),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    process.off("unhandledRejection", unhandled);
+
+    expect(split).toEqual(serial);
+    expect(helperSeeks).toBe(2);
+    expect(helper.markSamples).toHaveBeenLastCalledWith("drop");
+    expect(unhandled).not.toHaveBeenCalled();
+  });
+
+  it("waits for the helper's sample in flight when the first page runs out of samples", async () => {
+    const pageOfTime = (onSeek?: () => Promise<void>) =>
+      fakeDriver({
+        seek: vi.fn(async () => onSeek?.()),
+        collectLayout: vi.fn(async (time: number) => [layoutIssue("error", { time })]),
+        collectLayoutGeometry: vi.fn(async () => "geometry"),
+      });
+    const serialPage = pageOfTime();
+    const { timings: _serialTimings, ...serial } = await runAuditGrid(
+      serialPage,
+      DEFAULT_CHECK_OPTIONS,
+      noMotion(),
+    );
+    const samples = vi.mocked(serialPage.collectLayout).mock.calls.length;
+    let firstPageSeeks = 0;
+    let othersTaken!: () => void;
+    const allOthersTaken = new Promise<void>((resolve) => (othersTaken = resolve));
+    const primary = pageOfTime(async () => {
+      if (++firstPageSeeks === samples - 1) setImmediate(othersTaken);
+    });
+    const helper = pageOfTime(() => allOthersTaken);
+    const { timings: _splitTimings, ...split } = await runAuditGrid(
+      primary,
+      DEFAULT_CHECK_OPTIONS,
+      noMotion(),
+      Promise.resolve([helper]),
+    );
+
+    expect(vi.mocked(helper.seek).mock.calls).toHaveLength(1);
+    expect(split).toEqual(serial);
+  });
+
   it("fails clearly without samples when no timeline duration is available, without hanging", async () => {
     const driver = fakeDriver({ getDuration: vi.fn(async () => 0) });
     await expect(runAuditGrid(driver, DEFAULT_CHECK_OPTIONS, noMotion())).rejects.toThrow(
@@ -1725,6 +1891,44 @@ describe("check pipeline", () => {
       expect(report.layout.findings.some((finding) => finding.code === "sweep_static")).toBe(false);
     });
 
+    it.each([
+      ["a timeline that looks stuck", (_sample: number) => "frozen", true],
+      ["a still card", (_sample: number) => "frozen", false],
+      ["an audio-only sweep", (sample: number) => `still\u001f${sample}`, false],
+    ])("does not flag %s when the rendered frames differ", async (_case, geometry, stuck) => {
+      let sample = 0;
+      const driver = fakeDriver({
+        getDuration: vi.fn(async () => 6),
+        collectLayoutGeometry: vi.fn(async () => geometry(sample++)),
+        ...(stuck ? {} : { collectSeekClock: vi.fn(async () => []) }),
+        ...framesOfSeekedTime(),
+      });
+      const { report } = await runScenario(driver);
+
+      expect(report.layout.findings.some((finding) => finding.code === "sweep_static")).toBe(false);
+      expect(report.ok).toBe(true);
+    });
+
+    it("still warns when the frames change with the wall clock rather than the seek", async () => {
+      let frame = 0;
+      const driver = fakeDriver({
+        getDuration: vi.fn(async () => 6),
+        collectLayoutGeometry: vi.fn(async () => "frozen"),
+        collectSeekClock: vi.fn(async () => []),
+        captureFrame: vi.fn(async () => `frame${frame++}`),
+      });
+      const { report } = await runScenario(driver);
+
+      expect(sweepOf(report)).toEqual([["warning", "Nothing on screen moved under seek."]]);
+    });
+
+    it("never captures frames when the signature already moved", async () => {
+      const driver = fakeDriver({ getDuration: vi.fn(async () => 6) });
+      await runScenario(driver);
+
+      expect(driver.captureFrame).not.toHaveBeenCalled();
+    });
+
     it("does not flag --at times the user picked on a still end card", async () => {
       const driver = fakeDriver({
         getDuration: vi.fn(async () => 53.7),
@@ -1789,6 +1993,136 @@ describe("check pipeline", () => {
 
       expect(report.motion.findings.some((finding) => finding.code === "motion_frozen")).toBe(true);
       expect(report.layout.findings.some((finding) => finding.code === "sweep_static")).toBe(false);
+    });
+  });
+
+  describe("keepsMoving frame check", () => {
+    function frozenLiveness(withinSelector?: string) {
+      const motion: MotionSpecResolution = {
+        kind: "valid",
+        path: "/project/index.motion.json",
+        spec: { assertions: [{ kind: "keepsMoving", ...(withinSelector && { withinSelector }) }] },
+      };
+      const scope = withinSelector ?? "*";
+      const overrides = {
+        getDuration: vi.fn(async () => 6),
+        collectMotionFrame: vi.fn(async (time: number) => ({
+          time,
+          data: {},
+          liveness: { [scope]: "unchanging" },
+        })),
+      };
+      return { motion, overrides };
+    }
+
+    function frozenFindings(report: CheckReport): string[] {
+      return report.motion.findings
+        .filter((finding) => finding.code === "motion_frozen")
+        .map((finding) => finding.message);
+    }
+
+    it.each([undefined, "#scene"])(
+      "does not call a scope (%s) frozen when its rendered frames keep changing",
+      async (withinSelector) => {
+        const { motion, overrides } = frozenLiveness(withinSelector);
+        let frame = 0;
+        const driver = fakeDriver({
+          ...overrides,
+          captureFrame: vi.fn(async () => `frame${frame++}`),
+        });
+        const { report } = await runScenario(driver, {}, { motion });
+
+        expect(frozenFindings(report)).toEqual([]);
+        expect(driver.captureFrame).toHaveBeenCalledWith(withinSelector);
+        // One capture per half maxStaticSec, not one per motion frame.
+        expect(vi.mocked(driver.captureFrame).mock.calls.length).toBeLessThanOrEqual(7);
+      },
+    );
+
+    async function frozenIssues(driver: CheckAuditDriver, motion: MotionSpecResolution) {
+      const result = await runAuditGrid(driver, DEFAULT_CHECK_OPTIONS, motion);
+      return result.motionIssues.map((issue) => `${issue.code} ${issue.message}`);
+    }
+
+    it("splits a frozen span where its frames change once, keeping both halves", async () => {
+      const { motion, overrides } = frozenLiveness();
+      let seeked = 0;
+      const driver = fakeDriver({
+        ...overrides,
+        seek: vi.fn(async (time: number) => {
+          seeked = time;
+        }),
+        captureFrame: vi.fn(async () => (seeked < 3 ? "before" : "after")),
+      });
+
+      expect(await frozenIssues(driver, motion)).toEqual([
+        expect.stringContaining("between 0s and 3s"),
+        expect.stringContaining("between 3s and 6s"),
+      ]);
+    });
+
+    it("keeps the second of two frozen spans that touch at a cut", async () => {
+      const motion: MotionSpecResolution = {
+        kind: "valid",
+        path: "/project/index.motion.json",
+        spec: { assertions: [{ kind: "keepsMoving" }] },
+      };
+      // A hold, a hard cut at 3 s into a second hold, then motion from 5.05 s.
+      const shot = (index: number) => (index < 60 ? "a" : index < 101 ? "b" : String(index));
+      const driver = fakeDriver({
+        getDuration: vi.fn(async () => 6),
+        collectMotionFrame: vi.fn(async (time: number) => ({
+          time,
+          data: {},
+          liveness: { "*": shot(Math.round(time * 20)) },
+        })),
+      });
+
+      expect(await frozenIssues(driver, motion)).toEqual([
+        expect.stringContaining("between 0s and 3s"),
+        expect.stringContaining("between 3s and 5.05s"),
+      ]);
+    });
+
+    it("leaves a scope that matched nothing as missing while another scope is frozen", async () => {
+      const motion: MotionSpecResolution = {
+        kind: "valid",
+        path: "/project/index.motion.json",
+        spec: {
+          assertions: [{ kind: "keepsMoving" }, { kind: "keepsMoving", withinSelector: "#typo" }],
+        },
+      };
+      const driver = fakeDriver({
+        getDuration: vi.fn(async () => 6),
+        collectMotionFrame: vi.fn(async (time: number) => ({
+          time,
+          data: {},
+          liveness: { "*": "unchanging", "#typo": "" },
+        })),
+      });
+
+      const codes = (await frozenIssues(driver, motion)).map((line) => line.split(" ")[0]);
+      expect(codes).toEqual(["motion_frozen", "motion_selector_missing"]);
+    });
+
+    it("never captures frames when the liveness already moved", async () => {
+      const motion: MotionSpecResolution = {
+        kind: "valid",
+        path: "/project/index.motion.json",
+        spec: { assertions: [{ kind: "keepsMoving" }] },
+      };
+      const driver = fakeDriver({
+        getDuration: vi.fn(async () => 6),
+        collectMotionFrame: vi.fn(async (time: number) => ({
+          time,
+          data: {},
+          liveness: { "*": String(time) },
+        })),
+      });
+      const { report } = await runScenario(driver, {}, { motion });
+
+      expect(frozenFindings(report)).toEqual([]);
+      expect(driver.captureFrame).not.toHaveBeenCalled();
     });
   });
 });
@@ -2310,6 +2644,58 @@ describe("dense motion-overlap re-sampling", () => {
     });
     const { report } = await runScenario(driver);
     expect(driver.collectOverlap).toHaveBeenCalled();
+    expect(report.layout.findings.some((f) => f.code === "content_overlap")).toBe(true);
+  });
+
+  it("keeps a long film's dense pass to a fixed number of seeks", async () => {
+    const clipEdges = Array.from({ length: 433 }, (_, i) => [i * 1.2, i * 1.2 + 1.1]).flat();
+    const driver = fakeDriver({
+      getDuration: vi.fn(async () => 540),
+      getClipEdges: async () => clipEdges,
+    });
+    await runScenario(driver);
+    expect(vi.mocked(driver.seekGeometry).mock.calls.length).toBeLessThanOrEqual(240);
+  });
+
+  it("still promotes an overlap held on a long film", async () => {
+    const held = (time: number): boolean => time >= 200 && time <= 260;
+    const driver = fakeDriver({
+      getDuration: vi.fn(async () => 540),
+      collectLayout: vi.fn(async (_time: number) => []),
+      collectOverlap: vi.fn(async (time: number) =>
+        held(time) ? [layoutIssue("warning", { time, code: "content_overlap" })] : [],
+      ),
+    });
+    const { report } = await runScenario(driver);
+    expect(report.layout.findings).toContainEqual(
+      expect.objectContaining({ code: "content_overlap", severity: "error" }),
+    );
+    expect(vi.mocked(driver.seekGeometry).mock.calls.length).toBeLessThanOrEqual(240);
+  });
+
+  it("spends one hold probe on an overlap that stays the whole film", async () => {
+    const driver = fakeDriver({
+      getDuration: vi.fn(async () => 540),
+      collectLayout: vi.fn(async (_time: number) => []),
+      collectOverlap: vi.fn(async (time: number) => [
+        layoutIssue("warning", { time, code: "content_overlap" }),
+      ]),
+    });
+    await runScenario(driver);
+    expect(vi.mocked(driver.seekGeometry).mock.calls.length).toBeLessThanOrEqual(181);
+  });
+
+  it("samples a short clip the uniform grid steps over", async () => {
+    const inShortClip = (time: number): boolean => time > 101 && time < 101.8;
+    const driver = fakeDriver({
+      getDuration: vi.fn(async () => 540),
+      getClipEdges: async () => [101, 101.8],
+      collectLayout: vi.fn(async (_time: number) => []),
+      collectOverlap: vi.fn(async (time: number) =>
+        inShortClip(time) ? [layoutIssue("warning", { time, code: "content_overlap" })] : [],
+      ),
+    });
+    const { report } = await runScenario(driver);
     expect(report.layout.findings.some((f) => f.code === "content_overlap")).toBe(true);
   });
 });

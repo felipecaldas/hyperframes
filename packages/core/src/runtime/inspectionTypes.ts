@@ -19,6 +19,7 @@ export interface ElementRef {
   hfId: string | null;
   classes: string[];
   composition: string | null;
+  withinId?: string;
 }
 export interface RuntimeAnimation {
   stack: string | null;

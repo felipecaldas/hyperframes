@@ -32,6 +32,12 @@
       "types": "./dist/telemetryRedaction.d.ts",
       "environments": ["browser", "bun", "node"]
     },
+    "./distributed-fps": {
+      "source": "./src/distributedFps.ts",
+      "runtime": "./dist/distributedFps.js",
+      "types": "./dist/distributedFps.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
     "./beats": {
       "source": "./src/beats/index.ts",
       "runtime": "./dist/beats/index.js",
@@ -252,6 +258,12 @@
       "source": "./src/audibleVideo.ts",
       "runtime": "./dist/audibleVideo.js",
       "types": "./dist/audibleVideo.d.ts",
+      "environments": ["browser", "bun", "node"]
+    },
+    "./audio-analysis": {
+      "source": "./src/audioAnalysis.ts",
+      "runtime": "./dist/audioAnalysis.js",
+      "types": "./dist/audioAnalysis.d.ts",
       "environments": ["browser", "bun", "node"]
     },
     "./audio-gain": {

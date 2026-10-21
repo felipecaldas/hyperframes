@@ -11,6 +11,8 @@
 
 import type { Page } from "puppeteer-core";
 import { parseAnimatedGifMetadata } from "@hyperframes/core";
+import { safeFetch } from "./assetDownloader.js";
+import { readBoundedResponse } from "./readBoundedResponse.js";
 
 export interface CatalogedAsset {
   url: string;
@@ -276,11 +278,12 @@ function appendNote(existing: string | undefined, note: string): string {
 
 async function readAssetBytes(url: string): Promise<Uint8Array | null> {
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-    if (!response.ok) return null;
-    const contentLength = response.headers.get("content-length");
-    if (contentLength && Number.parseInt(contentLength, 10) > 25 * 1024 * 1024) return null;
-    return new Uint8Array(await response.arrayBuffer());
+    const response = await safeFetch(url, { signal: AbortSignal.timeout(15_000) });
+    if (!response?.ok) {
+      await response?.body?.cancel().catch(() => {});
+      return null;
+    }
+    return await readBoundedResponse(response, 25 * 1024 * 1024);
   } catch {
     return null;
   }

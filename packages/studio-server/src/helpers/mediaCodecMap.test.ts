@@ -206,7 +206,7 @@ describe("shouldPrewarmProxy", () => {
     return { codecName, browserHostile: true, representativeMime: null, hasAlpha: false };
   }
 
-  it.each(["hevc", "prores"])(
+  it.each(["hevc", "prores", "theora"])(
     "pre-warms %s, which has no cross-platform browser decode",
     (codecName) => {
       expect(shouldPrewarmProxy(facts(codecName))).toBe(true);

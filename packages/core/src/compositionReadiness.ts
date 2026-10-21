@@ -63,7 +63,7 @@ function isActiveAtFirstFrame(
   while (current) {
     if (isTimedElement(current)) {
       if (
-        !isRuntimeElementVisibleAt(current as HTMLElement, {
+        !isRuntimeElementVisibleAt(current, {
           currentTime: 0,
           compositionDuration: Number.POSITIVE_INFINITY,
           canonicalFps: 30,

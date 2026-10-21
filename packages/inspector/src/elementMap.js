@@ -74,6 +74,7 @@ export function collectElementDom() {
           : siblingCount(element, simple) === 1
             ? simple
             : `${CSS.escape(tag)}:nth-child(${siblings.indexOf(element) + 1})`,
+      position: siblings.indexOf(element) + 1,
       groupSelector: simple,
       siblingMatchCount: siblingCount(element, simple),
       children: [],
@@ -120,10 +121,27 @@ function mediaIdentifier(source) {
   return source;
 }
 
-function describe(node, selector, count) {
+function childPlaces(members) {
+  const runs = [];
+  let start = members[0].position;
+  let previous = start;
+  for (const member of members.slice(1)) {
+    if (member.position === previous + 1) {
+      previous = member.position;
+      continue;
+    }
+    runs.push(start === previous ? `${start}` : `${start}-${previous}`);
+    start = previous = member.position;
+  }
+  runs.push(start === previous ? `${start}` : `${start}-${previous}`);
+  return runs.join(",");
+}
+
+function describe(node, selector, count, places = "") {
   const fields = [selector];
   if (!selector.startsWith(node.tag)) fields.push(node.tag);
-  if (count > 1) fields.push(`×${count}`);
+  if (count > 1) fields.push(`×${count}${places ? ` @${places}` : ""}`);
+  if (node.generated) fields.push("(generated)");
   if (node.id && selector !== `#${node.id}`) fields.push(`id=${JSON.stringify(node.id)}`);
   if (node.classes.length && !selector.includes("."))
     fields.push(`class=${JSON.stringify(node.classes.join(" "))}`);
@@ -159,7 +177,8 @@ export function formatElementMap(snapshot, { file = "index.html" } = {}) {
   function emit(members, depth, repeatedParents = false) {
     const node = members[0];
     const selector = members.length > 1 && !repeatedParents ? node.groupSelector : node.relative;
-    lines.push(`${"  ".repeat(depth)}${describe(node, selector, members.length)}`);
+    const places = members.length > 1 && !repeatedParents ? childPlaces(members) : "";
+    lines.push(`${"  ".repeat(depth)}${describe(node, selector, members.length, places)}`);
     entries.push({
       line: lines.length,
       selectors: members.map((member) => member.selector),

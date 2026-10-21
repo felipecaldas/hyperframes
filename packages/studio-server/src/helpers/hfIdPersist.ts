@@ -1,4 +1,4 @@
-import { ensureHfIds } from "@hyperframes/parsers/hf-ids";
+import { stampHfIdsInPlace } from "@hyperframes/parsers/hf-ids";
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -94,7 +94,7 @@ export function stampFileHfIds(filePath: string): string | null {
   try {
     if (!fstatSync(fd).isFile()) return null;
     const html = readFileSync(fd, "utf-8");
-    const normalized = ensureHfIds(html);
+    const normalized = stampHfIdsInPlace(html);
     // Attribute count, not string equality — linkedom serialization normalizes
     // quote style/whitespace even when no ids were minted.
     const idsBefore = (html.match(/\bdata-hf-id=/g) ?? []).length;

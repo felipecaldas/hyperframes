@@ -162,14 +162,33 @@ export const FALLBACK_CORE_SKILLS: readonly string[] = [
 
 // ── Hashing ────────────────────────────────────────────────────────────────
 
+// By-products of using a skill (bytecode from running its scripts, installs, OS
+// and editor files), skipped on both the source and the installed side so a
+// tree that ran a script hashes the same as a clean checkout.
+const RUNTIME_DIRS = new Set([
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  "node_modules",
+]);
+const RUNTIME_FILES = new Set([".DS_Store", "Thumbs.db"]);
+const RUNTIME_FILE_SUFFIXES = [".pyc", ".pyo", ".swp", ".swo", "~"];
+
+function isRuntimeFile(name: string): boolean {
+  return RUNTIME_FILES.has(name) || RUNTIME_FILE_SUFFIXES.some((s) => name.endsWith(s));
+}
+
 function listFilesSorted(dir: string): string[] {
   const out: string[] = [];
   const walk = (d: string): void => {
     for (const name of readdirSync(d)) {
-      if (name === ".DS_Store") continue;
       const p = join(d, name);
-      if (statSync(p).isDirectory()) walk(p);
-      else out.push(p);
+      if (statSync(p).isDirectory()) {
+        if (!RUNTIME_DIRS.has(name)) walk(p);
+      } else if (!isRuntimeFile(name)) {
+        out.push(p);
+      }
     }
   };
   walk(dir);

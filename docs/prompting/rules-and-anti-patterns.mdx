@@ -64,7 +64,10 @@ Two more ways an SVG "line draws itself" effect (animated `strokeDasharray` / `s
 `hyperframes check` flags a text block covered by another element as `text_occluded`, and
 two attributes waive it: `data-layout-allow-overlap` for intentional layering, and
 `data-layout-allow-occlusion` for something deliberately painted over type. Both are
-legitimate — a caption designed to sit behind a matted subject needs one.
+legitimate. A caption behind a transparent `<video>` cutout needs neither: `check` reads the
+cutout's decoded alpha at each sample, reports how much of each word the subject covers as
+info, and fails only a word that is 80% hidden or two neighbouring words that are each half
+hidden.
 
 Two things about them are worth knowing before you reach for either:
 

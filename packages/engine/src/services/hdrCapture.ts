@@ -20,10 +20,7 @@
  */
 
 import type { Page, Browser, PuppeteerNode } from "puppeteer-core";
-import { existsSync, readdirSync } from "fs";
-import { join } from "path";
-import { homedir } from "os";
-import { sigintLaunchOptions } from "./browserManager.js";
+import { resolveFullChromePath, sigintLaunchOptions } from "./browserManager.js";
 
 // ── PQ (SMPTE 2084) OETF ─────────────────────────────────────────────────────
 
@@ -220,40 +217,6 @@ export function float16ToPqRgb(
 
 // ── Chrome launch ─────────────────────────────────────────────────────────────
 
-function resolveHeadedChromePath(): string | undefined {
-  const baseDir = join(homedir(), ".cache", "puppeteer", "chrome");
-  if (!existsSync(baseDir)) return undefined;
-  const versions = readdirSync(baseDir).sort().reverse();
-  for (const version of versions) {
-    const candidates = [
-      join(
-        baseDir,
-        version,
-        "chrome-mac-arm64",
-        "Google Chrome for Testing.app",
-        "Contents",
-        "MacOS",
-        "Google Chrome for Testing",
-      ),
-      join(
-        baseDir,
-        version,
-        "chrome-mac-x64",
-        "Google Chrome for Testing.app",
-        "Contents",
-        "MacOS",
-        "Google Chrome for Testing",
-      ),
-      join(baseDir, version, "chrome-linux64", "chrome"),
-      join(baseDir, version, "chrome-win64", "chrome.exe"),
-    ];
-    for (const binary of candidates) {
-      if (existsSync(binary)) return binary;
-    }
-  }
-  return undefined;
-}
-
 /**
  * Launch a headed Chrome browser with WebGPU enabled.
  */
@@ -275,7 +238,7 @@ export async function launchHdrBrowser(
   }
   if (!ppt) throw new Error("Neither puppeteer nor puppeteer-core found");
 
-  const chromePath = resolveHeadedChromePath();
+  const chromePath = resolveFullChromePath();
   if (!chromePath) {
     throw new Error(
       "[HDR] No Chrome binary found. Install: npx @puppeteer/browsers install chrome@stable",

@@ -2,9 +2,11 @@ export function captureBrowserArgs(
   disableWebgl: boolean,
   viewportWidth: number,
   viewportHeight: number,
+  platform: NodeJS.Platform = process.platform,
 ): string[] {
+  const needsLinuxSandboxException = platform === "linux";
   return [
-    "--no-sandbox",
+    ...(needsLinuxSandboxException ? ["--no-sandbox"] : []),
     "--disable-dev-shm-usage",
     ...(disableWebgl
       ? ["--disable-gpu"]

@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/engine",
-  "version": "0.8.154",
+  "version": "0.8.183",
   "description": "Seekable web page to video rendering engine (Puppeteer + FFmpeg)",
   "repository": {
     "type": "git",
@@ -35,6 +35,11 @@
       "import": "./src/services/systemMemory.ts",
       "types": "./src/services/systemMemory.ts"
     },
+    "./wsl-host": {
+      "bun": "./src/services/wslHost.ts",
+      "import": "./src/services/wslHost.ts",
+      "types": "./src/services/wslHost.ts"
+    },
     "./shader-transitions": {
       "bun": "./src/utils/shaderTransitions.ts",
       "import": "./src/utils/shaderTransitions.ts",
@@ -61,6 +66,10 @@
         "import": "./dist/services/systemMemory.js",
         "types": "./dist/services/systemMemory.d.ts"
       },
+      "./wsl-host": {
+        "import": "./dist/services/wslHost.js",
+        "types": "./dist/services/wslHost.d.ts"
+      },
       "./shader-transitions": {
         "import": "./dist/utils/shaderTransitions.js",
         "types": "./dist/utils/shaderTransitions.d.ts"
@@ -71,7 +80,7 @@
     "types": "./dist/index.d.ts"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node ../../scripts/rewrite-relative-import-extensions.mjs dist",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { accurate } from "./ratchet.mjs";
-import { entry, score, UNDO_WRITE_MAX_MS } from "./report.mjs";
+import { entry, score, slowRunner, UNDO_WRITE_MAX_MS } from "./report.mjs";
 
 const frames = { intervals: [16, 17, 16], work: [2, 3, 2] };
 const result = (undo) => ({
@@ -58,5 +58,22 @@ describe("a case's verdict", () => {
     const slow = { ...frames, work: [9, 1, 1], control: frames };
     expect(score({ id: "case" }, { ...result({}), smooth: slow }).pass).toBe(false);
     expect(score({ id: "case" }, { error: "boom" }).pass).toBe(false);
+  });
+});
+
+describe("the slow runner check", () => {
+  it("stops a shard whose first four cases ran about 6x slower than a healthy runner", () => {
+    // A merge queue shard that ran into its timeout: its first cases, in seconds.
+    expect(slowRunner([95.5, 133.7, 57.9, 107.5, 91.6])).toBe(95.5);
+  });
+
+  it("lets a healthy runner through, including one slow case among its first four", () => {
+    // The slowest first four of 20 healthy shards had a 22 s median; one healthy case took 92.7 s.
+    expect(slowRunner([22, 21.4, 19.8, 23.1])).toBeNull();
+    expect(slowRunner([14, 92.7, 16.3, 15.2])).toBeNull();
+  });
+
+  it("waits for four cases before judging", () => {
+    expect(slowRunner([95.5, 133.7, 107.5])).toBeNull();
   });
 });

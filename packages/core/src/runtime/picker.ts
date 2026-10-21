@@ -127,11 +127,62 @@ export function createPickerModule(deps: PickerModuleDeps): PickerModule {
     return () => style.remove();
   }
 
+  function isDecorativeVeil(el: HTMLElement, win: Window): boolean {
+    const style = win.getComputedStyle(el);
+    const opacity = Number.parseFloat(style.opacity || "1");
+    const faint = Number.isFinite(opacity) && opacity < 0.2;
+    if (faint && !(el.textContent ?? "").trim()) {
+      const image = style.backgroundImage;
+      if (image && image !== "none") return true;
+    }
+    return faintFilterPaint(el, win);
+  }
+
+  function isFilterDefinition(el: Element): boolean {
+    if (el.namespaceURI !== "http://www.w3.org/2000/svg") return false;
+    const tag = el.tagName.toLowerCase();
+    return tag === "filter" || tag === "defs" || tag.startsWith("fe");
+  }
+
+  function isFilterRect(el: Element): boolean {
+    if (el.namespaceURI !== "http://www.w3.org/2000/svg") return false;
+    if (el.tagName.toLowerCase() !== "rect") return false;
+    const attr = (el.getAttribute("filter") ?? "").trim();
+    if (attr && attr !== "none") return true;
+    const painted = el.ownerDocument.defaultView?.getComputedStyle(el).filter ?? "none";
+    return painted.startsWith("url(");
+  }
+
+  function isOnlyFilterPaint(el: Element): boolean {
+    if ((el.textContent ?? "").trim()) return false;
+    if (isFilterDefinition(el) || isFilterRect(el)) return true;
+    const children = [...el.children];
+    return children.length > 0 && children.every((child) => isOnlyFilterPaint(child));
+  }
+
+  function isFaint(el: Element, win: Window): boolean {
+    const opacity = Number.parseFloat(win.getComputedStyle(el).opacity || "1");
+    return Number.isFinite(opacity) && opacity < 0.2;
+  }
+
+  function faintFilterPaint(el: Element, win: Window): boolean {
+    if (!isOnlyFilterPaint(el)) return false;
+    for (
+      let current: Element | null = el;
+      current && current !== document.body && current !== document.documentElement;
+      current = current.parentElement
+    ) {
+      if (isFaint(current, win) && isOnlyFilterPaint(current)) return true;
+    }
+    return false;
+  }
+
   function isEffectivelyHidden(el: HTMLElement): boolean {
     const win = el.ownerDocument.defaultView;
     if (!win) return false;
     let current: HTMLElement | null = el;
     if (win.getComputedStyle(el).visibility === "hidden") return true;
+    if (isDecorativeVeil(el, win)) return true;
     while (current && current !== document.body && current !== document.documentElement) {
       const computed = win.getComputedStyle(current);
       if (computed.display === "none") return true;

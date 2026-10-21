@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findMusicAudioSrc } from "./beatFile";
+import { findMusicAudioSrc, parseBeats, serializeBeats } from "./beatFile";
 
 describe("findMusicAudioSrc", () => {
   it("finds a video with sound tagged as music", () => {
@@ -89,5 +89,26 @@ describe("findMusicAudioSrc", () => {
         '<audio id="music" data-timeline-role="voiceover" src="speech.wav"><audio id="bgm" src="right.wav">',
       ),
     ).toBe("right.wav");
+  });
+});
+
+describe("serializeBeats", () => {
+  it("writes version 1 with the audio path and each beat's time and strength, rounded to the millisecond", () => {
+    const text = serializeBeats([0.31249, 0.9375], [0.87654, 1], "assets/song.mp3");
+    expect(text).toBe(
+      `${JSON.stringify(
+        {
+          version: 1,
+          audio: "assets/song.mp3",
+          beats: [
+            { time: 0.312, strength: 0.877 },
+            { time: 0.938, strength: 1 },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    expect(parseBeats(text)).toEqual({ times: [0.312, 0.938], strengths: [0.877, 1] });
   });
 });

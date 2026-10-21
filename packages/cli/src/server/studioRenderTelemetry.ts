@@ -16,6 +16,7 @@ import {
   renderObservabilityTelemetryPayload,
 } from "../telemetry/renderObservability.js";
 import { bytesToMb } from "../telemetry/system.js";
+import type { RenderCpuTelemetryPayload } from "../telemetry/renderCpu.js";
 
 export interface StudioRenderOpts {
   fps: Fps;
@@ -118,6 +119,7 @@ export function emitStudioRenderError(
   failedStage: string | undefined,
   err: unknown,
   job: RenderJob | undefined,
+  cpuUsage: RenderCpuTelemetryPayload = {},
 ): void {
   // `workers` is intentionally omitted: studio renders don't accept a
   // user-supplied worker count (the producer picks its default), so on early
@@ -138,6 +140,7 @@ export function emitStudioRenderError(
     distinctId: opts.distinctId,
     ...renderJobObservabilityTelemetryPayload(job),
     ...memSnapshot(),
+    ...cpuUsage,
   });
 }
 
@@ -145,6 +148,7 @@ export function emitStudioRenderComplete(
   opts: StudioRenderOpts,
   elapsedMs: number,
   perf: RenderPerfSummary | undefined,
+  cpuUsage: RenderCpuTelemetryPayload = {},
 ): void {
   if (opts.telemetryOptOut === true) return;
   trackRenderComplete({
@@ -159,5 +163,6 @@ export function emitStudioRenderComplete(
     distinctId: opts.distinctId,
     ...perfPayload(perf, elapsedMs),
     ...memSnapshot(),
+    ...cpuUsage,
   });
 }

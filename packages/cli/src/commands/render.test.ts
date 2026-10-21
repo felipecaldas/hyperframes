@@ -1,5 +1,5 @@
 // fallow-ignore-file code-duplication
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -86,6 +86,7 @@ const ffmpegEncoderState = vi.hoisted(() => ({
   mode: "software" as "software" | "gpu",
   error: null as Error | null,
   encoders: null as string | null,
+  usableGpu: false,
 }));
 const orphanCleanupState = vi.hoisted(() => ({
   calls: 0,
@@ -210,10 +211,14 @@ vi.mock("../browser/ffmpeg.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../browser/ffmpeg.js")>();
   return {
     ...actual,
-    detectH264EncoderModeForRender: vi.fn(async () => {
+    detectH264EncoderModeForRender: vi.fn(async (_path: string, gpuRequested: boolean) => {
       if (ffmpegEncoderState.error) throw ffmpegEncoderState.error;
       if (ffmpegEncoderState.encoders !== null)
-        return actual.resolveH264EncoderMode(ffmpegEncoderState.encoders, false);
+        return actual.resolveH264EncoderMode(
+          ffmpegEncoderState.encoders,
+          gpuRequested,
+          ffmpegEncoderState.usableGpu,
+        );
       return ffmpegEncoderState.mode;
     }),
     findFFmpeg: vi.fn(() => "/usr/bin/ffmpeg"),
@@ -222,6 +227,7 @@ vi.mock("../browser/ffmpeg.js", async (importOriginal) => {
 });
 
 vi.mock("../browser/preflight.js", () => ({
+  checkDisk: vi.fn(() => ({ name: "Disk", ok: true, level: "ok", detail: "mock" })),
   runEnvironmentChecks: vi.fn(async () => {
     preflightState.onRun?.();
     return preflightState.result;
@@ -236,6 +242,7 @@ vi.mock("../browser/preflight.js", () => ({
 // the shared `~/.cache/hyperframes/chrome`, racing other packages' browser
 // tests in CI.
 vi.mock("../browser/manager.js", () => ({
+  sweepKilledInstalls: vi.fn(async () => {}),
   ensureBrowser: vi.fn(async (options?: { signal?: AbortSignal }) => {
     await browserManagerState.onEnsure?.(options?.signal);
     return { executablePath: "/mock/chrome", source: "cache" };
@@ -261,10 +268,30 @@ vi.mock("../utils/orphanCleanup.js", () => ({
   processParentPid: vi.fn((pid: number) => orphanCleanupState.parentPid(pid)),
 }));
 
+const cpuSamplerState = vi.hoisted(() => ({
+  samplers: [] as { requesterOptedIn: boolean; stopped: boolean }[],
+}));
+vi.mock("../telemetry/renderCpu.js", () => ({
+  startRenderCpuSampler: (requesterOptedIn = true) => {
+    const sampler = { requesterOptedIn, stopped: false };
+    cpuSamplerState.samplers.push(sampler);
+    return {
+      stop: () => {
+        sampler.stopped = true;
+        return { cpuBusyAvgPct: 57, cpuBusyPeakPct: 90 };
+      },
+    };
+  },
+}));
+
 // Collect the heavy render module once, after Vitest has hoisted the mocks
 // above. Keeping this import out of a hook means parallel monorepo contention
 // cannot turn module collection into a `beforeAll` timeout.
 const renderModule = await import("./render.js");
+
+// A private folder, never a fixed /tmp path: a render writes history into its project.
+const PROJECT_DIR = mkdtempSync(join(tmpdir(), "hf-render-project-"));
+afterAll(() => rmSync(PROJECT_DIR, { recursive: true, force: true }));
 
 describe("renderLocal browser GPU config", () => {
   const savedEnv = new Map<string, string | undefined>();
@@ -314,9 +341,9 @@ describe("renderLocal browser GPU config", () => {
     await expect(
       runRenderLint(
         {
-          project: { dir: "/tmp/project" },
+          project: { dir: PROJECT_DIR },
           entryFile: undefined,
-          renderTarget: "/tmp/project/index.html",
+          renderTarget: join(PROJECT_DIR, "index.html"),
           strictErrors: false,
           strictAll: false,
           effectiveQuiet: true,
@@ -357,9 +384,9 @@ describe("renderLocal browser GPU config", () => {
     await expect(
       runRenderLint(
         {
-          project: { dir: "/tmp/project" },
+          project: { dir: PROJECT_DIR },
           entryFile: undefined,
-          renderTarget: "/tmp/project/index.html",
+          renderTarget: join(PROJECT_DIR, "index.html"),
           strictErrors: false,
           strictAll: false,
           effectiveQuiet: false,
@@ -400,9 +427,9 @@ describe("renderLocal browser GPU config", () => {
 
     await runRenderLint(
       {
-        project: { dir: "/tmp/project" },
+        project: { dir: PROJECT_DIR },
         entryFile: undefined,
-        renderTarget: "/tmp/project/index.html",
+        renderTarget: join(PROJECT_DIR, "index.html"),
         strictErrors: false,
         strictAll: false,
         effectiveQuiet: false,
@@ -417,9 +444,9 @@ describe("renderLocal browser GPU config", () => {
     logSpy.mockClear();
     await runRenderLint(
       {
-        project: { dir: "/tmp/project" },
+        project: { dir: PROJECT_DIR },
         entryFile: undefined,
-        renderTarget: "/tmp/project/index.html",
+        renderTarget: join(PROJECT_DIR, "index.html"),
         strictErrors: false,
         strictAll: false,
         effectiveQuiet: false,
@@ -454,6 +481,7 @@ describe("renderLocal browser GPU config", () => {
     ffmpegEncoderState.mode = "software";
     ffmpegEncoderState.error = null;
     ffmpegEncoderState.encoders = null;
+    ffmpegEncoderState.usableGpu = false;
     orphanCleanupState.calls = 0;
     orphanCleanupState.killed = 0;
     orphanCleanupState.parentPid = () => null;
@@ -471,10 +499,40 @@ describe("renderLocal browser GPU config", () => {
     delete process.env.HF_DE_PARALLEL_ROUTER;
   });
 
+  it("reports the render's CPU use on render_complete and render_error and stops measuring", async () => {
+    const { trackRenderComplete, trackRenderError } = await import("../telemetry/events.js");
+    vi.mocked(trackRenderComplete).mockClear();
+    vi.mocked(trackRenderError).mockClear();
+    cpuSamplerState.samplers = [];
+    const options = {
+      fps: { num: 30, den: 1 },
+      quality: "standard",
+      format: "mp4",
+      gpu: false,
+      browserGpuMode: "software",
+      hdrMode: "auto",
+      quiet: true,
+      throwOnError: true,
+    } as const;
+
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", options);
+    producerState.executeImpl = async () => {
+      throw new Error("capture failed");
+    };
+    await expect(renderLocal(PROJECT_DIR, "/tmp/out.mp4", options)).rejects.toThrow(
+      "capture failed",
+    );
+
+    const cpu = { cpuBusyAvgPct: 57, cpuBusyPeakPct: 90 };
+    expect(vi.mocked(trackRenderComplete).mock.calls[0]?.[0]).toMatchObject(cpu);
+    expect(vi.mocked(trackRenderError).mock.calls[0]?.[0]).toMatchObject(cpu);
+    expect(cpuSamplerState.samplers.map((s) => s.stopped)).toEqual([true, true]);
+  });
+
   it("cleans orphaned browser trees before starting a local render", async () => {
     orphanCleanupState.killed = 1;
 
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -503,7 +561,7 @@ describe("renderLocal browser GPU config", () => {
     };
 
     await expect(
-      renderLocal("/tmp/project", "/tmp/out.mp4", {
+      renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
         fps: { num: 30, den: 1 },
         quality: "standard",
         format: "mp4",
@@ -538,7 +596,7 @@ describe("renderLocal browser GPU config", () => {
       };
       const priorListeners = new Set(process.listeners(signal));
 
-      const render = renderLocal("/tmp/project", "/tmp/out.mp4", {
+      const render = renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
         fps: { num: 30, den: 1 },
         quality: "standard",
         format: "mp4",
@@ -585,7 +643,7 @@ describe("renderLocal browser GPU config", () => {
 
     await expect(
       renderLocal(
-        "/tmp/project",
+        PROJECT_DIR,
         "/tmp/out.mp4",
         {
           fps: { num: 30, den: 1 },
@@ -617,6 +675,69 @@ describe("renderLocal browser GPU config", () => {
     vi.restoreAllMocks();
   });
 
+  it.each([
+    { quiet: false, interrupted: false, emits: true },
+    { quiet: false, interrupted: true, emits: true },
+    { quiet: true, interrupted: false, emits: false },
+  ])("writes the failure diagnostic only for piped non-JSON output: %j", async (mode) => {
+    const projectDir = mkdtempSync(join(tmpdir(), "hf-render-diagnostic-"));
+    const failures = [
+      {
+        stage: "prepare",
+        reason: "ffmpeg_failed",
+        owner: "system",
+        retryable: false,
+        subprocess: { exitCode: 7, terminationReason: "exit" },
+        detail: "private-detail",
+        elementId: "private-id",
+      },
+    ];
+    producerState.executeImpl = async (job) => {
+      if (mode.interrupted) throw Object.assign(new Error("failed"), { audioFailures: failures });
+      job.warnings = [
+        {
+          code: "audio_processing_failed",
+          message: "private-warning",
+          details: { audioFailures: failures },
+        },
+      ];
+      throw new Error("failed");
+    };
+    const originalIsTTY = process.stdout.isTTY;
+    Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true });
+    let output = "";
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      output += String(chunk);
+      return true;
+    });
+    try {
+      await expect(
+        renderLocal(projectDir, join(projectDir, "out.mp4"), {
+          fps: { num: 30, den: 1 },
+          quality: "standard",
+          format: "mp4",
+          gpu: false,
+          browserGpuMode: "software",
+          hdrMode: "auto",
+          quiet: mode.quiet,
+          throwOnError: true,
+        }),
+      ).rejects.toThrow("failed");
+      const lines = output.split("\n").filter((line) => line.startsWith("@hf-diagnostic "));
+      expect(lines).toHaveLength(mode.emits ? 1 : 0);
+      if (mode.emits) {
+        expect(
+          JSON.parse((lines[0] ?? "").slice("@hf-diagnostic ".length)).audioFailures[0].subprocess
+            .exitCode,
+        ).toBe(7);
+        expect(lines[0] ?? "").not.toMatch(/private-/);
+      }
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", { value: originalIsTTY, configurable: true });
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
   it("logs only warnings and errors from the producer under --quiet", async () => {
     const options = {
       fps: { num: 30, den: 1 },
@@ -626,9 +747,9 @@ describe("renderLocal browser GPU config", () => {
       browserGpuMode: "software",
       hdrMode: "auto",
     } as const;
-    await renderLocal("/tmp/project", "/tmp/out.mp4", { ...options, quiet: true });
-    await renderLocal("/tmp/project", "/tmp/out.mp4", { ...options, quiet: false });
-    await renderLocal("/tmp/project", "/tmp/out.mp4", { ...options, quiet: true, debug: true });
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", { ...options, quiet: true });
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", { ...options, quiet: false });
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", { ...options, quiet: true, debug: true });
 
     expect(producerState.loggerLevels).toEqual(["warn", "info", "debug"]);
   });
@@ -636,7 +757,7 @@ describe("renderLocal browser GPU config", () => {
   it("passes an explicit software override for --no-browser-gpu even when env requests hardware", async () => {
     setEnv("PRODUCER_BROWSER_GPU_MODE", "hardware");
 
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -677,7 +798,7 @@ describe("renderLocal browser GPU config", () => {
       });
     };
 
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -707,7 +828,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("forwards browserGpuMode='auto' into producer config (probe-then-choose)", async () => {
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -731,7 +852,7 @@ describe("renderLocal browser GPU config", () => {
     const prev = process.env.PRODUCER_FORCE_SCREENSHOT;
     process.env.PRODUCER_FORCE_SCREENSHOT = "true";
     try {
-      await renderLocal("/tmp/project", "/tmp/out.mp4", {
+      await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
         fps: { num: 30, den: 1 },
         quality: "standard",
         format: "mp4",
@@ -749,7 +870,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("keeps the screenshot clamp when --resolution supersamples", async () => {
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -765,7 +886,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("passes an explicit hardware override for default local browser GPU", async () => {
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -783,7 +904,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("passes preflight-resolved FFmpeg, FFprobe, and browser paths through env", async () => {
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -801,7 +922,7 @@ describe("renderLocal browser GPU config", () => {
   it("falls back to hardware encoding when FFmpeg omits libx264", async () => {
     ffmpegEncoderState.mode = "gpu";
 
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "high",
       format: "mp4",
@@ -821,7 +942,7 @@ describe("renderLocal browser GPU config", () => {
     const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     await expect(
-      renderLocal("/tmp/project", "/tmp/out.mp4", {
+      renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
         fps: { num: 30, den: 1 },
         quality: "high",
         format: "mp4",
@@ -837,11 +958,31 @@ describe("renderLocal browser GPU config", () => {
     expect(stderr.mock.calls.flat().join(" ")).toContain("libx264");
   });
 
+  it("refuses a --gpu MP4 before capture when no GPU encoder works and FFmpeg lacks libx264", async () => {
+    ffmpegEncoderState.encoders = " V....D libopenh264 OpenH264\n V....D h264_videotoolbox H.264\n";
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(
+      renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
+        fps: { num: 30, den: 1 },
+        quality: "high",
+        format: "mp4",
+        gpu: true,
+        browserGpuMode: "software",
+        hdrMode: "auto",
+        quiet: true,
+      }),
+    ).rejects.toMatchObject({ name: "CliRuntimeError" });
+
+    expect(producerState.createdJobs).toHaveLength(0);
+    expect(stderr.mock.calls.flat().join(" ")).toContain("libx264");
+  });
+
   it.each(["webm", "mov", "png-sequence"] as const)(
     "does not require H.264 for %s",
     async (format) => {
       ffmpegEncoderState.encoders = " V....D libvpx-vp9 VP9\n";
-      await renderLocal("/tmp/project", `/tmp/out.${format}`, {
+      await renderLocal(PROJECT_DIR, `/tmp/out.${format}`, {
         fps: { num: 30, den: 1 },
         quality: "high",
         format,
@@ -858,7 +999,7 @@ describe("renderLocal browser GPU config", () => {
     "does not reject potential HEVC output in %s mode",
     async (hdrMode) => {
       ffmpegEncoderState.encoders = " V....D libx265 HEVC\n";
-      await renderLocal("/tmp/project", "/tmp/out.mp4", {
+      await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
         fps: { num: 30, den: 1 },
         quality: "high",
         format: "mp4",
@@ -875,7 +1016,7 @@ describe("renderLocal browser GPU config", () => {
     ffmpegEncoderState.error = new Error("encoder probe timed out");
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "high",
       format: "mp4",
@@ -893,7 +1034,7 @@ describe("renderLocal browser GPU config", () => {
     ffmpegEncoderState.error = new Error("encoder probe timed out");
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "high",
       format: "mp4",
@@ -923,7 +1064,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("forwards parsed --variables payload to createRenderJob", async () => {
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -938,7 +1079,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("forwards format: png-sequence through to createRenderJob", async () => {
-    await renderLocal("/tmp/project", "/tmp/frames", {
+    await renderLocal(PROJECT_DIR, "/tmp/frames", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "png-sequence",
@@ -952,7 +1093,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("forwards format: hls and hlsSegmentSeconds through to createRenderJob", async () => {
-    await renderLocal("/tmp/project", "/tmp/stream", {
+    await renderLocal(PROJECT_DIR, "/tmp/stream", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "hls",
@@ -971,10 +1112,11 @@ describe("renderLocal browser GPU config", () => {
   // the software encoder's forced-keyframe lock.
   it("fails an HLS render instead of falling back to GPU H.264", async () => {
     ffmpegEncoderState.encoders = " V....D h264_videotoolbox H.264 (VideoToolbox)\n";
+    ffmpegEncoderState.usableGpu = true;
     const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     await expect(
-      renderLocal("/tmp/project", "/tmp/stream", {
+      renderLocal(PROJECT_DIR, "/tmp/stream", {
         fps: { num: 30, den: 1 },
         quality: "standard",
         format: "hls",
@@ -990,7 +1132,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("forwards format: gif and gifLoop through to createRenderJob", async () => {
-    await renderLocal("/tmp/project", "/tmp/demo.gif", {
+    await renderLocal(PROJECT_DIR, "/tmp/demo.gif", {
       fps: { num: 15, den: 1 },
       quality: "standard",
       format: "gif",
@@ -1006,7 +1148,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("forwards videoFrameFormat to createRenderJob", async () => {
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -1021,7 +1163,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("forwards debug mode to createRenderJob", async () => {
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -1036,7 +1178,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("defaults to best-effort readiness", async () => {
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -1050,7 +1192,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("forwards an explicit strict readiness opt-in", async () => {
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -1065,7 +1207,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("omits variables from createRenderJob when not provided", async () => {
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -1079,7 +1221,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("forwards entryFile to createRenderJob when --composition is set", async () => {
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -1094,7 +1236,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("omits entryFile from createRenderJob when --composition is not set", async () => {
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -1108,7 +1250,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("forwards --browser-timeout into resolveConfig as pageNavigationTimeout (ms)", async () => {
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -1125,7 +1267,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("forwards vp9CpuUsed into resolveConfig when set", async () => {
-    await renderLocal("/tmp/project", "/tmp/out.webm", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.webm", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "webm",
@@ -1142,7 +1284,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("omits pageNavigationTimeout from resolveConfig when --browser-timeout is not set", async () => {
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -1160,7 +1302,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("forwards outputResolution to createRenderJob when --resolution is set", async () => {
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -1175,7 +1317,7 @@ describe("renderLocal browser GPU config", () => {
   });
 
   it("omits outputResolution from createRenderJob by default", async () => {
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -1193,7 +1335,7 @@ describe("renderLocal browser GPU config", () => {
     const { consumeCommandResult } = await import("../utils/commandResult.js");
     consumeCommandResult();
 
-    await renderLocal("/tmp/project", "/tmp/out.mp4", {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
       quality: "standard",
       format: "mp4",
@@ -1300,7 +1442,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
       telemetryNoticeShown: true,
     };
     delete process.env.HF_DE_PARALLEL_ROUTER;
-    await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     expect(process.env.HF_DE_PARALLEL_ROUTER).toBeUndefined();
   });
 
@@ -1313,7 +1455,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
       telemetryNoticeShown: true,
     };
     process.env.HF_DE_PARALLEL_ROUTER = "true";
-    await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     expect(process.env.HF_DE_PARALLEL_ROUTER).toBe("true");
   });
 
@@ -1326,7 +1468,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
       deParallelRouterTrialFired: false,
       telemetryNoticeShown: true,
     };
-    await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     expect(process.env.HF_DE_PARALLEL_ROUTER).toBeUndefined();
   });
 
@@ -1337,7 +1479,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
       telemetryNoticeShown: true,
     };
     process.env.HF_DE_PARALLEL_ROUTER = "false";
-    await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     expect(process.env.HF_DE_PARALLEL_ROUTER).toBe("false");
   });
 
@@ -1351,7 +1493,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
       deParallelRouterTrialFired: true,
       telemetryNoticeShown: true,
     };
-    await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     expect(process.env.HF_DE_PARALLEL_ROUTER).toBe("false");
   });
 
@@ -1374,7 +1516,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
           drawElement: { parallelRouter: "reverted" },
         };
       };
-      await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+      await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
       expect(process.env.HF_DE_PARALLEL_ROUTER).toBe("false");
       expect(configState.writeConfigCalls).toContainEqual(
         expect.objectContaining({ deParallelRouterTrialFired: true }),
@@ -1396,7 +1538,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
         drawElement: { parallelRouter: "reverted" },
       };
     };
-    await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     expect(process.env.HF_DE_PARALLEL_ROUTER).toBe("true");
   });
 
@@ -1410,7 +1552,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
       deParallelRouterTrialFired: false,
       telemetryNoticeShown: true,
     };
-    await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     expect(process.env.HF_DE_PARALLEL_ROUTER).toBeUndefined();
   });
 
@@ -1426,7 +1568,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
         drawElement: { parallelRouter: "routed" },
       };
     };
-    await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     // A write DOES happen — the render-count backstop is tracked on every
     // engaged render — but it must not flip deParallelRouterTrialFired.
     expect(configState.writeConfigCalls).toContainEqual(
@@ -1449,7 +1591,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
         drawElement: { parallelRouter: "reverted" },
       };
     };
-    await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     expect(configState.writeConfigCalls).toContainEqual(
       expect.objectContaining({ deParallelRouterTrialFired: true }),
     );
@@ -1472,7 +1614,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
         drawElement: { parallelRouter: "none" },
       };
     };
-    await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     expect(configState.writeConfigCalls).toHaveLength(0);
   });
 
@@ -1486,7 +1628,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
       job.errorDetails = { observability: { capture: { deParallelRouter: "routed" } } };
       throw new Error("render cancelled");
     };
-    await renderLocal("/tmp/project", "/tmp/out.mp4", { ...baseOptions, throwOnError: true }).catch(
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", { ...baseOptions, throwOnError: true }).catch(
       () => {},
     );
     // Still counts toward the render-count backstop (the router DID engage),
@@ -1510,7 +1652,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
       job.errorDetails = { observability: { capture: { deParallelRouter: "reverted" } } };
       throw new Error("worker crashed even after fallback");
     };
-    await renderLocal("/tmp/project", "/tmp/out.mp4", { ...baseOptions, throwOnError: true }).catch(
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", { ...baseOptions, throwOnError: true }).catch(
       () => {},
     );
     expect(configState.writeConfigCalls).toContainEqual(
@@ -1534,7 +1676,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
         drawElement: { parallelRouter: "routed" },
       };
     };
-    await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     expect(process.env.HF_DE_PARALLEL_ROUTER).toBeUndefined();
     expect(configState.disk.deParallelRouterTrialFired).toBe(false);
 
@@ -1544,7 +1686,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
         drawElement: { parallelRouter: "reverted" },
       };
     };
-    await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
 
     expect(configState.writeConfigCalls).toContainEqual(
       expect.objectContaining({ deParallelRouterTrialFired: true }),
@@ -1566,7 +1708,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
       telemetryNoticeShown: true,
     };
     const { manageDeParallelRouterBreaker: _omitted, ...programmaticOptions } = baseOptions;
-    await renderLocal("/tmp/project", "/tmp/out.mp4", programmaticOptions);
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", programmaticOptions);
     expect(process.env.HF_DE_PARALLEL_ROUTER).toBeUndefined();
     expect(configState.writeConfigCalls).toHaveLength(0);
   });
@@ -1583,14 +1725,14 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
         drawElement: { parallelRouter: "routed" },
       };
     };
-    await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     expect(process.env.HF_DE_PARALLEL_ROUTER).toBeUndefined();
 
     // A real interactive user can't do this mid-batch, but a wrapper script
     // invoking the CLI programmatically in the same process could — the
     // explicit override must still win on the next call.
     process.env.HF_DE_PARALLEL_ROUTER = "false";
-    await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     expect(process.env.HF_DE_PARALLEL_ROUTER).toBe("false");
   });
 
@@ -1611,7 +1753,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
     };
 
     for (let i = 0; i < 30; i++) {
-      await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+      await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     }
 
     expect(process.env.HF_DE_PARALLEL_ROUTER).toBeUndefined();
@@ -1637,7 +1779,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
         drawElement: { parallelRouter: "reverted" },
       };
     };
-    await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
 
     expect(configState.disk.deParallelRouterTrialFired).toBe(true);
     // Two writes: the one whose mirror failed, then the retry that mirrored.
@@ -1660,7 +1802,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
         drawElement: { parallelRouter: "reverted" },
       };
     };
-    await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     // The fired flag was verified and re-asserted (idempotent)...
     expect(configState.disk.deParallelRouterTrialFired).toBe(true);
     // ...but the render counter is deliberately NOT re-applied — a lost
@@ -1682,14 +1824,14 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
         drawElement: { parallelRouter: "reverted" },
       };
     };
-    await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     // Nothing could persist...
     expect(configState.disk.deParallelRouterTrialFired).toBe(false);
     // ...but the in-process latch still blocks the next render from
     // re-running the path that just failed (review finding) — and now does
     // it by writing an explicit "false", since absent means ON.
     producerState.executeImpl = async () => undefined;
-    await renderLocal("/tmp/project", "/tmp/out.mp4", baseOptions);
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     expect(process.env.HF_DE_PARALLEL_ROUTER).toBe("false");
   });
 });
@@ -1758,10 +1900,10 @@ describe("checkRenderResolutionPreflight", () => {
     expect(result?.kind).toBe("hdr-incompatible");
   });
 
-  it("classifies a preset smaller than the composition as downsampling", async () => {
-    // 3840×2160 comp + landscape (1920×1080): same 16:9 aspect, target smaller.
+  it("passes a preset smaller than the composition", async () => {
+    // 3840×2160 comp + landscape (1920×1080): same 16:9 aspect, rendered at 0.5× DPR.
     const result = await checkRenderResolutionPreflight(comp(3840, 2160), "landscape", noModes);
-    expect(result?.kind).toBe("downsampling");
+    expect(result).toBeUndefined();
   });
 
   it("classifies a non-integer upscale as non-integer-scale", async () => {
@@ -1831,12 +1973,18 @@ describe("checkRenderResolutionPreflight", () => {
       expect(result?.kind).toBe("hdr-incompatible");
     });
 
-    it("still flags downsampling + aspect-agnostic (same-orientation, smaller preset)", async () => {
-      // 3840×2160 comp with `--resolution 1080p` → `landscape` (1920×1080).
-      // Same orientation, but tier smaller than comp — user asked for a
-      // downsample. That's a real incompatibility, not an orientation swap.
+    it("passes `--resolution 1080p` on a 4K composition (a smaller, same-orientation preset)", async () => {
       const result = await checkRenderResolutionPreflight(comp(3840, 2160), "landscape", agnostic);
-      expect(result?.kind).toBe("downsampling");
+      expect(result).toBeUndefined();
+    });
+
+    it("never adapts `--resolution 4k` to another tier: a 1922×1080 composition is refused, not rendered at 480p", async () => {
+      const result = await checkRenderResolutionPreflight(
+        comp(1922, 1080),
+        "landscape-4k",
+        agnostic,
+      );
+      expect(result?.kind).toBeDefined();
     });
 
     it("does NOT auto-clear when the flag was explicit (orientation-locked preset stays strict)", async () => {
@@ -1870,14 +2018,10 @@ describe("checkRenderResolutionPreflight", () => {
       expect(result?.message).toMatch(/preset whose orientation matches|omit --resolution/i);
     });
 
-    it("blocks a portrait-4K comp + `1080p` downsample early (orientation-flip masks the tier gap)", async () => {
-      // 2160×3840 (portrait 4K) + `--resolution 1080p` — the compile stage
-      // remaps `landscape` → `portrait` (1080×1920), and *then* the preset
-      // is smaller than the composition. The un-remapped preflight let this
-      // slip through as an aspect-mismatch downgrade; the remap-then-check
-      // catches the real failure — downsampling — early.
+    it("passes a portrait-4K comp + `1080p` once remapped to portrait (a smaller preset)", async () => {
+      // 2160×3840 + `--resolution 1080p` remaps `landscape` → `portrait` (1080×1920), rendered at 0.5× DPR.
       const result = await checkRenderResolutionPreflight(comp(2160, 3840), "landscape", agnostic);
-      expect(result?.kind).toBe("downsampling");
+      expect(result).toBeUndefined();
     });
 
     it("blocks a portrait 720p comp + `1080p` non-integer upscale early (orientation-flip masks the fractional DPR)", async () => {

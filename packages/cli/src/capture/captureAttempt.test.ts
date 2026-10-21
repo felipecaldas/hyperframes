@@ -45,3 +45,21 @@ describe("captureWebsiteAttempt output folders", () => {
     },
   );
 });
+
+describe("captureWebsiteAttempt URL admission", () => {
+  it.each([
+    "file:///etc/passwd",
+    "data:text/html,hello",
+    "ftp://example.com/file",
+    "https://user:secret@example.com/",
+  ])("rejects %s before creating capture folders or launching a browser", async (url) => {
+    const root = mkdtempSync(join(tmpdir(), "hf-capture-url-"));
+    onTestFinished(() => rmSync(root, { recursive: true, force: true }));
+    const opts = { url, outputDir: root };
+    await expect(
+      captureWebsiteAttempt(opts, undefined, false, watchdog, createPartialCaptureState(opts)),
+    ).rejects.toThrow("HTTP or HTTPS URL without credentials");
+    expect(readdirSync(root)).toEqual([]);
+    expect(ensureBrowserMock).not.toHaveBeenCalled();
+  });
+});

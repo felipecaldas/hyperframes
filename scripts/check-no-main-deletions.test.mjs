@@ -59,3 +59,12 @@ test("the allowlist does not silence an unrelated deletion", () => {
   assert.deepEqual(deleted, ["packages/cli/src/something-else.ts"]);
   assert.equal(ALLOWED_DELETIONS.has("packages/cli/src/something-else.ts"), false);
 });
+
+test("the Chrome beat analyzer removal is explicitly scoped", () => {
+  for (const path of [
+    "packages/cli/src/beats/headlessAnalyzer.ts",
+    "packages/cli/scripts/build-beat-analyzer.mjs",
+  ])
+    assert.match(ALLOWED_DELETIONS.get(path) ?? "", /TypeScript beat tracker/);
+  assert.equal(ALLOWED_DELETIONS.has("packages/core/src/beats/beatDetection.ts"), false);
+});

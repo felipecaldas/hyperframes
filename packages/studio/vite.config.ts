@@ -336,9 +336,6 @@ export default defineConfig({
       plugins: [stableStylesCssPlugin()],
     },
   },
-  optimizeDeps: {
-    include: ["bpm-detective"],
-  },
   server: {
     port: 5190,
     watch: {

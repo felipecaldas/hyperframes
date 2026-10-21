@@ -71,7 +71,7 @@ it("only warns when the report cannot be recorded; the exit status is the check'
   }
 });
 
-it("still reports the check when another process holds history", async () => {
+it("records the check when another process holds history, without waiting for it", async () => {
   const project = mkdtempSync(join(tmpdir(), "hf-check-history-held-"));
   const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
   const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -80,7 +80,8 @@ it("still reports the check when another process holds history", async () => {
     "<html><body>Missing composition metadata</body></html>",
   );
   const previousWait = historyDeps.ownerWaitMs;
-  historyDeps.ownerWaitMs = 0;
+  // A wait for the holder outlasts the test: recording the report must not take it.
+  historyDeps.ownerWaitMs = 60_000;
   const held = await openProjectHistory({
     projectDir: project,
     historyRoot: historyDeps.historyRoot,
@@ -89,12 +90,10 @@ it("still reports the check when another process holds history", async () => {
   try {
     await runCommand(check, { rawArgs: [project, "--json"] });
     const output = JSON.parse(String(log.mock.calls.at(-1)?.[0])) as CheckReport;
-    expect(output).not.toHaveProperty("saved");
+    expect(output).toHaveProperty("saved.id");
     expect(output.browserSkipped).toBe(true);
     expect(consumeCommandResult().exitCode).toBe(checkExitCode(output));
-    expect(
-      warn.mock.calls.some((call) => String(call[0]).includes("Check report was not recorded")),
-    ).toBe(true);
+    expect(warn.mock.calls.flat().join("\n")).not.toContain("not recorded");
   } finally {
     historyDeps.ownerWaitMs = previousWait;
     await held.close();

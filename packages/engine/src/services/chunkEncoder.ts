@@ -29,7 +29,7 @@ import {
   buildVideoToolboxRateControlArgs,
   mapPresetForGpuEncoder,
 } from "../utils/gpuEncoder.js";
-import { type HdrTransfer, getHdrEncoderColorParams } from "../utils/hdr.js";
+import { type HdrTransfer, getHdrEncoderColorParams, hdrFrameTagsFilter } from "../utils/hdr.js";
 import { withEvenDimensionPad } from "../utils/evenDimensions.js";
 import {
   SDR_CAPTURE_TO_BT709_FILTER,
@@ -102,6 +102,8 @@ export interface MuxVideoWithAudioOptions extends Partial<
    * depend on the file extension alone.
    */
   audioCodec?: "aac";
+  /** Replaces `-i <videoPath>` (which is then unused), e.g. with a concat-demuxer input. */
+  videoInputArgs?: readonly string[];
   /**
    * @deprecated No longer used. `-avoid_negative_ts` is never passed for
    * mp4/mov muxing (ffmpeg's `auto` default already resolves to `disabled`
@@ -110,7 +112,6 @@ export interface MuxVideoWithAudioOptions extends Partial<
    * source compatibility; it will be removed in a future major.
    */
   preserveAudioPrimingEditList?: boolean;
-  /** Hard cap copied audio to the already-encoded video's exact duration. */
 }
 
 async function shouldCopyAacSidecar(
@@ -257,7 +258,8 @@ export function buildEncoderArgs(
     options = { ...options, hdr: undefined };
   }
 
-  const args: string[] = [...inputArgs, "-r", fpsToFfmpegArg(fps)];
+  // Without -xerror, ffmpeg ends the video at the first frame file it cannot read and still exits 0.
+  const args: string[] = ["-xerror", ...inputArgs, "-r", fpsToFfmpegArg(fps)];
   const shouldUseGpu = useGpu && gpuEncoder !== null;
 
   if (codec === "h264" || codec === "h265") {
@@ -459,8 +461,9 @@ export function buildEncoderArgs(
 
     // Range conversion: Chrome's full-range capture → limited/TV range; SDR also
     // converts to the BT.709 matrix it is tagged with.
+    const hdrTags = options.hdr ? hdrFrameTagsFilter(options.hdr.transfer) : undefined;
     const sdrFilter = options.hdr ? undefined : SDR_CAPTURE_TO_BT709_FILTER;
-    const captureFilter = sdrFilter ?? "scale=in_range=pc:out_range=tv";
+    const captureFilter = sdrFilter ?? `scale=in_range=pc:out_range=tv,${hdrTags}`;
     if (gpuEncoder === "vaapi") {
       // vaapi already runs `format=nv12,hwupload`; the nv12 conversion aligns
       // odd dimensions before upload, so only prepend the colour conversion.
@@ -473,7 +476,12 @@ export function buildEncoderArgs(
       // encoder. They hit the same "height not divisible by 2" abort as
       // libx264 on an odd-sized 4:2:0 canvas, so pad odd dimensions up to even
       // on the software side before the encode.
-      const vf = withEvenDimensionPad(sdrFilter ?? "", pixelFormat, options.width, options.height);
+      const vf = withEvenDimensionPad(
+        sdrFilter ?? hdrTags ?? "",
+        pixelFormat,
+        options.width,
+        options.height,
+      );
       if (vf) args.push("-vf", vf);
     } else {
       // The scale filter handles both 8-bit and 10-bit correctly. Pad odd
@@ -503,6 +511,25 @@ export function buildEncoderArgs(
 
 const framesReader = (onFrames?: (frames: number) => void) =>
   onFrames && ffmpegStatsReader(({ frames }) => frames !== undefined && onFrames(frames));
+
+/** ffmpeg's frame read error, which the encoder summary pushes out of the stderr tail, and where it stopped. */
+function frameReadFailure(
+  stderr: string,
+  framePattern: string,
+  startNumber: number,
+  framesRead: number,
+  frameCount: number,
+): string {
+  const lines = stderr.match(/^.*(?:Error during demuxing|Could not open file).*$/gm) ?? [];
+  const readError = [...new Set(lines.map((line) => line.trim()))].join("; ");
+  if (!readError) return "";
+  const name = framePattern.replace(/%0(\d+)d/, (_, width: string) =>
+    String(startNumber + framesRead).padStart(Number(width), "0"),
+  );
+  const at = framesRead < frameCount ? ` at ${name} (${framesRead} of ${frameCount} read)` : "";
+  return `[FFmpeg] could not read a frame${at}: ${readError}\n`;
+}
+
 const secondsReader = (onSeconds?: (seconds: number) => void) =>
   onSeconds && ffmpegStatsReader(({ seconds }) => seconds !== undefined && onSeconds(seconds));
 
@@ -543,10 +570,14 @@ export async function encodeFramesFromDir(
   const inputArgs = ["-framerate", fpsToFfmpegArg(options.fps), "-i", inputPath];
   const args = buildEncoderArgs(options, inputArgs, outputPath, gpuEncoder);
   const encodeTimeout = config?.ffmpegEncodeTimeout ?? DEFAULT_CONFIG.ffmpegEncodeTimeout;
+  let framesRead = 0;
   const result = await runFfmpeg(args, {
     signal,
     timeout: encodeTimeout,
-    onStderr: framesReader(onFramesEncoded),
+    onStderr: framesReader((frames) => {
+      framesRead = frames;
+      onFramesEncoded?.(frames);
+    }),
   });
   if (result.terminationReason === "abort") {
     return {
@@ -566,7 +597,8 @@ export async function encodeFramesFromDir(
       framesEncoded: 0,
       fileSize: 0,
       error: appendEncodeTimeoutMessage(
-        formatFfmpegError(result.exitCode, result.stderr),
+        frameReadFailure(result.stderr, framePattern, 0, framesRead, frameCount) +
+          formatFfmpegError(result.exitCode, result.stderr),
         result.terminationReason === "deadline",
         encodeTimeout,
       ),
@@ -714,19 +746,27 @@ export async function encodeFramesChunkedConcat(
     if (options.useGpu) gpuEncoder = await getCachedGpuEncoder();
     const args = buildEncoderArgs(options, inputArgs, chunkPath, gpuEncoder);
     const encodeTimeout = config?.ffmpegEncodeTimeout ?? DEFAULT_CONFIG.ffmpegEncodeTimeout;
+    let framesRead = 0;
     const processResult = await runFfmpeg(args, {
       signal,
       timeout: encodeTimeout,
-      onStderr: framesReader(
-        onFramesEncoded && ((frames) => onFramesEncoded(startNumber + frames)),
-      ),
+      onStderr: framesReader((frames) => {
+        framesRead = frames;
+        onFramesEncoded?.(startNumber + frames);
+      }),
     });
     const chunkResult = {
       success: processResult.success,
       error: processResult.success
         ? undefined
         : appendEncodeTimeoutMessage(
-            `Chunk ${i} encode failed: ${processResult.stderr.slice(-400)}`,
+            frameReadFailure(
+              processResult.stderr,
+              framePattern,
+              startNumber,
+              framesRead,
+              framesInChunk,
+            ) + `Chunk ${i} encode failed: ${processResult.stderr.slice(-400)}`,
             processResult.terminationReason === "deadline",
             encodeTimeout,
           ),
@@ -785,7 +825,7 @@ export async function muxVideoWithAudio(
   const isWebm = outputPath.endsWith(".webm");
   const isMov = outputPath.endsWith(".mov");
   const shouldCopyAudio = isWebm ? false : await shouldCopyAacSidecar(audioPath, config);
-  const args = ["-i", videoPath, "-i", audioPath, "-c:v", "copy"];
+  const args = [...(config?.videoInputArgs ?? ["-i", videoPath]), "-i", audioPath, "-c:v", "copy"];
 
   if (isWebm) {
     args.push("-c:a", "libopus", "-b:a", "128k");

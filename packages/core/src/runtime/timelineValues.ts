@@ -20,22 +20,43 @@ function declared(value: unknown): DeclaredValue {
   }
   return unknown();
 }
+const record = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+function declaredEase(ease: unknown): DeclaredValue {
+  return typeof ease === "function"
+    ? { kind: "expression", value: "custom function" }
+    : declared(ease);
+}
 /** Authored endpoints, never sampled values or inferred previous-tween state. */
 export function animationValues(
   vars: Record<string, unknown>,
   properties: string[],
+  keyframesEase?: unknown,
 ): AnimationValues {
-  const startAt =
-    vars.startAt && typeof vars.startAt === "object"
-      ? (vars.startAt as Record<string, unknown>)
-      : {};
+  const startAt = record(vars.startAt);
+  const endpoints = (property: string, end: unknown, start: unknown) => ({
+    property,
+    from: declared(vars.runBackwards ? end : start),
+    to: vars.runBackwards ? unknown() : declared(end),
+  });
+  const segment = declaredEase(vars.ease);
+  const whole = keyframesEase === undefined ? undefined : declaredEase(keyframesEase);
   return {
     basis: "authored-tween",
-    properties: properties.map((property) => ({
-      property,
-      from: declared(vars.runBackwards ? vars[property] : startAt[property]),
-      to: vars.runBackwards ? unknown() : declared(vars[property]),
-    })),
-    ease: declared(vars.ease),
+    properties: properties.flatMap((property) => {
+      const nested = record(vars[property]);
+      const keys = property === "attr" || property === "css" ? Object.keys(nested) : [];
+      if (!keys.length) return [endpoints(property, vars[property], startAt[property])];
+      const nestedStart = record(startAt[property]);
+      return keys.map((key) => endpoints(`${property}.${key}`, nested[key], nestedStart[key]));
+    }),
+    ease: whole
+      ? {
+          kind: "expression",
+          value: `${whole.value ?? "?"} across keyframes, ${segment.value ?? "?"} per segment`,
+        }
+      : segment,
   };
 }

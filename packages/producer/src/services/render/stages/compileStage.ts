@@ -89,6 +89,8 @@ export interface CompileStageInput {
   allowSystemFontCapture?: boolean;
   /** Render-time variable overrides (`--variables`); see CompileForRenderOptions.variables. */
   variables?: Record<string, unknown>;
+  /** Absolute project paths not on disk, readable at these URLs instead. */
+  urlByAbsentLocalPath?: ReadonlyMap<string, string>;
 }
 
 export interface CompileStageResult {
@@ -171,6 +173,7 @@ export async function runCompileStage(input: CompileStageInput): Promise<Compile
     allowSystemFontCapture,
     abortSignal,
     variables: input.variables,
+    urlByAbsentLocalPath: input.urlByAbsentLocalPath,
     animatedGifCacheDir: cfg.extractCacheDir
       ? join(cfg.extractCacheDir, "animated-gif")
       : undefined,
@@ -336,10 +339,10 @@ export async function runCompileStage(input: CompileStageInput): Promise<Compile
     hdrRequested: job.config.hdrMode === "force-hdr",
     alphaRequested: needsAlpha,
   });
-  const outputWidth = width * deviceScaleFactor;
-  const outputHeight = height * deviceScaleFactor;
-  if (deviceScaleFactor > 1) {
-    log.info("Supersampling composition via deviceScaleFactor", {
+  const outputWidth = Math.round(width * deviceScaleFactor);
+  const outputHeight = Math.round(height * deviceScaleFactor);
+  if (deviceScaleFactor !== 1) {
+    log.info("Scaling composition via deviceScaleFactor", {
       compositionWidth: width,
       compositionHeight: height,
       outputResolution: effectiveResolution,

@@ -211,40 +211,15 @@ describe("computeWorkerSizing", () => {
 });
 
 describe("shouldDisableBrowserPoolForParallelWorker", () => {
-  const linuxHeadlessWorker = {
-    parallel: true,
-    platform: "linux" as NodeJS.Platform,
-    deviceScaleFactor: 1,
-    headlessShellPath: "/tmp/chrome-headless-shell",
-  };
+  // heygen-com/hyperframes#5548: pages sharing one browser share its
+  // connections to the file server, so every platform isolates workers.
+  it("gives every parallel worker its own browser", () => {
+    expect(shouldDisableBrowserPoolForParallelWorker({ parallel: true })).toBe(true);
+  });
 
-  it.each([
-    ["BeginFrame", false],
-    ["forced screenshot", true],
-  ])(
-    "disables the browser pool for parallel Linux/headless %s workers",
-    (_mode, forceScreenshot) => {
-      expect(
-        shouldDisableBrowserPoolForParallelWorker({
-          ...linuxHeadlessWorker,
-          forceScreenshot,
-        }),
-      ).toBe(true);
-    },
-  );
-
-  it.each([
-    ["non-parallel", { parallel: false, forceScreenshot: true }],
-    ["non-linux", { platform: "darwin" as NodeJS.Platform, forceScreenshot: true }],
-    ["no headless shell", { headlessShellPath: undefined, forceScreenshot: true }],
-    ["supersampled", { deviceScaleFactor: 2, forceScreenshot: false }],
-  ])("keeps the shared pool for %s workers", (_case, overrides) => {
-    expect(
-      shouldDisableBrowserPoolForParallelWorker({
-        ...linuxHeadlessWorker,
-        ...overrides,
-      }),
-    ).toBe(false);
+  it("keeps the shared pool for a single worker", () => {
+    expect(shouldDisableBrowserPoolForParallelWorker({ parallel: false })).toBe(false);
+    expect(shouldDisableBrowserPoolForParallelWorker({})).toBe(false);
   });
 });
 

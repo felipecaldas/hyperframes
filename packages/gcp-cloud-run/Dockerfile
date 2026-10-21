@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     unzip \
-    ffmpeg \
+    xz-utils \
     libgbm1 \
     libnss3 \
     libatk-bridge2.0-0 \
@@ -53,6 +53,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean \
     && fc-cache -fv
+
+# ── FFmpeg (pinned) ──────────────────────────────────────────────────────────
+# One pinned static build (BtbN n8.0.1) instead of Debian's apt ffmpeg, so
+# regression baselines and the shipped images use the same FFmpeg version.
+# Bump the URL and sha256 together, and keep in sync with the other Dockerfiles
+# and .github/actions/install-ffmpeg-linux/action.yml.
+ARG TARGETARCH
+ARG FFMPEG_RELEASE=https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-02-28-12-59
+ARG FFMPEG_BUILD=ffmpeg-n8.0.1-66-g27b8d1a017
+ARG FFMPEG_SHA256_AMD64=26d2ecd0cefba99f9d1ea92252a3a4f743a58df4c1c3cf9f8bbaaa40b1fca5b0
+ARG FFMPEG_SHA256_ARM64=d72cc324cb65dd92a9ffe699cc95ccbacfef4def8d3ad9fe2b5164a6a71b9595
+RUN case "$TARGETARCH" in \
+      amd64) FF_ARCH=linux64; FF_SHA256="$FFMPEG_SHA256_AMD64" ;; \
+      arm64) FF_ARCH=linuxarm64; FF_SHA256="$FFMPEG_SHA256_ARM64" ;; \
+      *) echo "unsupported TARGETARCH '$TARGETARCH'" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /tmp/ffmpeg.tar.xz "$FFMPEG_RELEASE/$FFMPEG_BUILD-$FF_ARCH-gpl-8.0.tar.xz" \
+    && echo "$FF_SHA256  /tmp/ffmpeg.tar.xz" | sha256sum -c - \
+    && tar -xJf /tmp/ffmpeg.tar.xz -C /usr/local/bin --strip-components=2 --wildcards '*/bin/ffmpeg' '*/bin/ffprobe' \
+    && rm /tmp/ffmpeg.tar.xz \
+    && ffmpeg -version | grep -F "ffmpeg version ${FFMPEG_BUILD#ffmpeg-}" \
+    && ffprobe -version | grep -F "ffprobe version ${FFMPEG_BUILD#ffmpeg-}"
 
 # ── chrome-headless-shell (deterministic BeginFrame capture) ─────────────────
 # Pinned deliberately. The build-stage contract probe below launches this
@@ -110,6 +132,7 @@ RUN timeout 300 bun install --frozen-lockfile \
 # argument list with the production engine helper so a launcher-flag regression
 # invalidates this layer and fails the contract instead of testing a duplicate
 # hard-coded profile.
+COPY packages/core/ packages/core/
 COPY packages/parsers/ packages/parsers/
 COPY packages/engine/ packages/engine/
 COPY packages/aws-lambda/scripts/probe-beginframe.ts packages/aws-lambda/scripts/probe-beginframe.ts
@@ -131,7 +154,9 @@ RUN bun packages/aws-lambda/scripts/probe-webgpu-adapter.ts \
 # image continues from the already-proven binary and installed workspaces.
 FROM beginframe-contract AS runtime
 
-# Copy source for the packages the render path needs.
+# Copy source for the packages the render path needs, plus the shared post-emit
+# import rewrite their builds run.
+COPY scripts/rewrite-relative-import-extensions.mjs scripts/rewrite-relative-import-extensions.mjs
 COPY packages/core/ packages/core/
 COPY packages/engine/ packages/engine/
 COPY packages/producer/ packages/producer/

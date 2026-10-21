@@ -166,6 +166,7 @@ async function metadataRequestError(response: Response, fallback: string): Promi
 }
 
 const LOGIN_EXPIRED = "Your login expired. Run hyperframes auth login, then publish again.";
+const LOGIN_REQUIRED = "Publishing needs an account. Run hyperframes auth login to publish.";
 const LOGIN_CHANGED = "Your login changed during publish. Run publish again.";
 function rejectedCredentialMessage(credential: ResolvedCredential): string {
   const envVar = envCredentialVar(credential.source);
@@ -797,8 +798,8 @@ export async function publishProjectArchive(
       throw new CredentialRejectedError("unclaimed publish");
     }
   } catch (error) {
-    if (error instanceof CredentialRejectedError && credential) {
-      throw new Error(rejectedCredentialMessage(credential));
+    if (error instanceof CredentialRejectedError) {
+      throw new Error(credential ? rejectedCredentialMessage(credential) : LOGIN_REQUIRED);
     }
     throw error;
   }

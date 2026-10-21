@@ -15,6 +15,7 @@ export default defineConfig({
     "helpers/sourceMutation": "src/helpers/sourceMutation.ts",
     "helpers/safePath": "src/helpers/safePath.ts",
     "helpers/hfIdPersist": "src/helpers/hfIdPersist.ts",
+    "helpers/encoderOptions": "src/helpers/encoderOptions.ts",
     "history/index": "src/history/index.ts",
   },
   format: ["esm"],
@@ -30,4 +31,6 @@ export default defineConfig({
   splitting: true,
   clean: true,
   dts: true,
+  // An optional dependency, so tsup would otherwise inline it.
+  external: ["sharp"],
 });

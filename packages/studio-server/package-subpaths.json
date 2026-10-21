@@ -91,6 +91,12 @@
       "runtime": "./dist/helpers/mediaProxyPreview.js",
       "types": "./dist/helpers/mediaProxyPreview.d.ts",
       "environments": ["bun", "node"]
+    },
+    "./encoder-options": {
+      "source": "./src/helpers/encoderOptions.ts",
+      "runtime": "./dist/helpers/encoderOptions.js",
+      "types": "./dist/helpers/encoderOptions.d.ts",
+      "environments": ["bun", "node"]
     }
   }
 }

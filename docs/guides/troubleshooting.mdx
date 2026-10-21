@@ -229,6 +229,36 @@ During iteration:
 
 Run `npx hyperframes benchmark` when tuning worker settings.
 
+### The render is slow under WSL2
+
+WSL2 can expose a graphics card to Linux, but headless Chrome may not be able to use
+it. The render then falls back to software rendering, which can be several times
+slower on a long or effect-heavy video. The render log says so:
+
+```text
+[hyperframes] browserGpuMode probe → software (WebGL unavailable)
+[hyperframes] WSL: the GPU check found no hardware GPU, so this render uses software WebGL ...
+```
+
+The lines after it say what HyperFrames checked. If they say your user is not in
+the `render` group, add yourself, restart WSL, and render again:
+
+```bash
+sudo usermod -aG render $USER
+# then, in Windows PowerShell:
+wsl --shutdown
+```
+
+If the GPU is still not used, render from Windows instead. Copy the project to
+a Windows drive (for example `C:\Users\you\renders\my-video`) and run the same
+command from PowerShell, where Chrome uses the graphics card through Direct3D:
+
+```powershell
+npx hyperframes render --output final.mp4
+```
+
+Run it from a normal Windows folder, not a `\\wsl.localhost\...` path.
+
 ### Expected HDR but received SDR
 
 HDR needs a supported output and correct source color metadata. MP4 is the normal HDR output path; WebM and MOV may fall back to SDR.

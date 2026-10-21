@@ -1,6 +1,6 @@
 import { captureArtifactRevision } from "../utils/artifactCapture.js";
 import { recordRenderSuccess, registerRenderOutput } from "@hyperframes/studio-server/history";
-import { failCommand, requestCliExit } from "../utils/commandResult.js";
+import { failCommand, requestCliExit, scheduleCliExit } from "../utils/commandResult.js";
 import { defineCommand } from "citty";
 import type { Example } from "./_examples.js";
 import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
@@ -74,6 +74,7 @@ import {
   errorBox,
 } from "../ui/format.js";
 import { warnIfWebmAlphaDropped } from "../utils/webmAlphaCheck.js";
+import { renderFailureDiagnostic } from "../ui/renderDiagnostic.js";
 import { renderProgress, renderMachineProgress } from "../ui/progress.js";
 import {
   trackRenderComplete,
@@ -91,6 +92,11 @@ import {
   type HyperframesConfig,
 } from "../telemetry/config.js";
 import { renderJobObservabilityTelemetryPayload } from "../telemetry/renderObservability.js";
+import {
+  startRenderCpuSampler,
+  type RenderCpuSampler,
+  type RenderCpuTelemetryPayload,
+} from "../telemetry/renderCpu.js";
 import { bytesToMb } from "../telemetry/system.js";
 import { VERSION } from "../version.js";
 import { isDevMode } from "../utils/env.js";
@@ -112,6 +118,7 @@ import {
 import { chromeLaunchRemediation } from "../browser/linuxDeps.js";
 import { macosOldChromeCrashRemediation } from "../browser/macosOldChromeCrash.js";
 import { windowsChromeCrashRemediation } from "../browser/windowsCrash.js";
+import { sandboxDeniedRemediation } from "../browser/sandboxDenied.js";
 import { killOrphanedProcessesForRender } from "../utils/orphanCleanup.js";
 import { createRenderCancellationScope } from "../utils/renderCancellation.js";
 import {
@@ -782,6 +789,7 @@ async function renderDocker(
   await registerRenderOutputOrWarn(projectDir, outputPath);
   const capture = await captureArtifactRevision(projectDir).catch(() => undefined);
   const startTime = Date.now();
+  const cpu = startRenderCpuSampler();
 
   // Dev mode (tsx/ts-node) uses "latest" since the local version isn't on npm
   const dockerVersion = isDevMode() ? "latest" : VERSION;
@@ -795,6 +803,7 @@ async function renderDocker(
   try {
     imageTag = ensureDockerImage(dockerVersion, platform, options.quiet);
   } catch (error: unknown) {
+    cpu.stop();
     const failure = describeDockerBuildFailure(error);
     errorBox(failure.title, failure.message, failure.hint);
     failCommand();
@@ -847,7 +856,7 @@ async function renderDocker(
       const stderrTail = createStderrTail();
       // stderr is piped so the failure can name its cause; it is still echoed live.
       const child = spawn("docker", dockerArgs, {
-        stdio: options.quiet ? ["pipe", "pipe", "pipe"] : ["inherit", "inherit", "pipe"],
+        stdio: options.quiet ? ["pipe", "ignore", "pipe"] : ["inherit", "inherit", "pipe"],
       });
       child.stderr?.on("data", (chunk: Buffer) => {
         process.stderr.write(chunk);
@@ -860,10 +869,11 @@ async function renderDocker(
       child.on("error", (err) => reject(err));
     });
   } catch (error: unknown) {
-    handleRenderError(error, options, startTime, true, "Check Docker is running: docker info");
+    handleRenderError(error, options, startTime, cpu, true, "Check Docker is running: docker info");
   }
 
   const elapsed = Date.now() - startTime;
+  const cpuUsage = cpu.stop();
 
   // Docker child exited 0 → the containerized producer already validated
   // AND committed the artifact. Mirror renderLocal's post-success guarantee
@@ -891,6 +901,7 @@ async function renderDocker(
       ...renderOutputShapeTelemetryPayload(options),
       ...renderEnvironmentTelemetryPayload(options),
       ...getMemorySnapshot(),
+      ...cpuUsage,
     }),
   );
 
@@ -910,7 +921,7 @@ async function renderDocker(
   runPostRenderStep("warnIfWebmAlphaDropped", () =>
     warnIfWebmAlphaDropped(outputPath, options.format, options.quiet),
   );
-  if (options.exitAfterComplete) scheduleRenderProcessExit();
+  if (options.exitAfterComplete) scheduleCliExit();
   return { renderTimeMs: elapsed };
 }
 
@@ -997,21 +1008,22 @@ async function executeLocalRender(
   // HLS shares the H.264 encode path but cannot take the GPU fallback below:
   // its fixed-length segments need the software encoder's forced-keyframe lock.
   const isHls = options.format === "hls";
-  if (!options.gpu && (options.format === "mp4" || isHls) && preflight.ffmpegPath) {
-    let encoderMode: H264EncoderMode = "software";
+  if ((options.format === "mp4" || isHls) && preflight.ffmpegPath) {
+    const gpuRequested = options.gpu && !isHls;
+    let encoderMode: H264EncoderMode = gpuRequested ? "gpu" : "software";
     try {
       encoderMode = await detectH264EncoderModeForRender(
         preflight.ffmpegPath,
-        false,
+        gpuRequested,
         cancellation.signal,
       );
     } catch (error) {
       if (cancellation.signal.aborted) cancellation.signal.throwIfAborted();
-      // HDR MP4 uses HEVC; auto mode cannot resolve the codec until sources
-      // have been inspected. Forced SDR and HLS are definitely H.264 here.
+      // HDR MP4 uses HEVC; auto mode cannot resolve the codec until sources are
+      // inspected. Forced SDR, HLS, or no libx265 either: nothing here can encode.
       if (
         error instanceof H264EncoderUnavailableError &&
-        (options.hdrMode === "force-sdr" || isHls)
+        (options.hdrMode === "force-sdr" || isHls || !error.hevcEncoderAvailable)
       ) {
         errorBox(
           `${isHls ? "HLS" : "MP4"} H.264 encoder unavailable`,
@@ -1038,11 +1050,14 @@ async function executeLocalRender(
       );
       failCommand();
     }
-    if (encoderMode === "gpu") {
+    if (encoderMode === "gpu" && !gpuRequested) {
       console.warn(
-        c.warn("  FFmpeg does not include libx264; falling back to VideoToolbox H.264 encoding."),
+        c.warn("  FFmpeg does not include libx264; falling back to GPU H.264 encoding."),
       );
       options = { ...options, gpu: true };
+    }
+    if (encoderMode === "software" && gpuRequested && !options.quiet) {
+      console.warn(c.warn("  No GPU encoder works on this machine; encoding with libx264."));
     }
   }
 
@@ -1057,6 +1072,7 @@ async function executeLocalRender(
         false;
 
   const startTime = Date.now();
+  const cpu = startRenderCpuSampler();
   const logger = createRenderTelemetryLogger(
     producer.createConsoleLogger?.(options.debug ? "debug" : options.quiet ? "warn" : "info") ??
       createNoopProducerLogger(),
@@ -1132,6 +1148,7 @@ async function executeLocalRender(
       error,
       options,
       startTime,
+      cpu,
       false,
       inContainer ? "" : "Try --docker for containerized rendering",
       job.failedStage,
@@ -1156,12 +1173,15 @@ async function executeLocalRender(
 
   maybeConsumeDeParallelRouterTrial(deParallelRouterActive, job, options.quiet);
   const elapsed = Date.now() - startTime;
+  const cpuUsage = cpu.stop();
   if (job.outcome === "completed_with_warnings") {
     for (const warning of job.warnings) {
       console.warn(c.warn(`  [${warning.code}] ${warning.message}`));
     }
   }
-  runPostRenderStep("trackRenderMetrics", () => trackRenderMetrics(job, elapsed, options, false));
+  runPostRenderStep("trackRenderMetrics", () =>
+    trackRenderMetrics(job, elapsed, options, false, cpuUsage),
+  );
   runPostRenderStep("printRenderComplete", () =>
     printRenderComplete({
       outputPath,
@@ -1185,7 +1205,7 @@ async function executeLocalRender(
       }),
     );
   }
-  if (options.exitAfterComplete) scheduleRenderProcessExit();
+  if (options.exitAfterComplete) scheduleCliExit();
   const durationMs = job.perfSummary
     ? Math.round(job.perfSummary.compositionDurationSeconds * 1000)
     : undefined;
@@ -1197,26 +1217,6 @@ async function executeLocalRender(
     outcome,
     warnings: job.warnings.map((warning) => ({ code: warning.code, message: warning.message })),
   };
-}
-
-type UnrefableTimer = {
-  unref: () => void;
-};
-
-function isUnrefableTimer(
-  timer: ReturnType<typeof setTimeout>,
-): timer is ReturnType<typeof setTimeout> & UnrefableTimer {
-  return (
-    typeof timer === "object" &&
-    timer !== null &&
-    "unref" in timer &&
-    typeof timer.unref === "function"
-  );
-}
-
-function scheduleRenderProcessExit(): void {
-  const timer = setTimeout(() => requestCliExit(0), 100);
-  if (isUnrefableTimer(timer)) timer.unref();
 }
 
 function getMemorySnapshot() {
@@ -1699,12 +1699,14 @@ function handleRenderError(
   error: unknown,
   options: RenderOptions,
   startTime: number,
+  cpu: RenderCpuSampler,
   docker: boolean,
   hint: string,
   failedStage?: string,
   job?: RenderJob,
 ): never {
   const message = normalizeErrorMessage(error);
+  renderFailureDiagnostic(job, error, options.quiet);
   trackRenderError({
     fps: fpsToNumber(options.fps),
     quality: options.quality,
@@ -1730,6 +1732,7 @@ function handleRenderError(
     failedStageCode: normalizeStageCode(failedStage || "pipeline"),
     ...renderJobObservabilityTelemetryPayload(job),
     ...getMemorySnapshot(),
+    ...cpu.stop(),
   });
   // Failed renders join the recent-renders ring too — a bug report filed via
   // `hyperframes feedback` is MOST likely to be about a failed render.
@@ -1741,6 +1744,11 @@ function handleRenderError(
   // failure on Linux/WSL is an environment problem, not a composition bug.
   // Replace the generic "Try --docker" hint with the exact per-distro
   // remediation and a pointer at `doctor`.
+  const sandboxRemediation = sandboxDeniedRemediation(message);
+  if (sandboxRemediation) {
+    errorBox("Render failed — Chrome could not launch", message, sandboxRemediation);
+    failCommand();
+  }
   const remediation = chromeLaunchRemediation(message);
   if (remediation) {
     errorBox("Render failed — Chrome could not launch", message, remediation);
@@ -1784,6 +1792,7 @@ function trackRenderMetrics(
   elapsedMs: number,
   options: RenderOptions,
   docker: boolean,
+  cpuUsage: RenderCpuTelemetryPayload,
 ): void {
   // Successful render → recent-renders ring, so a later `hyperframes
   // feedback` can attach this render's telemetry id to the report.
@@ -1907,6 +1916,7 @@ function trackRenderMetrics(
     extractCacheMisses: extract?.cacheMisses,
     ...renderJobObservabilityTelemetryPayload(job),
     ...getMemorySnapshot(),
+    ...cpuUsage,
   });
 }
 

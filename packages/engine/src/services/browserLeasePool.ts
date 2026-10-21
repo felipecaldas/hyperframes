@@ -6,6 +6,7 @@ export type BrowserPoolState = "launching" | "ready" | "closing";
 export interface BrowserLaunchFingerprint {
   readonly args: readonly string[];
   readonly executablePath?: string;
+  readonly withoutWaylandDisplay?: boolean;
   readonly browserTimeoutMs: number;
   readonly protocolTimeoutMs: number;
   readonly requestedCaptureMode: CaptureMode;
@@ -55,6 +56,7 @@ function fingerprintKey(fingerprint: Readonly<BrowserLaunchFingerprint>): string
   return JSON.stringify([
     fingerprint.args,
     fingerprint.executablePath ?? null,
+    fingerprint.withoutWaylandDisplay === true,
     fingerprint.browserTimeoutMs,
     fingerprint.protocolTimeoutMs,
     fingerprint.requestedCaptureMode,
