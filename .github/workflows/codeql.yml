@@ -25,7 +25,7 @@ on:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     permissions:
       security-events: write
       packages: read

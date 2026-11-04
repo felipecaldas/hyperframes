@@ -20,7 +20,7 @@ concurrency:
 jobs:
   changes:
     name: Detect changes
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 4
     outputs:
       perf: ${{ steps.filter.outputs.perf }}
@@ -65,7 +65,7 @@ jobs:
     name: Preflight (lint + format)
     needs: changes
     if: needs.changes.outputs.perf == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -75,7 +75,7 @@ jobs:
     name: "Perf: ${{ matrix.shard }}"
     needs: [changes, preflight]
     if: needs.changes.outputs.perf == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 20
     strategy:
       fail-fast: true
@@ -171,7 +171,7 @@ jobs:
   # $GITHUB_STEP_SUMMARY so a false skip is obvious in the Checks UI without
   # having to dig into the changes-job logs.
   player-perf:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     needs: [changes, perf-shards]
     if: always()
     steps:

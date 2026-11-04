@@ -17,7 +17,7 @@ jobs:
     name: Comments
     # A release PR carries commits that each passed this gate on their own PR.
     if: ${{ !startsWith(github.head_ref, 'release/') }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 10
     env:
       # Every repo script this job runs. They import each other, so all run from one tree.
