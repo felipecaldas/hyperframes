@@ -41,8 +41,10 @@ concurrency:
 
 jobs:
   changes:
+    # Disabled: passbolt supplies Linux x64 only (including dependent platform jobs).
+    if: ${{ false }}
     name: Detect changes
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 4
     permissions:
       actions: read
@@ -94,10 +96,11 @@ jobs:
               - "!packages/*/README.md"
 
   preflight:
+    # Disabled: passbolt supplies Linux x64 only (including dependent platform jobs).
+    if: ${{ false }}
     name: Preflight (lint + format)
     needs: changes
-    if: needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -106,11 +109,12 @@ jobs:
       - uses: ./.github/actions/preflight
 
   render-windows:
+    # Disabled: passbolt supplies Linux x64 only (including dependent platform jobs).
+    if: ${{ false }}
     name: Render on windows-latest
     needs: [changes, preflight]
     # A skipped required check passes, so a failed change detection or preflight must fail it.
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch') }}
-    runs-on: windows-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 30
 
     steps:
@@ -424,10 +428,11 @@ jobs:
   # producer's transitive `hono` dep.
   # -------------------------------------------------------------------
   test-windows-lane:
+    # Disabled: passbolt supplies Linux x64 only (including dependent platform jobs).
+    if: ${{ false }}
     name: "Tests on windows-latest: ${{ matrix.lane }}"
     needs: [changes, preflight]
-    if: needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: windows-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -548,10 +553,11 @@ jobs:
   # Preserve the existing required check name while the lanes stay
   # independently visible and rerunnable.
   test-windows:
+    # Disabled: passbolt supplies Linux x64 only (including dependent platform jobs).
+    if: ${{ false }}
     name: Tests on windows-latest
     needs: [changes, test-windows-lane]
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 2
     permissions:
       actions: read

@@ -21,7 +21,7 @@ concurrency:
 jobs:
   changes:
     name: Detect changes
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 5
     outputs:
       preview: ${{ steps.filter.outputs.preview }}
@@ -63,7 +63,7 @@ jobs:
     name: Preflight (lint + format)
     needs: changes
     if: needs.changes.outputs.preview == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -73,7 +73,7 @@ jobs:
     name: Preview parity
     needs: [changes, preflight]
     if: needs.changes.outputs.preview == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -141,7 +141,7 @@ jobs:
           retention-days: 30
 
   preview-regression:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     needs: [changes, preview-parity]
     if: always()
     steps:

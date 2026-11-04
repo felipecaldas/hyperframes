@@ -29,7 +29,7 @@ permissions:
 jobs:
   sync:
     name: Publish changed skills
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 10
     env:
       CLAWHUB_DISABLE_TELEMETRY: "1"

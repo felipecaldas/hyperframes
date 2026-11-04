@@ -1,0 +1,7 @@
+self-hosted-runner:
+  labels: [tabario, passbolt]
+paths:
+  ".github/workflows/*.yml":
+    ignore:
+      # Unsupported platform jobs deliberately stay disabled.
+      - 'constant expression "false" in condition'
