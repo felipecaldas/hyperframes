@@ -15,7 +15,7 @@ on:
 jobs:
   publish:
     name: Publish
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 20
     environment: npm-publish
     permissions:

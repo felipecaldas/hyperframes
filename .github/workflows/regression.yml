@@ -38,7 +38,7 @@ on:
 jobs:
   changes:
     name: Detect changes
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 4
     permissions:
       actions: read
@@ -102,7 +102,7 @@ jobs:
     name: Preflight (lint + format)
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -111,7 +111,7 @@ jobs:
   regression-shards:
     needs: [changes, preflight]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 60
     strategy:
       fail-fast: true
@@ -189,7 +189,7 @@ jobs:
 
   # Summary job — matches the required check name in branch protection
   regression:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     needs: [changes, regression-shards]
     if: always()
     steps:

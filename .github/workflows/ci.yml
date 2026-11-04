@@ -38,7 +38,7 @@ concurrency:
 jobs:
   test-reachability:
     name: Test reachability
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 4
     steps:
       # A history fetch now and then stalls until the job's limit; a second fetch gets through.
@@ -72,7 +72,7 @@ jobs:
 
   changes:
     name: Detect changes
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 4
     permissions:
       actions: read
@@ -278,7 +278,7 @@ jobs:
     name: GCP BeginFrame image contract
     needs: changes
     if: needs.changes.outputs.gcp_beginframe == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -309,7 +309,7 @@ jobs:
     needs: changes
     # A skipped required check passes, so a broken change detection must fail it instead.
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true' || needs.changes.outputs.cli_bundle == 'true' || needs.changes.outputs.edit_accuracy == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 10
     steps:
       - name: Require change detection
@@ -344,7 +344,7 @@ jobs:
     name: Lint
     needs: changes
     if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs_catalog == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -367,7 +367,7 @@ jobs:
     name: Catalog payloads
     needs: changes
     if: needs.changes.outputs.docs_catalog == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -413,7 +413,7 @@ jobs:
     name: Fallow audit
     needs: changes
     if: needs.changes.outputs.code == 'true' && github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 5
     # Scope write access to this single job — the rest of `ci.yml` keeps the
     # workflow-level `pull-requests: read` default so build / lint / test
@@ -483,7 +483,7 @@ jobs:
 
   format:
     name: Format
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -502,7 +502,7 @@ jobs:
     needs: changes
     # A skipped required check passes, so a broken change detection must fail it instead.
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 10
     steps:
       - name: Require change detection
@@ -527,7 +527,7 @@ jobs:
     name: Test (studio)
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -551,7 +551,7 @@ jobs:
     name: Test (runtime)
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -573,7 +573,7 @@ jobs:
     name: Test (support)
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -608,7 +608,7 @@ jobs:
     # Keep the existing required `Test` context authoritative for producer
     # failures too. It also fails closed if any package shard fails or is cancelled.
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true' || needs.changes.outputs.skills == 'true')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 3
     steps:
       - name: Require change detection
@@ -637,7 +637,7 @@ jobs:
     name: "Producer: ${{ matrix.lane }} tests"
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -673,7 +673,7 @@ jobs:
     name: "Test: skills"
     needs: changes
     if: needs.changes.outputs.skills == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -703,10 +703,11 @@ jobs:
           node --import ./packages/cli/scripts/test-home.mjs --test "${SKILLS_TESTS[@]}"
 
   test-skill-bootstrap-windows:
+    # Disabled: passbolt supplies Linux x64 only (including dependent platform jobs).
+    if: ${{ false }}
     name: "Test: skill bootstrap (Windows, Node 24)"
     needs: changes
-    if: needs.changes.outputs.skills == 'true'
-    runs-on: windows-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -729,7 +730,7 @@ jobs:
     name: "Catalog: search index covers the registry"
     needs: [changes, catalog-payloads]
     if: needs.changes.outputs.catalog_index == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -745,7 +746,7 @@ jobs:
     name: "Skills: manifest in sync"
     needs: changes
     if: needs.changes.outputs.skills == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -762,7 +763,7 @@ jobs:
     name: "Skills: project-native lint + mirror"
     needs: changes
     if: needs.changes.outputs.skills == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -776,7 +777,7 @@ jobs:
     name: "Codex plugin package"
     needs: changes
     if: needs.changes.outputs.codex_plugin == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -796,12 +797,12 @@ jobs:
     name: "CLI: npx shim (${{ matrix.os }})"
     needs: changes
     if: needs.changes.outputs.cli == 'true'
-    runs-on: ${{ matrix.os }}
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [Linux] # Only the local Linux x64 platform is available.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -820,7 +821,7 @@ jobs:
     name: "SDK: unit + contract + smoke"
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -837,7 +838,7 @@ jobs:
     needs: changes
     # A skipped required check passes, so a broken change detection must fail it instead.
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 10
     steps:
       - name: Require change detection
@@ -863,7 +864,7 @@ jobs:
     name: "Studio: load smoke"
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -909,7 +910,7 @@ jobs:
     name: "Studio: timeline viewport gate"
     needs: [changes]
     if: needs.changes.outputs.studio == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 18
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -1155,7 +1156,7 @@ jobs:
     name: "Studio: edit accuracy (${{ matrix.shard }}/${{ strategy.job-total }})"
     needs: [changes, build]
     if: needs.changes.outputs.edit_accuracy == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     # Healthy shards take 6-9 min; 25 leaves a cancelled shard's fresh re-run inside the queue's 60 min check wait.
     timeout-minutes: 25
     strategy:
@@ -1206,7 +1207,7 @@ jobs:
     name: "Studio: edit accuracy retry plan"
     needs: [changes, studio-edit-accuracy]
     if: ${{ !cancelled() && needs.changes.outputs.edit_accuracy == 'true' && needs.studio-edit-accuracy.result != 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 5
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
@@ -1227,7 +1228,7 @@ jobs:
     name: "Studio: edit accuracy retry (${{ matrix.shard }})"
     needs: [changes, build, studio-edit-accuracy-retry-plan]
     if: ${{ !cancelled() && needs.studio-edit-accuracy-retry-plan.outputs.shards != '[]' && needs.studio-edit-accuracy-retry-plan.outputs.shards != '' }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -1269,7 +1270,7 @@ jobs:
     name: "Studio: edit accuracy gate"
     needs: [changes, studio-edit-accuracy, studio-edit-accuracy-retry]
     if: ${{ !cancelled() && needs.changes.outputs.edit_accuracy == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 5
     permissions:
       contents: read
@@ -1323,7 +1324,7 @@ jobs:
     name: "Smoke: global install"
     needs: [changes, build]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -1395,7 +1396,7 @@ jobs:
     name: "CLI smoke (required)"
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -1520,7 +1521,7 @@ jobs:
 
   filesize:
     name: File size check
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 1
     steps:
       # A pull request checks out its merge commit, whose first parent is the base: two commits are the whole diff.
@@ -1563,7 +1564,7 @@ jobs:
   semantic-pr-title:
     name: Semantic PR title
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 5
     env:
       PR_TITLE_TYPES: |
