@@ -1,0 +1,36 @@
+name: Local runner smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Verify local execution and build tooling
+        env:
+          EXPECTED_RUNNER: passbolt-hyperframes
+        run: |
+          set -euo pipefail
+          test "$RUNNER_NAME" = "$EXPECTED_RUNNER"
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          node --version
+          python --version
+          python -m pip --version
+          ffmpeg -version | head -1
+          shellcheck --version
+          docker info --format '{{.ServerVersion}}'
+          docker buildx version
+          echo "Verified $RUNNER_NAME on passbolt.local" >> "$GITHUB_STEP_SUMMARY"
