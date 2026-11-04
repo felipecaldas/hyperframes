@@ -27,7 +27,7 @@ on:
 jobs:
   drag-frames:
     name: "Studio: drag frames (run ${{ matrix.run }})"
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 60
     strategy:
       fail-fast: false

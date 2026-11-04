@@ -27,8 +27,10 @@ concurrency:
 
 jobs:
   changes:
+    # Windows, macOS and ARM64 jobs are disabled on the Linux x64 passbolt runner.
+    if: ${{ false }}
     name: Detect changes
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 4
     outputs:
       release_only: ${{ steps.release.outputs.release_only }}
@@ -41,11 +43,12 @@ jobs:
         uses: ./.github/actions/release-only-diff
 
   ffmpeg:
+    # Windows, macOS and ARM64 jobs are disabled on the Linux x64 passbolt runner.
+    if: ${{ false }}
     name: ffmpeg ${{ matrix.copy }}
     needs: changes
     # A release PR changes versions and notes only; a failed change detection must not skip the build.
-    if: ${{ !cancelled() && needs.changes.outputs.release_only != 'true' }}
-    runs-on: ubuntu-24.04-arm
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 90
     strategy:
       matrix:
@@ -70,17 +73,21 @@ jobs:
           retention-days: 7
 
   reproducible:
+    # Windows, macOS and ARM64 jobs are disabled on the Linux x64 passbolt runner.
+    if: ${{ false }}
     name: ffmpeg builds match
     needs: ffmpeg
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 5
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
       - run: cmp hf-media-a/hf-media-linux-aarch64.tar.gz hf-media-b/hf-media-linux-aarch64.tar.gz
 
   handler-zip:
+    # Windows, macOS and ARM64 jobs are disabled on the Linux x64 passbolt runner.
+    if: ${{ false }}
     name: Handler ZIP
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -95,9 +102,11 @@ jobs:
           retention-days: 7
 
   image:
+    # Windows, macOS and ARM64 jobs are disabled on the Linux x64 passbolt runner.
+    if: ${{ false }}
     name: Image smoke
     needs: [ffmpeg, handler-zip]
-    runs-on: ubuntu-24.04-arm
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

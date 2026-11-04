@@ -22,7 +22,7 @@ jobs:
     name: Studio and player captures
     # A merge group has no PR body to read; the queued PR passed this check already.
     if: github.event_name != 'merge_group'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

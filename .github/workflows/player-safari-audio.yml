@@ -20,8 +20,10 @@ concurrency:
 
 jobs:
   audio:
+    # Windows, macOS and ARM64 jobs are disabled on the Linux x64 passbolt runner.
+    if: ${{ false }}
     name: "Audio in real Safari: no playhead stops, no seek loop"
-    runs-on: macos-latest
+    runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
