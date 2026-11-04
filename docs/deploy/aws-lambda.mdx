@@ -47,7 +47,7 @@ The Lambda handler is a thin dispatch: parse the Step Functions event, download 
 | AWS credentials | The CLI and the deploy step both call AWS APIs. | Env vars, `~/.aws/credentials`, SSO, or IMDS — any chain the AWS SDK for JavaScript v3 would resolve. |
 | AWS SAM CLI | `hyperframes lambda deploy/destroy` shells out to `sam deploy`/`sam delete`. | [Install guide](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html) |
 | Lambda adapter | The published CLI loads the AWS adapter only for Lambda commands. Each release pins a prebuilt Lambda handler ZIP (a GitHub release asset); `lambda deploy` downloads it, checks its SHA-256 and deploys it with the adapter's SAM template. No repo checkout needed. | `npm install -g @hyperframes/aws-lambda` alongside the CLI, at the same version |
-| HyperFrames repo checkout (optional) | Inside a checkout, or with `HYPERFRAMES_REPO_ROOT` pointing at one, `lambda deploy` builds the handler ZIP from source instead (needs `bun`). Use it to deploy unreleased changes, `--chrome-source=chrome-headless-shell`, or an adapter release older than the prebuilt handler. | `git clone https://github.com/heygen-com/hyperframes`, and `npm install -g bun` or [bun.sh](https://bun.sh) |
+| HyperFrames repo checkout (optional) | Inside a checkout, or with `HYPERFRAMES_REPO_ROOT` pointing at one, `lambda deploy` builds the handler ZIP from source instead (needs `bun`). Use it to deploy unreleased changes, `--chrome-source=chrome-headless-shell`, or an adapter release older than the prebuilt handler. A checkout deploy on arm64 also needs the video image built from that checkout (`HYPERFRAMES_LAMBDA_VIDEO_IMAGE`), or `--video-arch x86_64`. | `git clone https://github.com/heygen-com/hyperframes`, and `npm install -g bun` or [bun.sh](https://bun.sh) |
 
 ## Three deployment paths
 
@@ -101,6 +101,10 @@ hyperframes lambda render ./my-project --site-id=a1b2c3d4e5f6g7h8 \
 The `siteId` is content-addressed via a SHA-256 of the project tree. A site is a small `sites/<siteId>/files.json` that lists each file's path and SHA-256. The files themselves live once per bucket under `cas/sha256/`, shared by every site and render, so a file another project already uploaded is never uploaded again. Pass the same `--site-id` to as many `lambda render` calls as you like.
 
 The stack's bucket expires objects under `cas/sha256/` 30 days after they were last written (the `ExpireSharedContent` lifecycle rule). Each render or `sites create` that reuses a file at least 7 days old rewrites it in place, so files in use never expire. If a site's files did expire, `lambda render --site-id` re-uploads them from the project directory, if its copies still match. Otherwise, or when `renderToLambda` gets a `siteHandle` but no `projectDir`, the render stops with `SITE_FILES_MISSING` before starting; run `sites create` again to restore them.
+
+#### Upgrading from a version that deployed x86 only
+
+`lambda deploy` now runs the plan and the render chunks on an arm64 container-image function by default; audio and assemble stay on the x86 function. Redeploying an existing stack without `--video-arch` moves it to arm64 and adds the `<stack>-video` ECR repository. To keep a stack on x86, pass `--video-arch x86_64` on every deploy. `--chrome-source chrome-headless-shell` also needs `--video-arch x86_64`, because the arm64 image bundles sparticuz Chrome only.
 
 #### Upgrading from a version before shared content storage
 
@@ -227,9 +231,27 @@ Most often a Lambda cold-start chain on a many-chunk render. The Map state's res
 
 If progress doesn't advance for >10 minutes, check the Step Functions execution in the AWS console — failed Lambda invocations include the typed error name (`FONT_FETCH_FAILED`, `FFMPEG_VERSION_MISMATCH`, etc.) which short-circuits the state machine.
 
+### Long-video planning times out
+
+Check the failed invocation's CloudWatch logs to distinguish Plan from RenderChunk. In current versions, `VIDEO_EXTRACTION_FAILED` with `ffmpeg_timeout` means extraction stopped producing new frames for the configured interval, which defaults to 300,000 ms. Frame progress resets that timer, so an extraction can run for longer than five minutes while it keeps producing frames. Normal frame extraction splits long ranges into segments of up to two minutes, including variable-frame-rate sources.
+
+Plan v2 leaves eligible constant-frame-rate SDR extraction to chunk workers after a short timing probe. Variable-frame-rate sources and required HDR color conversions still extract during Plan; the deprecated v1 path also extracts videos during Plan. Smaller chunks or a higher `maxParallelChunks` can reduce each chunk's work, but do not divide extraction that still happens during Plan.
+
+If the logs show that a slow extraction needs a longer gap between frames, and the work fits within the Lambda invocation budget, increase `FFMPEG_PROCESS_TIMEOUT_MS` on the deployed function that runs the failing phase. The default arm64 deployment uses the video function for Plan and RenderChunk. Setting the variable only in the terminal running `lambda render` does not configure the remote function. CDK users can configure the construct's render function before deploying. Here, `render` is the `HyperframesRenderStack` instance created in the CDK example above:
+
+```ts
+render.renderFunction.addEnvironment("FFMPEG_PROCESS_TIMEOUT_MS", "600000");
+```
+
+This allows extraction to wait ten minutes without a new frame. Each Plan, RenderChunk, and Assemble invocation must still finish within its own configured Lambda timeout, at most 15 minutes, including downloads, processing, and uploads, and fit its `/tmp` storage. Measure the failing phase's elapsed time and storage use in CloudWatch.
+
+If planning cannot fit, split the composition into shorter, frame-aligned projects, render each as a separate job, and combine the results. Choose part lengths from measured planning times. There is no fixed maximum video length: resolution, frame rate, codec, and Lambda resources affect extraction time.
+
 ### Tearing down doesn't reclaim S3 storage
 
 The render bucket is created with CloudFormation `Retain` on delete — `hyperframes lambda destroy` (or `sam delete`) tears the function + state machine down but the bucket survives. This is intentional: it protects final-rendered MP4s from being lost when you re-deploy. To fully reclaim storage, empty + delete the bucket via the AWS console / `aws s3 rb`.
+
+A stack deployed on arm64 (the default) also has an ECR repository, `<stack>-video`, holding the video function's image. `hyperframes lambda destroy` deletes it after the stack.
 
 ### `STACK_TOO_OLD`
 
@@ -248,15 +270,19 @@ The stack was deployed by an earlier version that cannot read this version's sit
 - Each `--region` is an independent stack. Cross-region failover is not built
   in.
 - The distributed AWS path is SDR-only.
-- Each render chunk extracts only the video frames it shows, so the plan step
-  no longer grows with video length. On a 10,240 MB function, a 26-minute
-  576×1024 24 fps H.264 clip plans in about 20 seconds. Each chunk reads
-  only the byte ranges of each video it shows, straight from the bucket. Variable-frame-rate and HDR
-  sources are the exception: the plan step still extracts every frame of those,
-  inside Lambda's 15-minute limit, in 2-minute segments, so
-  `FFMPEG_PROCESS_TIMEOUT_MS` applies to each segment, not to the whole clip.
-- A chunk must also finish inside 15 minutes. For long renders, raise
-  `--max-parallel-chunks` (`maxParallelChunks` in the SDK) so each chunk covers
+- Plan v2 leaves eligible constant-frame-rate SDR video extraction to each
+  render chunk after a short timing probe. Each chunk extracts only the frames
+  it shows. On a 10,240 MB function, a 26-minute 576×1024 24 fps H.264 clip
+  plans in about 20 seconds. Each chunk reads only the byte ranges of each
+  video it shows, straight from the bucket. Variable-frame-rate sources and
+  required HDR color conversions still need extraction during Plan. Normal
+  frame extraction uses segments of up to two minutes, including variable-frame-rate
+  sources; `FFMPEG_PROCESS_TIMEOUT_MS` limits how long extraction can go without
+  producing a new frame. See [long-video planning timeouts](#long-video-planning-times-out)
+  for timeout configuration and splitting jobs that cannot fit.
+- Plan, each RenderChunk, and Assemble must finish within their own configured
+  Lambda timeout, at most 15 minutes, and fit the function's `/tmp` storage.
+  For long renders, raise `--max-parallel-chunks` (`maxParallelChunks` in the SDK) so each chunk covers
   fewer frames.
 
 ## Related topics

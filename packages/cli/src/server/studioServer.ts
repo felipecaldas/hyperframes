@@ -14,6 +14,8 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { resolve, join, basename, isAbsolute, relative, sep } from "node:path";
 import { readBundleFile } from "./readBundleFile.js";
+import { GSAP_CDN_VERSION } from "@hyperframes/core/gsap-cdn";
+import { GSAP_VENDOR_FILES, resolveGsapVendorDir } from "./gsapVendor.js";
 import {
   createProjectWatcher,
   shouldWatchProjectFile,
@@ -35,6 +37,7 @@ import { emitStudioRenderComplete, emitStudioRenderError } from "./studioRenderT
 import { startRenderCpuSampler } from "../telemetry/renderCpu.js";
 import { mountDesktopRoutes } from "./desktopRoutes.js";
 import { isDevMode } from "../utils/env.js";
+import { insideHostApp } from "../utils/desktopApp.js";
 import { runRenderSetupWorker } from "../utils/cancellableProcess.js";
 import type { ProjectLintResult } from "@hyperframes/lint";
 import { resolveRenderBrowser } from "../browser/preflight.js";
@@ -72,6 +75,7 @@ import {
   HistoryClosedError,
   historyCache,
 } from "@hyperframes/studio-server";
+import { encoderJobOptions } from "@hyperframes/studio-server/encoder-options";
 import { resolveAutoProxy } from "../utils/projectConfig.js";
 import { resolveProject, type ProjectDir } from "../utils/project.js";
 import type { CheckOptions, CheckReport } from "../utils/checkTypes.js";
@@ -189,6 +193,9 @@ function resolveRuntimePath(): string {
   return builtPath;
 }
 
+// Same-origin root for the GSAP files the CLI ships (build-copy.mjs), laid out
+// like an npm mirror so preview can ask for `<root>/gsap@<version>/dist/<file>`.
+const GSAP_LOCAL_ROOT = "/api/vendor/npm";
 function readStudioManualEditManifestContent(projectDir: string): string {
   const manifestPath = join(projectDir, STUDIO_MANUAL_EDITS_PATH);
   if (!existsSync(manifestPath)) return "";
@@ -348,7 +355,15 @@ const runRealCheckPipeline: CheckRunner = async (project, options, signal) => {
 
 /** Every section's findings, in the order a reader would read the report. */
 function flattenCheckFindings(report: CheckReport): RunCheckFinding[] {
-  const sections = [report.lint, report.runtime, report.layout, report.motion, report.contrast];
+  const sections = [
+    report.lint,
+    report.runtime,
+    report.layout,
+    report.motion,
+    report.contrast,
+    report.craft,
+    report.audio,
+  ];
   return sections.flatMap((section) =>
     section.findings.map((finding) => {
       // A layout or motion finding is an `AnchoredLayoutIssue`, which carries no
@@ -470,17 +485,18 @@ interface SnapshotCapture {
     projectDir: string,
     opts: { at?: number[]; frames?: number; outputDir: string; includeEnd?: boolean },
   ) => Promise<string[]>;
-  sheet: (snapshotsDir: string, outputPath: string) => Promise<string[]>;
+  sheet: (paths: string[], outputPath: string) => Promise<string[]>;
 }
 
 const REAL_SNAPSHOT_CAPTURE: SnapshotCapture = {
   async capture(projectDir, opts) {
     const { captureSnapshots } = await import("../commands/snapshot.js");
-    return captureSnapshots(projectDir, opts);
+    const captured = await captureSnapshots(projectDir, opts);
+    return captured.paths.map((path) => resolve(projectDir, path));
   },
-  async sheet(snapshotsDir, outputPath) {
+  async sheet(paths, outputPath) {
     const { createSnapshotContactSheet } = await import("../capture/contactSheet.js");
-    return createSnapshotContactSheet(snapshotsDir, outputPath);
+    return createSnapshotContactSheet(paths, outputPath);
   },
 };
 
@@ -595,7 +611,7 @@ export async function captureContactSheetReceipt(
         if (snapshots.length !== times.length) {
           return { ran: false, error: "snapshot count does not match requested timestamps" };
         }
-        const pages = await capture.sheet(outputDir, join(outputDir, "contact-sheet.jpg"));
+        const pages = await capture.sheet(snapshots, join(outputDir, "contact-sheet.jpg"));
         if (pages.length === 0) return { ran: false, error: "no contact sheet was produced" };
         if (pages.length !== Math.ceil(times.length / CONTACT_SHEET_PAGE_CELLS)) {
           return { ran: false, error: "contact sheet page count does not match captured frames" };
@@ -942,6 +958,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
   const browserGpuMode = options.browserGpuMode ?? resolveLocalBrowserGpuMode();
   const studioDir = resolveDistDir();
   const runtimePath = resolveRuntimePath();
+  const gsapVendorDir = resolveGsapVendorDir();
   stampProjectHfIds(projectDir);
   const watcher = createProjectWatcher(projectDir);
 
@@ -1002,6 +1019,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
       }),
   );
   const projectHistory = () => histories.get(projectDir);
+  const hostAppOwnsHistory = insideHostApp();
   watcher.addListener((changedPath) => {
     void histories.peek(projectDir)?.then((opened) => opened?.noteChange(changedPath));
   });
@@ -1016,8 +1034,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
     agentBridgeEnabled: ["localhost", "127.0.0.1", "::1"].includes(
       process.env.HYPERFRAMES_PREVIEW_HOST?.trim().toLowerCase() || "127.0.0.1",
     ),
-
-    history: () => projectHistory(),
+    history: () => (hostAppOwnsHistory ? null : projectHistory()),
     loadSharp: () => loadSharpInBackground("image thumbnails"),
     // Explicit option wins (preview's resolved --proxy/--no-proxy + config);
     // otherwise honor the project's hyperframes.json media.autoProxy so every
@@ -1060,11 +1077,21 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
       const { injectDeterministicFontFaces } = await import("@hyperframes/core/fonts/embed");
       const { prepareAnimatedGifInputs } =
         await import("../../../producer/src/services/animatedGifPrep.js");
+      const { prepareHeifImageInputs } =
+        await import("../../../producer/src/services/heifImagePrep.js");
       const { downloadToTemp, writeUrlDownloadTelemetry } =
         await import("../../../producer/src/utils/urlDownloader.js");
       const gifOutputDir = join(project.dir, ".hyperframes", "prepared-assets", "gif");
       const gifDownloadDir = join(project.dir, ".hyperframes", "prepared-assets", "downloads");
-      const prepared = await prepareAnimatedGifInputs(html, {
+      const heifOutputDir = join(project.dir, ".hyperframes", "prepared-assets", "heif");
+      const { html: htmlWithJpegs } = await prepareHeifImageInputs(html, {
+        projectDir: project.dir,
+        downloadDir: gifDownloadDir,
+        outputDir: heifOutputDir,
+        outputSrcPrefix: ".hyperframes/prepared-assets/heif",
+        onFailure: (error) => console.warn(`[studio] ${error.message}`),
+      });
+      const prepared = await prepareAnimatedGifInputs(htmlWithJpegs, {
         projectDir: project.dir,
         downloadDir: gifDownloadDir,
         outputDir: gifOutputDir,
@@ -1099,6 +1126,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
       ),
 
     runtimeUrl: "/api/runtime.js",
+    gsapLocalRoot: gsapVendorDir ? GSAP_LOCAL_ROOT : undefined,
 
     rendersDir: () => join(projectDir, "renders"),
 
@@ -1136,7 +1164,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
           state.status = "cancelled";
           for (const suffix of ["", ".meta.json"]) {
             const fp = suffix
-              ? opts.outputPath.replace(/\.(mp4|webm|mov)$/, suffix)
+              ? opts.outputPath.replace(/\.(mp4|webm|mov|gif)$/, suffix)
               : opts.outputPath;
             try {
               if (existsSync(fp)) unlinkSync(fp);
@@ -1160,15 +1188,14 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
             fps: opts.fps,
             quality: opts.quality as "draft" | "standard" | "high",
             format: opts.format,
+            ...(opts.gifLoop !== undefined ? { gifLoop: opts.gifLoop } : {}),
             outputResolution: opts.outputResolution,
             ...(manualEditsRenderScript ? { renderBodyScripts: [manualEditsRenderScript] } : {}),
             ...(opts.composition ? { entryFile: opts.composition } : {}),
             ...(opts.variables ? { variables: opts.variables } : {}),
-            ...(opts.crf !== undefined ? { crf: opts.crf } : {}),
-            ...(opts.videoBitrate ? { videoBitrate: opts.videoBitrate } : {}),
-            ...(opts.videoFrameFormat ? { videoFrameFormat: opts.videoFrameFormat } : {}),
-            ...(opts.hdrMode ? { hdrMode: opts.hdrMode } : {}),
+            ...encoderJobOptions(opts),
             ...(opts.useGpu ? { useGpu: true } : {}),
+            ...(opts.pageMotionBlur ? { pageMotionBlur: opts.pageMotionBlur } : {}),
           });
           renderJob = job;
           const onProgress = (j: { progress: number; currentStage?: string }) => {
@@ -1191,7 +1218,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
           if (job.audioLoweredDb !== undefined) state.audioLoweredDb = job.audioLoweredDb;
           state.status = "complete";
           state.progress = 100;
-          const metaPath = opts.outputPath.replace(/\.(mp4|webm|mov)$/, ".meta.json");
+          const metaPath = opts.outputPath.replace(/\.(mp4|webm|mov|gif)$/, ".meta.json");
           writeFileSync(
             metaPath,
             JSON.stringify({
@@ -1225,7 +1252,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
             cpu.stop(),
           );
           try {
-            const metaPath = opts.outputPath.replace(/\.(mp4|webm|mov)$/, ".meta.json");
+            const metaPath = opts.outputPath.replace(/\.(mp4|webm|mov|gif)$/, ".meta.json");
             writeFileSync(metaPath, JSON.stringify({ status: "failed" }));
           } catch {
             /* ignore */
@@ -1500,6 +1527,22 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
     return serve();
   });
 
+  // Bundled GSAP for preview, so opening Studio makes no jsDelivr request.
+  app.get(`${GSAP_LOCAL_ROOT}/:pkg/dist/:file`, (c) => {
+    const file = c.req.param("file");
+    const body =
+      gsapVendorDir &&
+      c.req.param("pkg") === `gsap@${GSAP_CDN_VERSION}` &&
+      GSAP_VENDOR_FILES.has(file)
+        ? readBundleFile(join(gsapVendorDir, file))
+        : null;
+    if (!body) return c.text("not found", 404);
+    return c.body(body, 200, {
+      "Content-Type": getMimeType(file),
+      "Cache-Control": "public, max-age=31536000, immutable",
+    });
+  });
+
   // CLI → Studio telemetry identity endpoint (Layer 1). Studio reads the
   // injected `window.__HF_CLI_DISTINCT_ID` first; this GET is a fallback for
   // clients that can't rely on the injected global. Returns the CLI's anonymous
@@ -1573,14 +1616,8 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
         if (shouldWatchProjectFile(changedPath)) listener(changedPath);
       };
       watcher.addListener(wrappedListener);
-      stream.onAbort(() => watcher.removeListener(wrappedListener));
-      try {
-        while (true) {
-          await stream.sleep(30000);
-        }
-      } finally {
-        watcher.removeListener(wrappedListener);
-      }
+      if (!stream.aborted) await new Promise<void>((tabClosed) => stream.onAbort(tabClosed));
+      watcher.removeListener(wrappedListener);
     });
   });
 

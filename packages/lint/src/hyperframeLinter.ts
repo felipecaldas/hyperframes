@@ -21,6 +21,7 @@ import { slideshowRules } from "./rules/slideshow";
 import { tabarioRules } from "./rules/tabario";
 import { structureRules } from "./rules/structure";
 import { shaderRules } from "./rules/shaders";
+import { rootPathRules } from "./rules/rootPaths";
 
 // Rules are grouped by source module so a timing can be attributed to
 // something a human can act on. Individual rules stay anonymous: an
@@ -50,6 +51,7 @@ const RULE_GROUPS: ReadonlyArray<{
   { group: "tabario", rules: tabarioRules },
   { group: "structure", rules: structureRules },
   { group: "shaders", rules: shaderRules },
+  { group: "rootPaths", rules: rootPathRules },
 ];
 
 /**

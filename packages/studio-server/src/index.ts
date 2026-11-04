@@ -18,6 +18,7 @@ export type {
 export { MAX_UPLOAD_BYTES } from "./routes/files.js";
 export {
   createProjectSignature,
+  createProjectSignatureAsync,
   affectsProjectSignature,
   STUDIO_SIGNATURE_MANIFEST_PATHS,
 } from "./helpers/projectSignature.js";
@@ -41,7 +42,7 @@ export type {
   StudioSelectionTextField,
 } from "./types.js";
 export { isSafePath, walkDir } from "./helpers/safePath.js";
-export { stampProjectHfIds } from "./helpers/hfIdPersist.js";
+export { stampProjectHfIds, stampProjectHfIdsAsync } from "./helpers/hfIdPersist.js";
 export {
   patchElementInHtml,
   splitElementInHtml,
@@ -63,6 +64,7 @@ export { PREVIEW_BUNDLE_OPTIONS } from "./routes/preview.js";
 export { createPreviewDocumentStore } from "./helpers/previewDocumentStore.js";
 export { getMimeType, MIME_TYPES } from "./helpers/mime.js";
 export { decodeWellFormedEscapes, requestSubPath } from "./helpers/requestSubPath.js";
+export { MAX_OPEN_MEDIA_RANGE_BYTES, openRangeEnd } from "./helpers/mediaRange.js";
 export {
   consumeFileWriteReceipt,
   identifyFileWrite,

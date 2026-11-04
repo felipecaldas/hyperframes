@@ -20,7 +20,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, renameSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   DEFAULT_CONFIG,
@@ -29,6 +29,8 @@ import {
   extractAudioMetadata,
   getFfprobeBinary,
   ManagedChildProcess,
+  removeScratch,
+  renameWithRetry,
   runFfmpeg,
   trackChildProcess,
   type AudioMetadata,
@@ -46,10 +48,7 @@ const AUDIO_DURATION_TOLERANCE_SECONDS = 0.001;
 
 /**
  * Delivery headroom applied after every AAC encode in this stage.
- *
- * Not exported: it is read four times below and nowhere else, so the `export`
- * was a wider surface than the symbol has consumers for. The fork's fallow gate
- * flagged it as an unused export (TAB-1172).
+ * Shared with the delivery limiter before the final AAC correction.
  */
 export const AAC_DELIVERY_TRUE_PEAK_DBFS = -1;
 const MAX_TRUE_PEAK_CORRECTION_PASSES = 3;
@@ -343,7 +342,7 @@ export async function padOrTrimAudioToVideoFrameCount(
       }`,
     };
   } finally {
-    for (const path of plan.cleanupPaths) rmSync(path, { force: true });
+    for (const path of plan.cleanupPaths) removeScratch(path);
   }
 
   let loweredDb = 0;
@@ -389,6 +388,8 @@ export async function constrainAacTruePeak(input: {
   targetDurationSeconds: number;
   signal?: AbortSignal;
   timeoutMs?: number;
+  probeTruePeakDbfs?: (audioPath: string, signal?: AbortSignal) => Promise<number>;
+  encodeAac?: AacEncoder;
 }): Promise<{
   success: boolean;
   error?: string;
@@ -398,15 +399,19 @@ export async function constrainAacTruePeak(input: {
   const timeoutMs = input.timeoutMs ?? DEFAULT_CONFIG.ffmpegProcessTimeout;
   return enforceAacTruePeak({
     audioPath: input.audioPath,
+    sourcePath: input.sourcePath,
     targetDurationSeconds: input.targetDurationSeconds,
     signal: input.signal,
-    probeTruePeak: (audioPath, signal) => measureTruePeakDbfs(audioPath, { timeoutMs, signal }),
-    encode: defaultAacEncoder(timeoutMs, input.signal, input.sourcePath),
+    probeTruePeak:
+      input.probeTruePeakDbfs ??
+      ((audioPath, signal) => measureTruePeakDbfs(audioPath, { timeoutMs, signal })),
+    encode: input.encodeAac ?? defaultAacEncoder(timeoutMs, input.signal, input.sourcePath),
   });
 }
 
 interface EnforceAacTruePeakInput {
   audioPath: string;
+  sourcePath?: string;
   targetDurationSeconds: number;
   signal?: AbortSignal;
   probeTruePeak: (audioPath: string, signal?: AbortSignal) => Promise<number>;
@@ -440,7 +445,7 @@ async function enforceAacTruePeak(input: EnforceAacTruePeakInput): Promise<{
       if (pass === 0) initialTruePeakDbfs = truePeakDbfs;
       if (truePeakDbfs <= AAC_DELIVERY_TRUE_PEAK_DBFS) {
         if (measuredPath !== correctedPath) return { success: true };
-        renameSync(correctedPath, input.audioPath);
+        renameWithRetry(correctedPath, input.audioPath, { copyFallback: true });
         // Tabario fork: the limiter only touches peaks and never turns the mix
         // down, so upstream's whole-mix attenuation has no equivalent here. What
         // was lowered is the true peak, from its first measurement to its last.
@@ -490,7 +495,7 @@ async function enforceAacTruePeak(input: EnforceAacTruePeakInput): Promise<{
       )}`,
     };
   } finally {
-    if (scratchDir) rmSync(scratchDir, { recursive: true, force: true });
+    if (scratchDir) removeScratch(scratchDir);
   }
 }
 

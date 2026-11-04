@@ -21,6 +21,8 @@ export default defineConfig({
     colorGradingContract: "src/colorGradingContract.ts",
     subCompositionValidity: "src/subCompositionValidity.ts",
     ffBinaries: "src/ffBinaries.ts",
+    mediaAlpha: "src/mediaAlpha.ts",
+    mediaStreams: "src/mediaStreams.ts",
     assetResolution: "src/assetResolution.ts",
     htmlAttributeSpans: "src/htmlAttributeSpans.ts",
     timeSpans: "src/timeSpans.ts",

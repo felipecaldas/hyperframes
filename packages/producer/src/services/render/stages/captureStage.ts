@@ -26,13 +26,9 @@
  *   - `job.framesRendered` is updated at every per-frame / per-progress
  *     point; `Capturing frame N/M` goes through `reportFrameProgress`.
  *
- * Known follow-up: this stage imports `executeDiskCaptureWithAdaptiveRetry`
- * from `renderOrchestrator.ts`, which itself imports the stage — a runtime
- * cycle that resolves at module-init time because no stage function is
- * invoked during load. A subsequent PR will consolidate the capture
- * helpers (`executeDiskCaptureWithAdaptiveRetry`, `countFrameRanges`,
- * `safeCleanup`, `sampleDirectoryBytes`, etc.) into a shared module so
- * the stages can import them without reaching back into the orchestrator.
+ * Known follow-up: this stage imports `executeDiskCaptureWithAdaptiveRetry` from
+ * `renderOrchestrator.ts`, which imports the stage (a cycle that resolves at module init). The
+ * capture helpers should move to a shared module so stages stop reaching back into the orchestrator.
  */
 
 import { existsSync, readdirSync, statfsSync } from "node:fs";
@@ -45,6 +41,7 @@ import {
   type CapturePerfSummary,
   type CaptureSession,
   type EngineConfig,
+  type LandedFrame,
   captureFrame,
   captureFrameToBufferPipelined,
   verifyDiskDrawElementSamples,
@@ -71,7 +68,9 @@ import {
 } from "../../renderOrchestrator.js";
 import { wrapCaptureStageError } from "../captureStageError.js";
 import { reportFrameProgress, reportWorkerStartup } from "../shared.js";
+import { withWorkerPageErrors } from "../perfSummary.js";
 import type { SdrDiskCapturePlan } from "../capturePlan.js";
+import type { OpenStallAttempt } from "../observability.js";
 
 export interface CaptureStageInput {
   fileServer: FileServerHandle;
@@ -118,6 +117,11 @@ export interface CaptureStageInput {
    * When set, `endFrame - startFrame` MUST equal `totalFrames`.
    */
   frameRange?: { startFrame: number; endFrame: number };
+  onFrameLanded?: (frame: LandedFrame) => void;
+  interleaveFrames?: boolean;
+  /** Each capture attempt opens one, so a stalled attempt is retried by the ladders below. */
+  openAttempt?: OpenStallAttempt;
+  verifyFirstSession?: (session: CaptureSession) => Promise<void>;
 }
 
 export interface CaptureStageResult {
@@ -148,7 +152,6 @@ export function shouldAllowAdaptiveCaptureRetry(
 const JPEG_RAW_RGBA_DIVISOR = 8;
 /** Above draft's quality 80; quality-100 jpeg of grainy 4K footage measures about 1/6 of raw RGBA. */
 const HIGH_QUALITY_JPEG_RAW_RGBA_DIVISOR = 4;
-/** Frames captured before the measured projection replaces the static estimate. */
 const DISK_PROJECTION_SAMPLE_FRAMES = 10;
 
 export function estimateDiskCaptureBytes(
@@ -253,29 +256,6 @@ export function diskCaptureShortfallError(
   );
 }
 
-export function assertDiskCaptureHeadroom(
-  framesDir: string,
-  totalFrames: number,
-  captureOptions: CaptureOptions,
-  remedy: string,
-  freeDiskBytes?: (path: string) => number | null,
-): void {
-  const headroom = inspectDiskCaptureHeadroom(
-    framesDir,
-    totalFrames,
-    captureOptions,
-    freeDiskBytes,
-  );
-  if (headroom.available) return;
-  throw diskCaptureShortfallError(
-    headroom.estimatedBytes,
-    headroom.freeBytes,
-    framesDir,
-    "estimate",
-    remedy,
-  );
-}
-
 /** Frame bytes written so far: the merged frames dir plus every capture attempt's worker dirs. */
 export function measureCaptureFrameBytes(workDir: string, framesDir: string): number {
   let total = sampleDirectoryBytes(framesDir);
@@ -341,6 +321,7 @@ export async function runCaptureStage(input: CaptureStageInput): Promise<Capture
   let { workerCount } = plan;
   const { forceScreenshot } = plan;
   let lastBrowserConsole: string[] = [];
+  const workerPageErrors: string[] = [];
   let captureBeyondViewport: boolean | undefined = probeSession?.options.captureBeyondViewport;
 
   // Derive a local cfg view rather than reading `forceScreenshot` from the
@@ -376,9 +357,8 @@ export async function runCaptureStage(input: CaptureStageInput): Promise<Capture
     }
   }
 
-  const captureOptions = buildCaptureOptions();
+  const captureOptions = { ...buildCaptureOptions(), deFrameFallback: false };
   const remedy = diskCaptureRemedy(cfg, job.config.format ?? "mp4", job.duration ?? 0, workerCount);
-  assertDiskCaptureHeadroom(framesDir, totalFrames, captureOptions, remedy);
   const checkDiskProjection = createDiskCaptureProjection({
     framesDir,
     totalFrames,
@@ -402,12 +382,17 @@ export async function runCaptureStage(input: CaptureStageInput): Promise<Capture
       createBeforeCaptureHook: createRenderVideoFrameInjector,
       abortSignal,
       frameRangeStart: frameRange?.startFrame,
+      interleaveFrames: input.interleaveFrames,
       dedupPerfs,
+      pageErrorLines: workerPageErrors,
+      openAttempt: input.openAttempt,
+      verifyFirstSession: input.verifyFirstSession,
       onProgress: (progress) => {
         if (progress.latestWorkerPhase) {
           if (progress.capturedFrames === 0) reportWorkerStartup(job, progress, onProgress);
           return;
         }
+        if (progress.landedFrame) input.onFrameLanded?.(progress.landedFrame);
         job.framesRendered = progress.capturedFrames;
         checkDiskProjection(progress.capturedFrames);
         const frameProgress = progress.capturedFrames / progress.totalFrames;
@@ -422,6 +407,11 @@ export async function runCaptureStage(input: CaptureStageInput): Promise<Capture
       },
       cfg: captureCfg,
       log,
+    }).catch((error: unknown) => {
+      throw wrapCaptureStageError(
+        error,
+        withWorkerPageErrors(probeSession?.browserConsoleBuffer ?? [], workerPageErrors),
+      );
     });
     captureAttempts.push(...attempts);
     const lastAttempt = attempts[attempts.length - 1];
@@ -434,6 +424,7 @@ export async function runCaptureStage(input: CaptureStageInput): Promise<Capture
       await closeCaptureSession(probeSession);
       probeSession = null;
     }
+    lastBrowserConsole = withWorkerPageErrors(lastBrowserConsole, workerPageErrors);
   } else {
     const sequential = await runSequentialDiskCapture(
       input,
@@ -486,6 +477,11 @@ async function runSequentialDiskCapture(
   let resumeFrom = 0;
 
   while (true) {
+    const attempt = input.openAttempt?.();
+    const assertAttemptActive = () => {
+      assertNotAborted();
+      attempt?.throwIfAborted();
+    };
     const videoInjector = createRenderVideoFrameInjector();
     const session =
       probeSession ??
@@ -506,11 +502,11 @@ async function runSequentialDiskCapture(
         probeSession = null;
       }
       await ensureSessionReady(session);
-      assertNotAborted();
+      assertAttemptActive();
       lastBrowserConsole = session.browserConsoleBuffer;
 
       await captureSessionFrames(session, {
-        input,
+        input: { ...input, assertNotAborted: assertAttemptActive },
         rangeStart,
         rangeEnd,
         resumeFrom,

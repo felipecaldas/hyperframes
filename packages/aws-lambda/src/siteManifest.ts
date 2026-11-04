@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { extname, join } from "node:path";
 import type { S3Client } from "@aws-sdk/client-s3";
 import type { RemoteProjectFile } from "@hyperframes/producer/distributed";
-import { contentStoreUri } from "./contentStore.js";
+import { audioSidecarUri, contentStoreUri, probeFactsUri } from "./contentStore.js";
 import {
   downloadS3ObjectToFile,
   downloadS3ObjectToFileVerified,
@@ -13,6 +13,7 @@ import {
   mapConcurrent,
   parseS3Uri,
   presignS3GetUrl,
+  s3ObjectExists,
 } from "./s3Transport.js";
 
 const SITE_MANIFEST_NAME = "files.json";
@@ -80,8 +81,20 @@ export async function downloadSiteFiles(
   await mapConcurrent(files, 16, async ({ path, sha256, sizeBytes }) => {
     const uri = contentStoreUri(bucket, sha256);
     if (leaveVideosRemote && VIDEO_EXTENSIONS_PLANNED_IN_PLACE.has(extname(path).toLowerCase())) {
+      const sidecar = audioSidecarUri(bucket, sha256);
+      const facts = probeFactsUri(bucket, sha256);
+      const [hasSidecar, hasFacts] = await Promise.all([
+        s3ObjectExists(s3, sidecar),
+        s3ObjectExists(s3, facts),
+      ]);
       remoteFiles[path] = {
         url: await presignS3GetUrl(s3, uri, REMOTE_URL_TTL_SECONDS),
+        ...(hasSidecar
+          ? { audioSidecarUrl: await presignS3GetUrl(s3, sidecar, REMOTE_URL_TTL_SECONDS) }
+          : {}),
+        ...(hasFacts
+          ? { probeFactsUrl: await presignS3GetUrl(s3, facts, REMOTE_URL_TTL_SECONDS) }
+          : {}),
         sha256,
         sizeBytes,
       };

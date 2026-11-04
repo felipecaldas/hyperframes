@@ -11,8 +11,10 @@ import {
   RUNTIME_BOOTSTRAP_ATTR,
   stripEmbeddedRuntimeScripts,
 } from "@hyperframes/core/compiler";
-import { isFullHtmlDocument } from "@hyperframes/core/compiler/html-document";
+import { findStartTags, isFullHtmlDocument } from "@hyperframes/core/compiler/html-document";
 import { vendoredGsapScriptTag } from "./vendoredGsap.js";
+import { htmlHasGsapCore, insertGsapCoreBeforeHeadPlugin } from "./gsapCoreScript.js";
+import { withRootPathsRelative } from "./rootPaths.js";
 
 /**
  * Rewrite relative asset paths in a parsed DOM tree. Shared across all
@@ -28,7 +30,7 @@ import { vendoredGsapScriptTag } from "./vendoredGsap.js";
 function rewriteRelativePaths(root: ParentNode, compPath: string, projectDir: string): void {
   const assetExists = (path: string) => existsSync(join(projectDir, path));
   rewriteAssetPaths(
-    root.querySelectorAll("[src], [href]"),
+    root.querySelectorAll("[src], [href], [srcset]"),
     compPath,
     (el: Element, attr: string) => el.getAttribute(attr),
     (el: Element, attr: string, value: string) => el.setAttribute(attr, value),
@@ -281,6 +283,7 @@ export function buildSubCompositionHtml(
   runtimeUrl: string,
   baseHref?: string,
   rawOverride?: string,
+  _gsapBaseUrl?: string,
 ): string | null {
   const compFile = join(projectDir, compPath);
   if (!existsSync(compFile)) return null;
@@ -355,6 +358,10 @@ export function buildSubCompositionHtml(
   // links, and meta tags are preserved. Placed after the project head so
   // the composition's deps take precedence (last-write-wins for scripts).
   if (compHeadContent) headContent += `\n${compHeadContent}`;
+  if (baseHref) {
+    headContent = withRootPathsRelative(headContent, baseHref);
+    rewrittenContent = withRootPathsRelative(rewrittenContent, baseHref);
+  }
 
   // The borrowed project head may size html/body to the parent composition's
   // canvas. A standalone sub-composition preview has its own viewport, derived
@@ -372,12 +379,9 @@ export function buildSubCompositionHtml(
   headContent += `\n<script ${RUNTIME_BOOTSTRAP_ATTR}="1" src="${runtimeUrl}"></script>`;
 
   // Fallback: if no index.html head was found, add minimal deps
-  if (!headContent.includes("gsap")) {
-    // Tabario fork (TAB-697): was a jsdelivr URL pinned to a FLOATING `gsap@3`
-    // range, so the CDN could hand a sub-composition a different GSAP build
-    // from one render to the next. Now the same single vendored version every
-    // other injection site uses, served from our own origin.
-    headContent += `\n${vendoredGsapScriptTag("gsap.min.js")}`;
+  if (!htmlHasGsapCore(headContent)) {
+    const core = vendoredGsapScriptTag("gsap.min.js");
+    headContent = insertGsapCoreBeforeHeadPlugin(headContent, core) ?? `${headContent}\n${core}`;
   }
 
   const htmlOpen = htmlAttrs ? `<html ${htmlAttrs}>` : "<html>";
@@ -397,5 +401,5 @@ ${rewrittenContent}
 
 /** True for a real `<base>` element; the text "<base" inside a script or comment does not count. */
 export function hasBaseElement(html: string): boolean {
-  return parseHTML(html).document.querySelector("base") !== null;
+  return findStartTags(html, "base").length > 0;
 }

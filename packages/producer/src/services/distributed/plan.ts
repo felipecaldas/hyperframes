@@ -1,3 +1,9 @@
+import {
+  REFERENCE_BACKGROUND_FIELD,
+  referenceBackgroundResult,
+  createReferenceBackgroundRecorder,
+  type ReferenceBackgroundResult,
+} from "@hyperframes/engine";
 import { audioFailureDiagnostics } from "@hyperframes/engine";
 /**
  * Activity A of the distributed render pipeline.
@@ -33,7 +39,6 @@ import {
   existsSync,
   linkSync,
   mkdirSync,
-  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -48,9 +53,14 @@ import {
   type EngineConfig,
   type VideoFrameFormat,
   getEncoderPreset,
+  type ProresProfile,
+  keyframeIntervalToGopSize,
   normalizeVp9CpuUsed,
   resolveConfig,
   type AudioProcessingFailure,
+  declareContentAddressedUrl,
+  renameWithRetry,
+  declareProbeFactsUrl,
 } from "@hyperframes/engine";
 import { defaultLogger, type ProducerLogger } from "../../logger.js";
 import {
@@ -60,14 +70,19 @@ import {
 } from "../renderOrchestrator.js";
 import { closeFileServerSafely } from "../fileServer.js";
 import { measurePlanSecondsPerFrame } from "./planFrameCost.js";
-import { constrainAacTruePeak } from "../render/audioPadTrim.js";
-import { encoderFailureError } from "../render/encoderInterruption.js";
+import {
+  buildWeightedChunkSlices,
+  planFrameWeights,
+  withChunkCaptureCost,
+} from "./chunkWeights.js";
 import { runAudioStage } from "../render/stages/audioStage.js";
 import { runCompileStage } from "../render/stages/compileStage.js";
 import {
+  appendVideoAudioFromProbe,
   assertVideoExtractionSucceeded,
   runExtractVideosStage,
 } from "../render/stages/extractVideosStage.js";
+import { readPlanReferenceBackground } from "../render/planReferenceBackground.js";
 import { runProbeStage } from "../render/stages/probeStage.js";
 import {
   type ChunkSliceJson,
@@ -100,6 +115,7 @@ import {
   readFfmpegVersion,
   readProducerVersion,
 } from "./shared.js";
+import type { RenderRequestOptions } from "../../renderRequest.js";
 import { writeChunkAudioSlices } from "./chunkAudio.js";
 import { PLAN_PROTOCOL_V1, type PlanProtocolV1Descriptor } from "./planProtocol.js";
 import {
@@ -113,7 +129,7 @@ import {
  * `height`, and `format` are required; everything else carries a default
  * sensible for AWS Lambda fan-out.
  */
-export interface DistributedRenderConfig {
+export interface DistributedRenderConfig extends Pick<RenderRequestOptions, "pageMotionBlur"> {
   /** Integer frame rate. Distributed renders only accept integer fps; the in-process renderer's `Fps` rational handles NTSC. */
   fps: DistributedFps;
   width: number;
@@ -148,6 +164,14 @@ export interface DistributedRenderConfig {
   crf?: number;
   /** Target video bitrate (e.g. `"10M"`); mutually exclusive with `crf`. */
   bitrate?: string;
+  /** Longest gap between keyframes, in seconds (mp4). Chunk joins add keyframes, so this is a maximum. */
+  keyframeIntervalSeconds?: number;
+  /** ProRes profile for `format: "mov"`; the 422 profiles have no alpha. Defaults to `4444`. */
+  proresProfile?: ProresProfile;
+  /** Peak bitrate cap (mp4), per chunk. */
+  maxBitrate?: string;
+  /** Rate-cap buffer; defaults to twice `maxBitrate`. */
+  bufferSize?: string;
   /**
    * Source-video frame extraction format. Defaults to `"auto"`, matching the
    * in-process renderer: alpha/alpha-capable sources extract as PNG, other
@@ -285,7 +309,7 @@ export interface DistributedRenderConfig {
 }
 
 /** Shared local representation consumed by both distributed plan transports. */
-export interface LocalExecutionPlan {
+export interface LocalExecutionPlan extends Partial<ReferenceBackgroundResult> {
   executionPlanDir: string;
   executionPlanHash: string;
   chunkCount: number;
@@ -327,6 +351,10 @@ export interface BuildLocalExecutionPlanOptions {
 
 export interface RemoteProjectFile {
   readonly url: string;
+  /** A file of only this video's audio, when one was stored: the audio mix reads it, not the video. */
+  readonly audioSidecarUrl?: string;
+  /** The file's stored ffprobe JSON: the plan reads it instead of probing the file over the network. */
+  readonly probeFactsUrl?: string;
   readonly sha256: string;
   readonly sizeBytes: number;
 }
@@ -342,7 +370,7 @@ export function logPlanStage(log: ProducerLogger, stage: string, startedAt: numb
  * @deprecated Use `planV2()` or `planV2WithPublisher()` for new integrations.
  * The v1 result remains supported for existing transports.
  */
-export interface PlanResult {
+export interface PlanResult extends Partial<ReferenceBackgroundResult> {
   planDir: string;
   planProtocol: Readonly<PlanProtocolV1Descriptor>;
   planHash: string;
@@ -425,6 +453,8 @@ export const DEFAULT_MAX_PARALLEL_CHUNKS = 16;
  * outweighs the parallelism gain on tiny renders.
  */
 export const MIN_CHUNK_SIZE = 10;
+/** Largest `chunkSize`; `validateDistributedRenderConfig` enforces it, and cost-weighted chunks stay under it. */
+export const MAX_CHUNK_SIZE = 3600;
 /** Most chunks one render may plan; `validateDistributedRenderConfig` enforces it on `maxParallelChunks`. */
 export const MAX_PARALLEL_CHUNKS_CEILING = 256;
 // 0.11 s per megapixel-frame (~0.23 s per 1080p frame) was measured on one simple 1080p fixture on a
@@ -479,7 +509,6 @@ export function chunkSizingUsesFrameCost(
 export const CHUNK_EXCEEDS_WORKER_TIMEOUT = "CHUNK_EXCEEDS_WORKER_TIMEOUT";
 
 export class ChunkExceedsWorkerTimeoutError extends Error {
-  // fallow-ignore-next-line unused-class-member
   readonly code: typeof CHUNK_EXCEEDS_WORKER_TIMEOUT = CHUNK_EXCEEDS_WORKER_TIMEOUT;
   constructor(predictedChunkSeconds: number, workerTimeoutSeconds: number) {
     super(
@@ -492,6 +521,14 @@ export class ChunkExceedsWorkerTimeoutError extends Error {
     );
     this.name = "ChunkExceedsWorkerTimeoutError";
   }
+}
+
+/** Frames one chunk can capture inside the worker time limit, after the per-chunk overhead. */
+function framesWithinWorkerTimeout(workerTimeoutSeconds: number, secondsPerFrame: number): number {
+  return Math.floor(
+    (workerTimeoutSeconds * WORKER_TIMEOUT_MARGIN - ESTIMATED_CHUNK_OVERHEAD_SECONDS) /
+      secondsPerFrame,
+  );
 }
 
 /**
@@ -526,10 +563,7 @@ export function resolveMaxParallelChunks(
   const wide = Math.max(1, Math.min(wave, Math.floor(totalFrames / minFramesPerChunk)));
   if (workerTimeoutSeconds === undefined) return wide;
 
-  const maxFramesPerChunk = Math.floor(
-    (workerTimeoutSeconds * WORKER_TIMEOUT_MARGIN - ESTIMATED_CHUNK_OVERHEAD_SECONDS) /
-      secondsPerFrame,
-  );
+  const maxFramesPerChunk = framesWithinWorkerTimeout(workerTimeoutSeconds, secondsPerFrame);
   const needed = maxFramesPerChunk < 1 ? Infinity : Math.ceil(totalFrames / maxFramesPerChunk);
   if (needed > MAX_PARALLEL_CHUNKS_CEILING) {
     const framesAtCeiling = Math.ceil(totalFrames / MAX_PARALLEL_CHUNKS_CEILING);
@@ -628,7 +662,6 @@ export const FORMAT_NOT_SUPPORTED_IN_DISTRIBUTED = "FORMAT_NOT_SUPPORTED_IN_DIST
  * gate.
  */
 export class FormatNotSupportedInDistributedError extends Error {
-  // fallow-ignore-next-line unused-class-member
   readonly code: typeof FORMAT_NOT_SUPPORTED_IN_DISTRIBUTED = FORMAT_NOT_SUPPORTED_IN_DISTRIBUTED;
   readonly format: string;
   readonly reason: string;
@@ -834,6 +867,32 @@ export function buildChunkSlices(
 }
 
 /**
+ * The plan's chunk cut: auto-sized plans re-cut the same chunk count by estimated capture cost;
+ * explicit `chunkSize` or uniform cost keeps {@link buildChunkSlices}; `targetChunkFrames` and the time limit cap it.
+ */
+export function buildPlanChunkSlices(
+  frameWeights: Float64Array,
+  config: Pick<DistributedRenderConfig, "chunkSize" | "targetChunkFrames">,
+  chunkCount: number,
+  effectiveChunkSize: number,
+  maxFramesPerChunk = Infinity,
+): ChunkSliceJson[] {
+  const weighted =
+    config.chunkSize === undefined
+      ? buildWeightedChunkSlices(
+          frameWeights,
+          chunkCount,
+          MIN_CHUNK_SIZE,
+          Math.min(config.targetChunkFrames ?? MAX_CHUNK_SIZE, MAX_CHUNK_SIZE, maxFramesPerChunk),
+        )
+      : null;
+  return withChunkCaptureCost(
+    weighted ?? buildChunkSlices(frameWeights.length, chunkCount, effectiveChunkSize),
+    frameWeights,
+  );
+}
+
+/**
  * Hash the deterministic-font bundle that ships inside `@hyperframes/producer`.
  * The compiled HTML already inlines per-family `@font-face` data URIs, so the
  * snapshot SHA exists primarily to detect cross-version font-bundle drift on
@@ -908,6 +967,12 @@ function buildLockedRenderConfig(input: {
     preset,
     crf: config.crf,
     bitrate: config.bitrate,
+    maxBitrate: config.maxBitrate,
+    bufferSize: config.bufferSize,
+    keyframeIntervalFrames:
+      config.keyframeIntervalSeconds === undefined
+        ? undefined
+        : keyframeIntervalToGopSize({ num: config.fps, den: 1 }, config.keyframeIntervalSeconds),
     ...locksVp9CpuUsed,
     // GOP === chunkSize so every chunk's first frame is an IDR keyframe and
     // ffmpeg concat-copy round-trips losslessly.
@@ -915,10 +980,15 @@ function buildLockedRenderConfig(input: {
     closedGop: true,
     forceKeyframes: "n=0",
     pixelFormat,
+    // Omitted for the default so existing 4444 plans keep their planHash.
+    ...(config.proresProfile && config.proresProfile !== "4444"
+      ? { proresProfile: config.proresProfile }
+      : {}),
     chunkSize: input.effectiveChunkSize,
     chunkCount: input.chunkCount,
     runtimeEnv: input.runtimeEnv,
     variables: config.variables,
+    pageMotionBlur: config.pageMotionBlur,
     ...(input.chunksCarryAudio ? { chunksCarryAudio: true } : {}),
     ...(input.separateAudio ? { separateAudio: true } : {}),
   };
@@ -961,7 +1031,11 @@ function resolveEncoderTriple(config: DistributedRenderConfig): EncoderTriple {
         `libvpx-vp9, and png-sequence has no encoder.`,
     );
   }
-  return resolveNonMp4EncoderTriple(config.format, config.quality ?? "standard");
+  return resolveNonMp4EncoderTriple(
+    config.format,
+    config.quality ?? "standard",
+    config.proresProfile,
+  );
 }
 
 function resolveMp4EncoderTriple(codec: DistributedRenderConfig["codec"]): EncoderTriple {
@@ -986,9 +1060,11 @@ function resolveMp4EncoderTriple(codec: DistributedRenderConfig["codec"]): Encod
 function resolveNonMp4EncoderTriple(
   format: Exclude<DistributedFormat, "mp4">,
   quality: "draft" | "standard" | "high",
+  proresProfile?: ProresProfile,
 ): EncoderTriple {
   if (format === "mov") {
-    return { encoder: "prores-software", pixelFormat: "yuva444p10le", preset: "4444" };
+    const { pixelFormat, preset } = getEncoderPreset(quality, "mov", undefined, proresProfile);
+    return { encoder: "prores-software", pixelFormat, preset };
   }
   if (format === "webm") {
     // Defer to `getEncoderPreset` for the libvpx-vp9 preset string so the
@@ -1091,7 +1167,7 @@ export function plansSeparateAudio(
   config: Pick<DistributedRenderConfig, "format" | "cfr">,
   options: Pick<BuildLocalExecutionPlanOptions, "deferAudio">,
 ): boolean {
-  return options.deferAudio === true && config.format === "mp4" && config.cfr !== true;
+  return options.deferAudio === true && config.format !== "png-sequence" && config.cfr !== true;
 }
 
 // The plan's copy, compile and probe, shared by the plan and by buildPlanAudio so both see the
@@ -1204,12 +1280,21 @@ async function compilePlanComposition(
   // ── Compile ──
   const remoteFiles = Object.entries(options.remoteFiles ?? {});
   const remoteLocalPath = (rel: string) => join(projectDir, ...rel.split("/"));
+  for (const [, file] of remoteFiles) {
+    declareContentAddressedUrl(file.url, file.sha256);
+    if (file.probeFactsUrl) declareProbeFactsUrl(file.url, file.probeFactsUrl);
+  }
   // Keyed by the path each file would have had, which is what every media resolver computes.
   const urlByAbsentLocalPath = new Map(
     remoteFiles.map(([rel, file]) => [remoteLocalPath(rel), file.url]),
   );
   const localPathByUrl = new Map(
     remoteFiles.map(([rel, file]) => [file.url, remoteLocalPath(rel)]),
+  );
+  const audioSidecarUrlByLocalPath = new Map(
+    remoteFiles.flatMap(([rel, file]) =>
+      file.audioSidecarUrl ? [[remoteLocalPath(rel), file.audioSidecarUrl] as const] : [],
+    ),
   );
 
   stageStarted = Date.now();
@@ -1232,6 +1317,7 @@ async function compilePlanComposition(
     // the Lambda/worker filesystem won't have the same fonts installed.
     allowSystemFontCapture: false,
     variables: config.variables,
+    pageMotionBlur: job.config.pageMotionBlur,
   });
   logPlanStage(log, "compile", stageStarted);
   let compiled = compileResult.compiled;
@@ -1261,10 +1347,11 @@ async function compilePlanComposition(
   }
 
   // ── Probe ──
-  // Browser probe runs only when needed. For statically-resolvable durations
-  // this is a near-zero pass.
   stageStarted = Date.now();
   const probeResult = await runProbeStage({
+    recordReferenceBackground: createReferenceBackgroundRecorder((result) =>
+      Object.assign(job, result),
+    ),
     projectDir,
     workDir,
     job,
@@ -1282,6 +1369,21 @@ async function compilePlanComposition(
     subTimelineWaitMemo: {},
   });
   logPlanStage(log, "probe", stageStarted);
+  if (!probeResult.probeSession) {
+    stageStarted = Date.now();
+    Object.assign(
+      job,
+      await readPlanReferenceBackground({
+        projectDir,
+        workDir,
+        cfg,
+        log,
+        options: { width, height, fps: job.config.fps, variables: job.config.variables },
+      }),
+    );
+    assertNotAborted();
+    logPlanStage(log, "reference_background", stageStarted);
+  }
   compiled = probeResult.compiled;
   job.duration = probeResult.duration;
   job.totalFrames = probeResult.totalFrames;
@@ -1317,6 +1419,7 @@ async function compilePlanComposition(
     finalCompiledDir,
     remoteFiles,
     urlByAbsentLocalPath,
+    audioSidecarUrlByLocalPath,
     localPathByUrl,
     compileResult,
     compiled,
@@ -1325,28 +1428,29 @@ async function compilePlanComposition(
     forceScreenshot,
     width,
     height,
-    probeResult,
     totalFrames,
   };
 }
 
 type PlanComposition = Awaited<ReturnType<typeof compilePlanComposition>>;
 
-/** The composition's mix at `seconds`, keeping the float mix at `pcmPath` when given. */
-function mixPlanAudio(c: PlanComposition, compiledDir: string, seconds: number, pcmPath?: string) {
+/** The composition's audio fitted to the video frames by the shared audio stage. */
+function mixPlanAudio(c: PlanComposition, compiledDir: string) {
   return runAudioStage({
     projectDir: c.projectDir,
     workDir: c.workDir,
     compiledDir,
     urlByAbsentLocalPath: c.urlByAbsentLocalPath,
-    duration: seconds,
+    audioSidecarUrlByLocalPath: c.audioSidecarUrlByLocalPath,
+    totalFrames: c.totalFrames,
+    fps: c.job.config.fps,
     ffmpegProcessTimeout: c.cfg.ffmpegProcessTimeout,
     audioGain: c.cfg.audioGain,
     audios: c.composition.audios,
     masterFxChain: c.composition.masterFxChain,
-    ...(pcmPath ? { keepEncoderInputAt: pcmPath } : {}),
     abortSignal: c.abortSignal,
     assertNotAborted: c.assertNotAborted,
+    log: c.log,
   });
 }
 
@@ -1369,25 +1473,9 @@ async function extractPlanVideos(c: PlanComposition, deferRangeExtraction: boole
     // A chunk cannot fall back to decoding a source the planner held: a missing frame set
     // renders as a silent blank video, so every declared source must extract.
     assertVideoExtractionSucceeded(extractResult.extractionResult);
+    c.log.info("[plan] extract phases", { ...extractResult.extractionResult.phaseBreakdown });
   }
   return extractResult;
-}
-
-/** Holds the mixed track at `audioPath` to the delivery true-peak ceiling, from its float mix. */
-async function holdPlanAudioPeak(
-  c: PlanComposition,
-  audioPath: string,
-  pcmPath: string,
-  seconds: number,
-): Promise<void> {
-  const peak = await constrainAacTruePeak({
-    audioPath,
-    ...(existsSync(pcmPath) ? { sourcePath: pcmPath } : {}),
-    targetDurationSeconds: seconds,
-    signal: c.abortSignal,
-    timeoutMs: c.cfg.ffmpegProcessTimeout,
-  }).finally(() => rmSync(pcmPath, { force: true }));
-  if (!peak.success) throw encoderFailureError("[plan] audio true-peak check failed", peak);
 }
 
 export async function buildLocalExecutionPlan(
@@ -1416,7 +1504,6 @@ export async function buildLocalExecutionPlan(
     forceScreenshot,
     width,
     height,
-    probeResult,
     totalFrames,
   } = c;
 
@@ -1460,13 +1547,13 @@ export async function buildLocalExecutionPlan(
   const videoSourcesDir = join(planDir, "video-sources");
   rmSync(videoSourcesDir, { recursive: true, force: true });
   if (existsSync(stagedVideoFrames)) {
-    renameSync(stagedVideoFrames, videoFramesDst);
+    renameWithRetry(stagedVideoFrames, videoFramesDst);
   } else {
     mkdirSync(videoFramesDst, { recursive: true });
   }
 
   if (existsSync(finalCompiledDir)) rmSync(finalCompiledDir, { recursive: true, force: true });
-  renameSync(compiledDir, finalCompiledDir);
+  renameWithRetry(compiledDir, finalCompiledDir);
 
   // `meta/videos.json` is the contract that makes distributed renders
   // pixel-comparable to in-process for compositions with video sources —
@@ -1526,20 +1613,19 @@ export async function buildLocalExecutionPlan(
   const digests: PlanFileDigests = options.digests ?? new Map();
   const separateAudio = plansSeparateAudio(config, options);
   const chunksCarryAudio = !separateAudio && carriesChunkAudio(config, options);
-  // Chunks cut their audio from this track, so it is mixed to the frames' exact length in its one
-  // encode; the assembler pads or trims the track of any other plan.
-  const audioSeconds = chunksCarryAudio ? totalFrames / config.fps : probeResult.duration;
-  const planMixPcmPath = join(workDir, "plan-mix.wav");
+  const frameWeights = planFrameWeights({
+    videos: planVideosJson.videos,
+    extracted: planVideosJson.extracted,
+    totalFrames,
+    fps: config.fps,
+    width,
+    height,
+  });
   stageStarted = Date.now();
   const [audioOutcome, overlapOutcome, frameCostOutcome] = await Promise.allSettled([
     separateAudio
       ? null
-      : mixPlanAudio(
-          c,
-          finalCompiledDir,
-          audioSeconds,
-          chunksCarryAudio ? planMixPcmPath : undefined,
-        ).finally(() => logPlanStage(log, "audio", stageStarted)),
+      : mixPlanAudio(c, finalCompiledDir).finally(() => logPlanStage(log, "audio", stageStarted)),
     (async () => {
       for (const dir of [finalCompiledDir, videoFramesDst, videoSourcesDir]) {
         await prehashPlanFiles(dir, digests);
@@ -1589,7 +1675,18 @@ export async function buildLocalExecutionPlan(
     maxParallel,
     config.targetChunkFrames,
   );
-  const chunks = buildChunkSlices(totalFrames, chunkCount, effectiveChunkSize);
+  const chunks = buildPlanChunkSlices(
+    frameWeights,
+    config,
+    chunkCount,
+    effectiveChunkSize,
+    chunkSizingUsesFrameCost(config) && config.workerTimeoutSeconds !== undefined
+      ? framesWithinWorkerTimeout(
+          config.workerTimeoutSeconds,
+          estimateFrameSeconds(megapixels, frameCostOutcome.value),
+        )
+      : undefined,
+  );
   const audioResult = audioOutcome.value;
   if (audioResult?.audioError) {
     applyDistributedAudioWarningPolicy(job, audioResult.audioError, audioResult.audioFailures, log);
@@ -1597,12 +1694,9 @@ export async function buildLocalExecutionPlan(
 
   const planAudioPath = join(planDir, PLAN_AUDIO_RELATIVE_PATH);
   if (audioResult?.hasAudio && existsSync(audioResult.audioOutputPath)) {
-    renameSync(audioResult.audioOutputPath, planAudioPath);
+    renameWithRetry(audioResult.audioOutputPath, planAudioPath);
   }
   if (chunksCarryAudio && existsSync(planAudioPath)) {
-    stageStarted = Date.now();
-    await holdPlanAudioPeak(c, planAudioPath, planMixPcmPath, audioSeconds);
-    logPlanStage(log, "audio-peak", stageStarted);
     if (options.sliceChunkAudio) {
       stageStarted = Date.now();
       await writeChunkAudioSlices({
@@ -1638,6 +1732,7 @@ export async function buildLocalExecutionPlan(
   // the planDir to compute planHash from the actual bytes the chunk worker
   // will read.
   const compositionJson: CompositionMetadataJson = {
+    ...referenceBackgroundResult(job[REFERENCE_BACKGROUND_FIELD]),
     durationSeconds: job.duration ?? 0,
     width,
     height,
@@ -1718,6 +1813,7 @@ export async function buildLocalExecutionPlan(
   });
 
   return {
+    ...referenceBackgroundResult(job[REFERENCE_BACKGROUND_FIELD]),
     executionPlanDir: planDir,
     executionPlanHash: planHash,
     chunkCount,
@@ -1747,22 +1843,17 @@ export async function buildPlanAudio(
     executionPlanSizeLimitBytes: Number.MAX_SAFE_INTEGER,
   });
   try {
-    const seconds = c.totalFrames / config.fps;
-    const pcmPath = join(c.workDir, "plan-mix.wav");
     let stageStarted = Date.now();
-    await extractPlanVideos(c, true);
+    await appendVideoAudioFromProbe(c);
     logPlanStage(c.log, "extract", stageStarted);
     stageStarted = Date.now();
-    const mixed = await mixPlanAudio(c, c.compiledDir, seconds, pcmPath);
+    const mixed = await mixPlanAudio(c, c.compiledDir);
     logPlanStage(c.log, "audio", stageStarted);
     if (mixed.audioError) {
       applyDistributedAudioWarningPolicy(c.job, mixed.audioError, mixed.audioFailures, c.log);
     }
     if (!mixed.hasAudio || !existsSync(mixed.audioOutputPath)) return { hasAudio: false };
-    renameSync(mixed.audioOutputPath, outputPath);
-    stageStarted = Date.now();
-    await holdPlanAudioPeak(c, outputPath, pcmPath, seconds);
-    logPlanStage(c.log, "audio-peak", stageStarted);
+    renameWithRetry(mixed.audioOutputPath, outputPath);
     return { hasAudio: true };
   } finally {
     rmSync(c.workDir, { recursive: true, force: true });
@@ -1783,6 +1874,7 @@ export async function plan(
 ): Promise<PlanResult> {
   const executionPlan = await buildLocalExecutionPlan(projectDir, config, planDir, options);
   return {
+    ...referenceBackgroundResult(executionPlan[REFERENCE_BACKGROUND_FIELD]),
     planDir: executionPlan.executionPlanDir,
     planProtocol: PLAN_PROTOCOL_V1,
     planHash: executionPlan.executionPlanHash,

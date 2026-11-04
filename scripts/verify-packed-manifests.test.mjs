@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { Worker } from "node:worker_threads";
 import {
+  ageBlockedPackages,
   CONSUMER_TSCONFIG,
   countTypeErrorsByPackage,
   installConsumer,
+  keepPackedTarballs,
   listPackedExportContracts,
   listPackageSizeIssues,
   listPackedJavaScriptImportIssues,
@@ -27,14 +29,34 @@ describe("packed manifest verifier", () => {
     assert.deepEqual(listPackageSizeIssues("pkg", { packed: 950, unpacked: 3900 }, budget), []);
   });
 
-  it("fails a package over its size budget", () => {
+  it("passes a package a few hundred bytes over its budget, within 1%", () => {
+    const budget = { packed: 73369, unpacked: 266805 };
+    // The sizes the 0.8.187 publish job measured for aws-lambda: 115 B and 208 B over.
+    assert.deepEqual(listPackageSizeIssues("pkg", { packed: 73484, unpacked: 267013 }, budget), []);
+    assert.deepEqual(
+      listPackageSizeIssues(
+        "pkg",
+        { packed: 1010, unpacked: 4040 },
+        {
+          packed: 1000,
+          unpacked: 4000,
+        },
+      ),
+      [],
+    );
+  });
+
+  it("fails a package more than 1% over its size budget", () => {
     const issues = listPackageSizeIssues(
       "pkg",
-      { packed: 1001, unpacked: 3900 },
+      { packed: 1011, unpacked: 3900 },
       { packed: 1000, unpacked: 4000 },
     );
     assert.equal(issues.length, 1);
-    assert.match(issues[0], /pkg packed size 1001 bytes is over its budget of 1000/);
+    assert.match(
+      issues[0],
+      /pkg packed size 1011 bytes is over its budget of 1000 by more than 1%/,
+    );
   });
 
   it("makes a budget follow a package down once it shrinks", () => {
@@ -353,6 +375,30 @@ async function withRegistry(name, versions, run) {
   }
 }
 
+describe("ageBlockedPackages", () => {
+  const blockedBy = (first, second, name, range) =>
+    `Resolving dependencies\nerror: No version matching "${first}" found for specifier "${second}" (blocked by minimum-release-age: 86400 seconds)\nerror: ${name}@${range} failed to resolve\n`;
+
+  it("names the package whichever order bun quotes it in", () => {
+    assert.deepEqual(ageBlockedPackages(blockedBy("fake-dep", "^1.1.0", "fake-dep", "^1.1.0")), [
+      "fake-dep",
+    ]);
+    assert.deepEqual(ageBlockedPackages(blockedBy("^1.1.0", "fake-dep", "fake-dep", "^1.1.0")), [
+      "fake-dep",
+    ]);
+    assert.deepEqual(
+      ageBlockedPackages(blockedBy("^2.0.1", "@scope/pkg", "@scope/pkg", "^2.0.1")),
+      ["@scope/pkg"],
+    );
+  });
+
+  it("names none when bun's output does not say which token is the package", () => {
+    const unpaired = `error: No version matching "^1.1.0" found for specifier "fake-dep" (blocked by minimum-release-age: 86400 seconds)\n`;
+    assert.equal(ageBlockedPackages(unpaired), null);
+    assert.equal(ageBlockedPackages("error: fake-dep@^9.0.0 failed to resolve\n"), null);
+  });
+});
+
 describe("packed consumer install", () => {
   /** Installs `deps` into a fresh consumer against the registry; returns the installed fake-dep version. */
   function install(registry, dir, deps) {
@@ -397,5 +443,18 @@ describe("packed consumer install", () => {
     await withRegistry("fake-dep", versions, (registry, dir) =>
       assert.throws(() => install(registry, dir, { "missing-dep": "^1.0.0" }), /missing-dep/),
     );
+  });
+});
+
+describe("keepPackedTarballs", () => {
+  it("copies the tarballs and nothing else", () => {
+    const from = mkdtempSync(join(tmpdir(), "keep-from-"));
+    const to = join(mkdtempSync(join(tmpdir(), "keep-to-")), "out");
+    writeFileSync(join(from, "a-1.0.0.tgz"), "a");
+    writeFileSync(join(from, "notes.txt"), "x");
+    keepPackedTarballs(from, to);
+    assert.deepEqual(readdirSync(to), ["a-1.0.0.tgz"]);
+    assert.equal(readFileSync(join(to, "a-1.0.0.tgz"), "utf8"), "a");
+    rmSync(from, { recursive: true, force: true });
   });
 });

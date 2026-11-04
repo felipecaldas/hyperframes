@@ -226,13 +226,10 @@ export function useAppHotkeys({
   const handleAppKeyDown = useCallback((event: KeyboardEvent) => {
     const cb = cbRef.current;
     const key = event.key.toLowerCase();
-    const typing = isTypingKeyEvent(event);
-    if (!typing && dispatchLinkShortcut(event, cb)) return;
-    if (event.metaKey || event.ctrlKey) {
-      if (!typing) dispatchModifierKey(event, key, cb);
-      return;
-    }
-    if (!typing) dispatchPlainKey(event, key, cb);
+    if (isTypingKeyEvent(event)) return;
+    if (dispatchLinkShortcut(event, cb)) return;
+    if (dispatchModifierKey(event, key, cb)) return;
+    dispatchPlainKey(event, key, cb);
   }, []);
 
   // eslint-disable-next-line no-restricted-syntax

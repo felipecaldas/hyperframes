@@ -72,6 +72,10 @@ const ALLOWED_HOSTS = new Set([
   // srcs against this base to compare asset identity. `.invalid` is reserved
   // (RFC 6761) and the URL is only ever handed to `new URL`, never fetched.
   "project.invalid",
+  // Cache API keys only: thumbnailDiskCache uses cache.put/match, never fetches this origin.
+  "hf-thumbnail.invalid",
+  // Preview error reporting uses new URL(runtimeUrl, "http://x").pathname, never fetches the base.
+  "x",
   "studio.local",
   "host",
   "example.com",

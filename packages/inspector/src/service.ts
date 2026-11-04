@@ -1,4 +1,5 @@
 import type { TimelineRequest } from "../../core/src/runtime/timelineInspection";
+import { withHyperframesBrowserMarker } from "../../core/src/browserMarker";
 import {
   inspectComponents,
   inspectElementMap,
@@ -21,7 +22,6 @@ import {
   readdirSync,
 } from "node:fs";
 import { resolve, join, extname, sep } from "node:path";
-import { homedir } from "node:os";
 import { getHyperframeRuntimeScript } from "../../core/src/generated/runtime-inline";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import {
@@ -31,6 +31,7 @@ import {
 import { closeServer } from "./pageServer";
 import { Sources, fingerprint } from "./sources";
 import type { InspectRequest, Snippet } from "./types";
+import { hyperframesCacheDir } from "../../core/src/cacheDir";
 
 const pageRunner = (page: Page): PageRunner => ({
   run: <A, R>(fn: (arg: A) => R, arg: A) =>
@@ -58,7 +59,7 @@ function chromePath() {
       "Set HF_INSPECT_CHROME to an installed Chrome executable; inspection does not download a browser.",
     );
   }
-  const root = join(homedir(), ".cache/hyperframes/chrome/chrome-headless-shell");
+  const root = hyperframesCacheDir("chrome", "chrome-headless-shell");
   if (existsSync(root))
     for (const version of readdirSync(root).sort().reverse()) {
       const dir = join(root, version);
@@ -176,12 +177,12 @@ export class Inspector {
         this.browser = await puppeteer.launch({
           executablePath: this.options.executablePath ?? chromePath(),
           headless: true,
-          args: [
+          args: withHyperframesBrowserMarker([
             "--disable-dev-shm-usage",
             "--enable-webgl",
             "--use-gl=angle",
             "--use-angle=swiftshader",
-          ],
+          ]),
         });
         this.stats.browserStarts++;
       }

@@ -15,14 +15,23 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { S3Client } from "@aws-sdk/client-s3";
-import { CONTENT_STORE_RETENTION_DAYS } from "../contentStore.js";
-import { hashProjectDir, listSiteFiles } from "@hyperframes/producer/distributed";
+import { CONTENT_STORE_RETENTION_DAYS, audioSidecarUri, probeFactsUri } from "../contentStore.js";
+import {
+  buildAudioSidecar,
+  buildProbeFacts,
+  hashProjectDir,
+  listSiteFiles,
+  wantsAudioSidecar,
+  wantsProbeFacts,
+} from "@hyperframes/producer/distributed";
 import {
   downloadS3ObjectToFile,
   ensureContentStoreObject,
   isS3NotFound,
   mapConcurrent,
   parseS3Uri,
+  putAudioSidecar,
+  putProbeFacts,
   putContentStoreFile,
   s3ObjectExists,
   sha256File,
@@ -51,6 +60,8 @@ export interface DeploySiteOptions {
    * unset, the hash of the project tree picks it.
    */
   siteId?: string;
+  /** Called with a line a user should see, such as audio sidecars skipped for want of ffmpeg. */
+  onNotice?: (message: string) => void;
   /** Injection seam for tests. Production callers leave unset. */
   s3?: S3Client;
 }
@@ -159,6 +170,8 @@ export async function deploySite(opts: DeploySiteOptions): Promise<SiteHandle> {
     uploaded ||= outcome === "uploaded";
   });
   stored.sort((a, b) => (a.path < b.path ? -1 : 1));
+  await storeProbeFacts(s3, opts, stored);
+  await storeAudioSidecars(s3, opts, stored);
 
   const workdir = mkdtempSync(join(tmpdir(), "hf-deploy-site-"));
   try {
@@ -184,4 +197,71 @@ export async function deploySite(opts: DeploySiteOptions): Promise<SiteHandle> {
     uploadedAt: new Date().toISOString(),
     uploaded,
   };
+}
+
+/**
+ * Each large video's audio, stored on its own so a render reads kilobytes instead of the whole video.
+ * Optional: a machine that cannot make them leaves the site exactly as it was, and renders read the video.
+ */
+async function storeAudioSidecars(
+  s3: S3Client,
+  opts: DeploySiteOptions,
+  files: readonly SiteFile[],
+): Promise<void> {
+  const videos = files.filter((file) => wantsAudioSidecar(file.path, file.sizeBytes));
+  if (videos.length === 0) return;
+  const workdir = mkdtempSync(join(tmpdir(), "hf-audio-sidecar-"));
+  let unavailable = false;
+  try {
+    await mapConcurrent(videos, 2, async ({ path, sha256 }) => {
+      if (unavailable || (await s3ObjectExists(s3, audioSidecarUri(opts.bucketName, sha256))))
+        return;
+      const sidecarPath = join(workdir, `${sha256}.m4a`);
+      const outcome = await buildAudioSidecar(join(opts.projectDir, path), sidecarPath);
+      if (outcome === "unavailable") unavailable = true;
+      if (outcome === "built") await putAudioSidecar(s3, sidecarPath, opts.bucketName, sha256);
+      rmSync(sidecarPath, { force: true });
+    });
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+  if (unavailable) {
+    opts.onNotice?.(
+      "ffmpeg was not found on this machine, so the audio of large videos was not stored on its own: " +
+        "renders will read the whole video for its audio and take longer. Install ffmpeg and run `sites create` again.",
+    );
+  }
+}
+
+/**
+ * Each video's ffprobe JSON, stored beside it, so a render reads kilobytes instead of probing the video.
+ * Optional: a machine without ffprobe leaves the site as it was, and renders probe the video.
+ */
+async function storeProbeFacts(
+  s3: S3Client,
+  opts: DeploySiteOptions,
+  files: readonly SiteFile[],
+): Promise<void> {
+  const videos = files.filter((file) => wantsProbeFacts(file.path));
+  if (videos.length === 0) return;
+  const workdir = mkdtempSync(join(tmpdir(), "hf-probe-facts-"));
+  let unavailable = false;
+  try {
+    await mapConcurrent(videos, 4, async ({ path, sha256 }) => {
+      if (unavailable || (await s3ObjectExists(s3, probeFactsUri(opts.bucketName, sha256)))) return;
+      const factsPath = join(workdir, `${sha256}.json`);
+      const outcome = await buildProbeFacts(join(opts.projectDir, path), factsPath);
+      if (outcome === "unavailable") unavailable = true;
+      if (outcome === "built") await putProbeFacts(s3, factsPath, opts.bucketName, sha256);
+      rmSync(factsPath, { force: true });
+    });
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+  if (unavailable) {
+    opts.onNotice?.(
+      "ffprobe was not found on this machine, so what renders learn about your videos was not stored: " +
+        "renders will probe each video themselves and plan more slowly. Install ffmpeg and run `sites create` again.",
+    );
+  }
 }

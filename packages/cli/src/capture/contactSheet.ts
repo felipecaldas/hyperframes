@@ -51,8 +51,8 @@ export async function createContactSheet(
 
   // Read first image to determine aspect ratio
   const firstMeta = await sharp(files[0]!).metadata();
-  const srcW = firstMeta.width || 1920;
-  const srcH = firstMeta.height || 1080;
+  const srcW = firstMeta.autoOrient.width || 1920;
+  const srcH = firstMeta.autoOrient.height || 1080;
 
   // Scale to target cell width, maintain aspect ratio
   const scale = cellWidth / srcW;
@@ -74,6 +74,7 @@ export async function createContactSheet(
 
     // Resize image to cell size — contain keeps full image visible (no cropping)
     const resized = await sharp(files[i]!)
+      .autoOrient()
       .resize(cellW, cellH, { fit: "contain", background: { r: 26, g: 26, b: 26 } })
       .toBuffer();
 
@@ -213,22 +214,15 @@ export async function createScrollContactSheet(
  * Returns array of written file paths.
  */
 export async function createSnapshotContactSheet(
-  snapshotsDir: string,
+  paths: string[],
   outputPath: string,
   budget: Pick<ContactSheetOptions, "remainingMs"> = {},
 ): Promise<string[]> {
-  if (!existsSync(snapshotsDir)) return [];
+  if (paths.length === 0) return [];
 
-  const snapshotFiles = readdirSync(snapshotsDir)
-    .filter((f) => f.startsWith("frame-") && f.endsWith(".png"))
-    .sort();
-
-  if (snapshotFiles.length === 0) return [];
-
-  const paths = snapshotFiles.map((f) => join(snapshotsDir, f));
-  const labels = snapshotFiles.map((f) => {
-    const m = f.match(/at-([\d.]+)s/);
-    return m ? `${m[1]}s` : f;
+  const labels = paths.map((path) => {
+    const m = basename(path).match(/at-([\d.]+)s/);
+    return m ? `${m[1]}s` : basename(path);
   });
 
   // 3 cols, 9 per page (3×3)
@@ -253,7 +247,7 @@ export async function createAssetContactSheet(
 ): Promise<string[]> {
   if (!existsSync(assetsDir)) return [];
 
-  const imageExts = new Set([".png", ".jpg", ".jpeg", ".webp"]);
+  const imageExts = new Set([".png", ".jpg", ".jpeg", ".webp", ".avif", ".gif", ".heic", ".tiff"]);
   const assetFiles = readdirSync(assetsDir)
     .filter((f) => imageExts.has(extname(f).toLowerCase()) && !f.includes("contact-sheet"))
     .sort();

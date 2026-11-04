@@ -1,9 +1,10 @@
+import { oneProcessOverPipe } from "@hyperframes/engine";
+import { SEEK_SETTLES_BEFORE_PROTOCOL_TIMEOUT_MS } from "./captureTimeout.js";
 import {
   rethrowAfterBrowserCleanup,
   launchManagedBrowser,
   resolveManagedGpuMode,
 } from "../browser/launch.js";
-import { oneProcessOverPipe } from "../browser/sandboxDenied.js";
 import { spawn } from "node:child_process";
 import type { Browser, Page } from "puppeteer-core";
 import type { InProcessRequest, InProcessResponse } from "../utils/staticProjectServer.js";
@@ -35,10 +36,19 @@ export const AUDIT_SEEK_OPTIONS = {
   waitForFontsMs: 500,
 } as const;
 
+export const SCREENSHOT_IMAGE_WAIT_MS = 3_000;
+
 export const SCREENSHOT_SEEK_OPTIONS = {
   ...AUDIT_SEEK_OPTIONS,
-  waitForImagesMs: 120,
+  waitForImagesMs: SCREENSHOT_IMAGE_WAIT_MS,
 } as const;
+
+export interface UnsettledImages {
+  pending: string[];
+  failed: string[];
+}
+
+const ALL_IMAGES_SETTLED: UnsettledImages = { pending: [], failed: [] };
 
 // Geometry-only seek for the dense content_overlap grid: getBoundingClientRect is valid synchronously after setTime, so drop all post-seek waits (rAF/font/sleep) that would multiply across the dense grid.
 export const DENSE_GEOMETRY_SEEK_OPTIONS = {
@@ -59,11 +69,12 @@ export interface SeekCompositionTimelineOptions {
   settleMs?: number;
   waitForImagesMs?: number;
   waitForVideoFrames?: boolean;
+  seekSettleTimeoutMs?: number;
   // Box-only reads: software GL spends about a second per frame on draws nothing here looks at.
   skipWebglDraws?: boolean;
 }
 
-type SeekBarrierOptions = { videoFrames: boolean };
+type SeekBarrierOptions = { videoFrames: boolean; timeoutMs: number };
 type FontWaitOptions = { ms: number; frames: number };
 
 type CompositionPageFunction =
@@ -115,6 +126,8 @@ export interface OpenSettledCompositionPageOptions {
   // Runs after the page exists but before page.goto, so console/pageerror/
   // request listeners can attach without missing load-time events.
   beforeNavigate?: (page: Page) => void | Promise<void>;
+  // Runs after navigation and before the render-ready wait.
+  onLoaded?: (page: Page) => void | Promise<void>;
   // Started before the project was bundled; used only if it was launched with the same arguments.
   prelaunched?: PrelaunchedBrowser;
 }
@@ -326,11 +339,18 @@ export async function openSettledCompositionPage(
     options.onBrowserReady?.();
     const page = await chromeBrowser.newPage();
     await installPageFunctionGuard(page);
+    const { installMediaRenderIdBridge, forcePreservedDrawingBuffer } =
+      await import("@hyperframes/engine");
+    await installMediaRenderIdBridge(page);
+    await page.evaluateOnNewDocument(forcePreservedDrawingBuffer);
+    await page.evaluateOnNewDocument("window.__HF_REPLAY_SKIPPED_FRAMES = true");
+    await page.evaluateOnNewDocument("window.__HF_RELEASE_PASSED_MEDIA = true");
     await page.setViewport(viewport);
     if (answer) await answerPageInProcess(page, url, answer);
     await options.beforeNavigate?.(page);
     await gotoWhenSent(page, url, pageNavigationTimeoutMs(options.navigationTimeoutMs));
     await assertWebGpuAdapterAvailable(page, requiresWebGpu, softwareWebGpu);
+    await options.onLoaded?.(page);
     const renderReadyTimedOut = !(await waitForCompositionSettle(page, options));
     return { browser: chromeBrowser, page, renderReadyTimedOut };
   } catch (err) {
@@ -511,6 +531,16 @@ export async function seekCompositionTimeline(
   timeSeconds: number,
   options: SeekCompositionTimelineOptions = {},
 ): Promise<void> {
+  await seekCompositionTimelineOnly(page, timeSeconds, options);
+  await settleCompositionSeek(page, options);
+}
+
+/** The seek alone; `settleCompositionSeek` must follow, which is what finishes a blurred frame. */
+export async function seekCompositionTimelineOnly(
+  page: CompositionSeekPage,
+  timeSeconds: number,
+  options: SeekCompositionTimelineOptions = {},
+): Promise<void> {
   if (options.waitForPreferredSeekTargetMs !== undefined) {
     await waitForPreferredSeekTarget(page, options.waitForPreferredSeekTargetMs);
   }
@@ -522,7 +552,12 @@ export async function seekCompositionTimeline(
     options.exactTime === true,
     options.skipWebglDraws === true,
   );
+}
 
+export async function settleCompositionSeek(
+  page: CompositionSeekPage,
+  options: SeekCompositionTimelineOptions = {},
+): Promise<UnsettledImages> {
   await page.evaluate(
     async (barrier: SeekBarrierOptions) => {
       const waitForCompletion = Reflect.get(window, "__hfWaitForSeekCompletion");
@@ -530,7 +565,13 @@ export async function seekCompositionTimeline(
         await Reflect.apply(waitForCompletion, window, [barrier]);
       }
     },
-    { videoFrames: options.waitForVideoFrames !== false },
+    {
+      videoFrames: options.waitForVideoFrames !== false,
+      timeoutMs: Math.min(
+        options.seekSettleTimeoutMs ?? SEEK_SETTLES_BEFORE_PROTOCOL_TIMEOUT_MS,
+        SEEK_SETTLES_BEFORE_PROTOCOL_TIMEOUT_MS,
+      ),
+    },
   );
 
   const animationFrameSettle = options.animationFrameSettle ?? "race";
@@ -558,11 +599,14 @@ export async function seekCompositionTimeline(
   if (waitForFontsMs > 0) {
     await waitForCompositionFonts(page, waitForFontsMs, animationFrameSettle === "double" ? 2 : 1);
   }
-  if (options.waitForImagesMs) await waitForCompositionImages(page, options.waitForImagesMs);
+  const images = options.waitForImagesMs
+    ? await waitForCompositionImages(page, options.waitForImagesMs)
+    : ALL_IMAGES_SETTLED;
   if (options.settleMs !== undefined) {
     const settleMs = Math.max(0, options.settleMs);
     await new Promise((resolveSettle) => setTimeout(resolveSettle, settleMs));
   }
+  return images;
 }
 
 export async function waitForPreferredSeekTarget(
@@ -590,23 +634,58 @@ export async function waitForPreferredSeekTarget(
   }
 }
 
+/** Waits, up to `timeoutMs`, for every visible image layer (<img>, SVG <image>, CSS background-image url) to decode. */
 async function waitForCompositionImages(
   page: CompositionEvaluationPage,
   timeoutMs: number,
-): Promise<void> {
-  await page.evaluate(
-    (ms: number) =>
-      new Promise<void>((resolveWait) => {
-        const deadline = setTimeout(resolveWait, ms);
-        void Promise.all(
-          Array.from(document.images, (image) => image.decode().catch(() => {})),
-        ).then(() => {
-          clearTimeout(deadline);
-          resolveWait();
-        });
-      }),
+): Promise<UnsettledImages> {
+  const unsettled = await page.evaluate(
+    // fallow-ignore-next-line complexity
+    async (ms: number) => {
+      const layers = new Map<string, HTMLImageElement>();
+      const add = (src: string, image?: HTMLImageElement): void => {
+        if (src && !layers.has(src)) layers.set(src, image ?? Object.assign(new Image(), { src }));
+      };
+      const absolute = (href: string): string => new URL(href, document.baseURI).href;
+      for (const element of document.querySelectorAll("*")) {
+        const style = getComputedStyle(element);
+        if (style.display === "none" || style.visibility === "hidden") continue;
+        if (element instanceof HTMLImageElement) add(element.currentSrc || element.src, element);
+        if (element instanceof SVGImageElement && element.href.baseVal) {
+          add(absolute(element.href.baseVal));
+        }
+        for (const match of style.backgroundImage.matchAll(
+          /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/g,
+        )) {
+          const href = match[1] ?? match[2] ?? match[3];
+          if (href) add(absolute(href));
+        }
+      }
+      const state = new Map<string, "pending" | "ready" | "failed">();
+      const decodes = [...layers].map(([src, image]) => {
+        state.set(src, "pending");
+        return image.decode().then(
+          () => void state.set(src, "ready"),
+          () => void state.set(src, "failed"),
+        );
+      });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.all(decodes),
+        new Promise((resolveWait) => {
+          timer = setTimeout(resolveWait, ms);
+        }),
+      ]);
+      clearTimeout(timer);
+      const named = (want: string): string[] =>
+        [...state]
+          .filter(([, value]) => value === want)
+          .map(([src]) => (src.startsWith("data:") ? `${src.slice(0, 40)}...` : src));
+      return { pending: named("pending"), failed: named("failed") };
+    },
     timeoutMs,
   );
+  return unsettled as UnsettledImages;
 }
 
 export async function waitForCompositionFonts(

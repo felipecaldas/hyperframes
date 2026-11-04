@@ -7,8 +7,7 @@
 // neighbouring panels, rounded pills, blurred glass and partial decorations.
 // __contrastAuditRestoreIfPending() restores hidden paint if the screenshot or finish() throws.
 
-// Duplicated in skills/hyperframes-creative/scripts/contrast-report.mjs (keep in sync); the
-// "which rect to sample" decision is mirrored and unit-tested in contrast-sample.ts.
+// The "which rect to sample" decision is mirrored and unit-tested in contrast-sample.ts.
 
 /* eslint-disable */
 window.__contrastAuditPrepare = function () {
@@ -287,7 +286,7 @@ window.__contrastAuditPrepare = function () {
   function isClippedAway(el, rect) {
     if (typeof document.elementFromPoint !== "function") return false;
     if (!hasClipPath(el)) return false;
-    return !paintsAnyProbePoint(el, rect);
+    return !paintsAnyProbePoint(el, rect, true);
   }
 
   function isIntentionallyOccluded(el, rect) {

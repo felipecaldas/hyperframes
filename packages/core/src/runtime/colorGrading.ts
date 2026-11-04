@@ -25,6 +25,7 @@ import {
   COLOR_GRADING_SOURCE_HIDDEN_ATTR,
   COLOR_GRADING_AUTHORED_OPACITY_ATTR,
 } from "../colorGrading";
+import { effectiveColorGrading, HF_COLOR_GROUP_ATTR, HF_COLOR_GROUP_TAG } from "../colorGroups";
 import {
   compileHfColorCurve,
   compileHfHueCurve,
@@ -33,6 +34,7 @@ import {
 } from "../colorGradingCurves";
 import {
   DEFAULT_MAX_CUBE_LUT_SIZE,
+  fitCubeLutToTexture,
   packCubeLutToRgba8,
   parseCubeLut,
   unitFloatToByte,
@@ -41,7 +43,9 @@ import {
 } from "../colorLuts";
 import { copyMediaVisualStyles } from "../inline-scripts/parityContract";
 import { readVariablesForElement } from "./variableScope";
+import { mediaElementTime } from "./mediaClock";
 import { swallow } from "./diagnostics";
+import { createRecordFilter } from "./mutationRecords";
 import { findInjectedRenderFrame } from "./renderFrameSibling";
 import {
   isCanvasElement,
@@ -202,6 +206,8 @@ interface EffectRenderState {
   effectError: string | null;
 }
 
+const CONTEXT_RESTORE_GRACE_MS = 3000;
+
 interface ColorGradingRenderer extends EffectRenderState {
   canvas: HTMLCanvasElement;
   glCanvas: HTMLCanvasElement;
@@ -316,6 +322,8 @@ type LutCacheEntry =
 const LUT_CACHE = new Map<string, LutCacheEntry>();
 const COLOR_GRADING_CANVAS_ATTR = "data-hf-color-grading-canvas";
 const COLOR_GRADING_CANVAS_CLASS = "__hf_color_grading_canvas__";
+const MAX_GRADING_CANVAS_PIXELS = 1 << 24;
+const MAX_GRADING_CANVAS_SIDE = 8192;
 
 /** Captures authored media opacity before animation or grading can mutate it. */
 export function installAuthoredOpacityCapture(): void {
@@ -362,8 +370,9 @@ const ADVANCED_TEXTURE_MAX_X_GLSL = `${HF_COLOR_CURVE_LUT_SIZE - 1}.0`;
 const ADVANCED_TEXTURE_HEIGHT_GLSL = `${ADVANCED_TEXTURE_HEIGHT}.0`;
 const ADVANCED_CONFIG_Y_GLSL = `${(ADVANCED_CONFIG_ROW + 0.5) / ADVANCED_TEXTURE_HEIGHT}`;
 
+// The member's own grade, else its grade group's — normalized in the member's variable scope.
 function readColorGradingAttribute(element: Element): ResolvedHfColorGrading | null {
-  const raw = element.getAttribute(HF_COLOR_GRADING_ATTR);
+  const raw = effectiveColorGrading(element, element.ownerDocument);
   if (raw == null) return null;
   return normalizeHfColorGradingWithVariables(raw, readVariablesForElement(element));
 }
@@ -1055,6 +1064,15 @@ const FRAGMENT_SHADER = [
   `  vec4 after = texture2D(u_advanced, vec2((upper + 0.5) / ${ADVANCED_TEXTURE_WIDTH_GLSL}, y));`,
   "  return mix(before, after, position - lower);",
   "}",
+  "vec4 sampleHueCurve(float coordinate){",
+  `  float position = fract(coordinate) * ${ADVANCED_TEXTURE_WIDTH_GLSL};`,
+  "  float lower = floor(position);",
+  `  float upper = mod(lower + 1.0, ${ADVANCED_TEXTURE_WIDTH_GLSL});`,
+  `  float y = 1.5 / ${ADVANCED_TEXTURE_HEIGHT_GLSL};`,
+  `  vec4 before = texture2D(u_advanced, vec2((lower + 0.5) / ${ADVANCED_TEXTURE_WIDTH_GLSL}, y));`,
+  `  vec4 after = texture2D(u_advanced, vec2((upper + 0.5) / ${ADVANCED_TEXTURE_WIDTH_GLSL}, y));`,
+  "  return mix(before, after, position - lower);",
+  "}",
   "vec4 advancedConfig(float index){",
   `  return texture2D(u_advanced, vec2((index + 0.5) / ${ADVANCED_TEXTURE_WIDTH_GLSL}, ${ADVANCED_CONFIG_Y_GLSL}));`,
   "}",
@@ -1100,7 +1118,7 @@ const FRAGMENT_SHADER = [
   "vec3 applyHueCurves(vec3 color){",
   "  if (u_hueCurvesEnabled < 0.5) return color;",
   "  vec3 hsv = rgbToHsv(clamp(color, 0.0, 1.0));",
-  "  vec3 curves = sampleAdvancedCurve(hsv.x, 1.0).rgb;",
+  "  vec3 curves = sampleHueCurve(hsv.x).rgb;",
   "  float originalLuma = lumaOf(color);",
   "  hsv.x = fract(hsv.x + decodeSigned(curves.r) * 0.5);",
   "  hsv.y = clamp(hsv.y * max(0.0, 1.0 + decodeSigned(curves.g)), 0.0, 1.0);",
@@ -1611,9 +1629,10 @@ const KUWAHARA_RESOLVE_FRAGMENT_SHADER = [
   "}",
 ].join("\n");
 
-const COLOR_GRADING_SOURCE_SELECTOR = HF_COLOR_GRADING_SOURCE_TAGS.map(
-  (tag) => `${tag}[${HF_COLOR_GRADING_ATTR}]`,
-).join(", ");
+const COLOR_GRADING_SOURCE_SELECTOR = HF_COLOR_GRADING_SOURCE_TAGS.flatMap((tag) => [
+  `${tag}[${HF_COLOR_GRADING_ATTR}]`,
+  `${tag}[${HF_COLOR_GROUP_ATTR}]`,
+]).join(", ");
 
 function isColorGradingMediaElement(value: Element): value is ColorGradingMediaElement {
   return (
@@ -2039,13 +2058,14 @@ function uploadEntryLut(
   lut: CubeLut3D,
 ): RuntimeLutTexture | null {
   if (entry.lut?.src === src) return entry.lut;
-  const packed = packCubeLutToRgba8(lut);
   const { gl, program } = entry;
+  const fitted = fitCubeLutToTexture(lut, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+  const packed = packCubeLutToRgba8(fitted);
   try {
     uploadLutTexture(gl, program.lutTexture, packed);
     entry.lut = {
       src,
-      size: lut.size,
+      size: fitted.size,
       domainMin: lut.domainMin,
       domainMax: lut.domainMax,
       textureWidth: packed.width,
@@ -2096,12 +2116,13 @@ function uploadPreviewLut(
   src: string,
   lut: CubeLut3D,
 ): RuntimeLutTexture {
-  const packed = packCubeLutToRgba8(lut);
   const { gl, program } = renderer;
+  const fitted = fitCubeLutToTexture(lut, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+  const packed = packCubeLutToRgba8(fitted);
   uploadLutTexture(gl, program.lutTexture, packed);
   return {
     src,
-    size: lut.size,
+    size: fitted.size,
     domainMin: lut.domainMin,
     domainMax: lut.domainMax,
     textureWidth: packed.width,
@@ -2160,6 +2181,33 @@ function replaceProgramResources(entry: ColorGradingEntry): boolean {
   entry.lutError = null;
   entry.effectError = null;
   return true;
+}
+
+function moveToContext(
+  entry: ColorGradingEntry,
+  context: { canvas: HTMLCanvasElement; gl: WebGLRenderingContext },
+): boolean {
+  const program = createProgramResources(context.gl);
+  if (!program) return false;
+  destroyProgramResources(entry);
+  entry.gl = context.gl;
+  entry.glCanvas = context.canvas;
+  entry.program = program;
+  entry.lut = null;
+  entry.lutLoadingSrc = null;
+  entry.lutError = null;
+  entry.effectError = null;
+  return true;
+}
+
+function adoptContext(
+  entry: ColorGradingEntry,
+  context: { canvas: HTMLCanvasElement; gl: WebGLRenderingContext },
+): void {
+  entry.contextLost = !moveToContext(entry, context);
+  entry.drawError = entry.contextLost ? "WebGL context rebuild failed" : null;
+  if (entry.contextLost) restoreSourceElement(entry);
+  else drawEntry(entry);
 }
 
 function hideFrameBorder(entry: ColorGradingEntry, frame: HTMLElement): void {
@@ -2697,6 +2745,10 @@ function findRenderFrameImage(video: HTMLVideoElement): HTMLImageElement | null 
   return frame && isDrawableSource(frame) ? frame : null;
 }
 
+function isShownForColorGrading(element: ColorGradingMediaElement): boolean {
+  return isVisibleForColorGrading(element) || hasInjectedRenderFrame(element);
+}
+
 function hasInjectedRenderFrame(element: ColorGradingMediaElement): boolean {
   if (!isVideoElement(element)) return false;
   const frame = findInjectedRenderFrame(element);
@@ -2802,7 +2854,7 @@ function parseObjectPosition(value: string): { x: number; y: number } {
 }
 
 // fallow-ignore-next-line complexity
-function calculateObjectFitUv(
+export function calculateObjectFitUv(
   boxWidth: number,
   boxHeight: number,
   sourceWidth: number,
@@ -2833,7 +2885,8 @@ function calculateObjectFitUv(
   }
   const position = parseObjectPosition(objectPosition || "center");
   const offsetX = ((boxWidth - drawWidth) * position.x) / boxWidth;
-  const offsetY = ((boxHeight - drawHeight) * position.y) / boxHeight;
+  const positionFromBottom = 1 - position.y;
+  const offsetY = ((boxHeight - drawHeight) * positionFromBottom) / boxHeight;
   return {
     scaleX: drawWidth / boxWidth,
     scaleY: drawHeight / boxHeight,
@@ -2854,6 +2907,16 @@ function ensureParentPosition(entry: ColorGradingEntry, parent: HTMLElement): vo
 
 function resolvedLayoutSize(primary: number, fallback: number): number {
   return Math.max(0, Math.round(primary > 0 ? primary : fallback));
+}
+
+function fitToGpuLimits(width: number, height: number): { width: number; height: number } {
+  const scale = Math.min(
+    1,
+    Math.sqrt(MAX_GRADING_CANVAS_PIXELS / (width * height)),
+    MAX_GRADING_CANVAS_SIDE / Math.max(width, height),
+  );
+  const fitted = { width: Math.floor(width * scale), height: Math.floor(height * scale) };
+  return scale < 1 ? fitted : { width: Math.round(width), height: Math.round(height) };
 }
 
 function updateCanvasLayout(
@@ -2888,8 +2951,7 @@ function updateCanvasLayout(
     return null;
   }
   const pixelRatio = Math.max(1, window.devicePixelRatio || 1);
-  const width = Math.round(cssWidth * pixelRatio);
-  const height = Math.round(cssHeight * pixelRatio);
+  const { width, height } = fitToGpuLimits(cssWidth * pixelRatio, cssHeight * pixelRatio);
   if (canvas.width !== width) canvas.width = width;
   if (canvas.height !== height) canvas.height = height;
   return { width, height };
@@ -3453,6 +3515,11 @@ function renderGradedFrame(
     frameTime,
   );
   drawFullscreenQuad(gl, { quad: program.quad, position: shader.position });
+  if (gl.drawingBufferWidth < layout.width || gl.drawingBufferHeight < layout.height) {
+    restoreSourceElement(entry);
+    entry.canvas.style.display = "none";
+    throw new Error("The GPU's drawing buffer is smaller than the grading canvas");
+  }
   presentEntry(entry, layout);
 }
 
@@ -3728,10 +3795,14 @@ function installEntryListeners(entry: ColorGradingEntry): void {
   const redraw = () => {
     drawEntry(entry);
   };
+  const redrawOnPresentedFrame = () => {
+    drawEntry(entry);
+    scheduleVideoDraw(entry);
+  };
   addListener(entry, entry.element, "load", redraw);
   addListener(entry, entry.element, "loadedmetadata", redraw);
-  addListener(entry, entry.element, "loadeddata", redraw);
-  addListener(entry, entry.element, "seeked", redraw);
+  addListener(entry, entry.element, "loadeddata", redrawOnPresentedFrame);
+  addListener(entry, entry.element, "seeked", redrawOnPresentedFrame);
   addListener(entry, entry.element, "timeupdate", redraw);
   addListener(entry, window, "resize", redraw);
   if (isVideoElement(entry.element)) {
@@ -3831,12 +3902,14 @@ export function createColorGradingRuntime(pausedMediaLease?: {
 }): RuntimeColorGradingApi {
   const entries = new WeakMap<ColorGradingMediaElement, ColorGradingEntry>();
   const trackedElements = new Set<ColorGradingMediaElement>();
+  const hiddenAtRefresh = new Set<ColorGradingMediaElement>();
   const idleRenderers: ColorGradingRenderer[] = [];
   let observer: MutationObserver | null = null;
   let previewRenderer: ColorGradingPreviewRenderer | null = null;
   let previewQueue = Promise.resolve();
   let destroyed = false;
   let shared: { canvas: HTMLCanvasElement; gl: WebGLRenderingContext } | null = null;
+  let rebuildTimer: ReturnType<typeof setTimeout> | undefined;
   const trackedEntries = () =>
     [...trackedElements].flatMap((element) => entries.get(element) ?? []);
 
@@ -3854,17 +3927,40 @@ export function createColorGradingRuntime(pausedMediaLease?: {
         entry.canvas.style.display = "none";
         restoreSourceElement(entry);
       }
+      watchForRestore(canvas, gl);
     });
     canvas.addEventListener("webglcontextrestored", () => {
+      if (shared?.canvas !== canvas) return;
+      clearTimeout(rebuildTimer);
       for (const entry of trackedEntries()) {
         entry.contextLost = !replaceProgramResources(entry);
         entry.drawError = entry.contextLost ? "WebGL context restore failed" : null;
         if (entry.contextLost) restoreSourceElement(entry);
         else drawEntry(entry);
       }
+      refresh();
     });
     shared = { canvas, gl };
     return shared;
+  };
+
+  const watchForRestore = (canvas: HTMLCanvasElement, gl: WebGLRenderingContext): void => {
+    clearTimeout(rebuildTimer);
+    rebuildTimer = setTimeout(() => rebuildLostContext(canvas, gl), CONTEXT_RESTORE_GRACE_MS);
+  };
+
+  const rebuildLostContext = (canvas: HTMLCanvasElement, gl: WebGLRenderingContext): void => {
+    if (destroyed || shared?.canvas !== canvas || !gl.isContextLost?.()) return;
+    const stale = shared;
+    shared = null;
+    const next = sharedContext();
+    if (!next) {
+      shared = stale;
+      watchForRestore(canvas, gl);
+      return;
+    }
+    for (const entry of trackedEntries()) adoptContext(entry, next);
+    refresh();
   };
 
   const newRenderer = (element: ColorGradingMediaElement): ColorGradingRenderer | null => {
@@ -3887,6 +3983,7 @@ export function createColorGradingRuntime(pausedMediaLease?: {
     grading: ResolvedHfColorGrading,
     source: EntrySource,
   ): boolean => {
+    hiddenAtRefresh.delete(element);
     const existing = entries.get(element);
     if (existing) {
       existing.grading = grading;
@@ -3937,7 +4034,7 @@ export function createColorGradingRuntime(pausedMediaLease?: {
     trackedElements.add(element);
     installEntryListeners(entry);
     drawEntry(entry);
-    if (isVideoElement(element) && !element.paused) scheduleVideoDraw(entry);
+    if (isVideoElement(element)) scheduleVideoDraw(entry);
     return true;
   };
 
@@ -3966,6 +4063,7 @@ export function createColorGradingRuntime(pausedMediaLease?: {
   };
 
   const removeElement = (element: ColorGradingMediaElement): void => {
+    hiddenAtRefresh.delete(element);
     const entry = entries.get(element);
     if (!entry) return;
     const renderer = detachEntry(entry);
@@ -3983,16 +4081,18 @@ export function createColorGradingRuntime(pausedMediaLease?: {
   const refresh = (): number => {
     if (destroyed) return 0;
     const attributeElements = new Set<ColorGradingMediaElement>();
+    hiddenAtRefresh.clear();
     const nodes = document.querySelectorAll(COLOR_GRADING_SOURCE_SELECTOR);
     nodes.forEach((node) => {
       if (!isColorGradingMediaElement(node)) return;
       attributeElements.add(node);
       const grading = readColorGradingAttribute(node);
       if (isRuntimeColorGradingActive(node, grading)) {
-        if (isVisibleForColorGrading(node) || hasInjectedRenderFrame(node)) {
+        if (isShownForColorGrading(node)) {
           upsert(node, grading, "attribute");
         } else {
           removeElement(node);
+          hiddenAtRefresh.add(node);
         }
       } else {
         removeElement(node);
@@ -4011,8 +4111,20 @@ export function createColorGradingRuntime(pausedMediaLease?: {
     return trackedElements.size;
   };
 
+  const adoptShownMedia = (): void => {
+    for (const element of hiddenAtRefresh) {
+      if (element.isConnected && !isShownForColorGrading(element)) continue;
+      hiddenAtRefresh.delete(element);
+      const grading = readColorGradingAttribute(element);
+      if (element.isConnected && isRuntimeColorGradingActive(element, grading)) {
+        upsert(element, grading, "attribute");
+      }
+    }
+  };
+
   const redraw = (): number => {
     if (destroyed) return 0;
+    adoptShownMedia();
     let drawn = 0;
     for (const element of trackedElements) {
       const entry = entries.get(element);
@@ -4039,6 +4151,7 @@ export function createColorGradingRuntime(pausedMediaLease?: {
 
   const redrawAnimated = (): number => {
     if (destroyed) return 0;
+    adoptShownMedia();
     let drawn = 0;
     for (const element of trackedElements) {
       const entry = entries.get(element);
@@ -4111,7 +4224,7 @@ export function createColorGradingRuntime(pausedMediaLease?: {
     }
     const grading = readColorGradingAttribute(element);
     if (isRuntimeColorGradingActive(element, grading)) {
-      if (!isVisibleForColorGrading(element) && !hasInjectedRenderFrame(element)) {
+      if (!isShownForColorGrading(element)) {
         return { state: "pending", message: "Waiting for visible media" };
       }
       return { state: "unavailable", message: "WebGL unavailable" };
@@ -4169,16 +4282,18 @@ export function createColorGradingRuntime(pausedMediaLease?: {
       element.pause();
       element.loop = loop;
       element.muted = muted;
-      element.currentTime = time;
+      element.currentTime = mediaElementTime(time);
     };
   };
 
   const destroy = (): void => {
     if (destroyed) return;
     destroyed = true;
+    clearTimeout(rebuildTimer);
     observer?.disconnect();
     observer = null;
     for (const element of trackedElements) removeElement(element);
+    hiddenAtRefresh.clear();
     for (const renderer of idleRenderers) destroyProgramResources(renderer);
     idleRenderers.length = 0;
     shared?.gl.getExtension("WEBGL_lose_context")?.loseContext();
@@ -4190,12 +4305,19 @@ export function createColorGradingRuntime(pausedMediaLease?: {
   };
 
   if (document.body) {
-    observer = new MutationObserver(() => refresh());
+    // A grade group's element joining or leaving regrades its members, so it counts too.
+    const recordsTouchGrading = createRecordFilter(
+      `${COLOR_GRADING_SOURCE_SELECTOR}, ${HF_COLOR_GROUP_TAG}`,
+      (node) => Array.from(trackedElements).some((element) => node.contains(element)),
+    );
+    observer = new MutationObserver((records) => {
+      if (recordsTouchGrading(records)) refresh();
+    });
     observer.observe(document.body, {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: [HF_COLOR_GRADING_ATTR],
+      attributeFilter: [HF_COLOR_GRADING_ATTR, HF_COLOR_GROUP_ATTR],
     });
   }
 

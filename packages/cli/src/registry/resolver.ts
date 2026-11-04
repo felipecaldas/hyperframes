@@ -7,6 +7,7 @@
 import type { ItemType, RegistryItem, RegistryManifestEntry } from "@hyperframes/core";
 import { fetchItemManifest, fetchRegistryManifest, DEFAULT_REGISTRY_URL } from "./remote.js";
 import { runWithConcurrencyLimit } from "../utils/concurrency.js";
+import { closestNames } from "../utils/didYouMean.js";
 
 export interface ResolveOptions {
   baseUrl?: string;
@@ -58,7 +59,10 @@ export async function loadAllItems(
   let timedOut = false;
   const loaded = await runWithConcurrencyLimit(entries, ITEM_FETCH_CONCURRENCY, async (e) => {
     try {
-      return await fetchItemManifest(e.name, e.type, baseUrl, { cacheOnly: timedOut });
+      return await fetchItemManifest(e.name, e.type, baseUrl, {
+        skipCache: options.skipCache,
+        cacheOnly: timedOut,
+      });
     } catch (err) {
       if (err instanceof Error && err.name === "TimeoutError") timedOut = true;
       skipped.push(`"${e.name}"`);
@@ -142,9 +146,13 @@ export async function resolveItemWithDependencies(
   const entry = entries.find((e) => e.name === name);
   if (!entry) {
     const available = entries.map((e) => e.name).join(", ");
+    const close = closestNames(
+      name,
+      entries.map((e) => e.name),
+    );
     throw new Error(
       available.length > 0
-        ? `Item "${name}" not found in registry. Available: ${available}`
+        ? `Item "${name}" not found in registry.${close.length > 0 ? ` Closest: ${close.join(", ")}.` : ""} Available: ${available}`
         : unreachableRegistryMessage(name, options.baseUrl),
     );
   }
@@ -173,7 +181,9 @@ export async function resolveItemWithDependencies(
       );
     }
 
-    const pending = fetchItemManifest(registryEntry.name, registryEntry.type, options.baseUrl);
+    const pending = fetchItemManifest(registryEntry.name, registryEntry.type, options.baseUrl, {
+      skipCache: options.skipCache,
+    });
     itemCache.set(itemName, pending);
     return pending;
   };

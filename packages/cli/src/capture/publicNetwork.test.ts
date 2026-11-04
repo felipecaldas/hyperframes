@@ -14,13 +14,23 @@ vi.mock("node:dns", () => ({
 }));
 vi.mock("node:http", () => ({ request: mocks.request }));
 vi.mock("node:https", () => ({ request: mocks.request }));
-import { isPublicIPv4, publicRequest, resolvePublicAddress } from "./publicNetwork.js";
+import {
+  isPublicIPv4,
+  publicRequest,
+  resolvePublicAddress,
+  systemLookupInKillableChild,
+} from "./publicNetwork.js";
+
+/** A lookup child that has not exited; the exit hook kills every one still live. */
+function liveChild() {
+  return Object.assign(new EventEmitter(), { kill: vi.fn() });
+}
 
 /** The system lookup child prints `stdout`, or fails with `stderr`. */
 function systemLookupPrints(stdout: string, stderr = "") {
   mocks.execFile.mockImplementation((_file, _args, _options, callback) => {
     callback(stdout ? null : new Error("Command failed"), stdout, stderr);
-    return new EventEmitter();
+    return liveChild();
   });
 }
 
@@ -37,6 +47,7 @@ describe("public address policy", () => {
     "169.254.169.254",
     "100.64.0.1",
     "0.1.2.3",
+    "192.0.0.8",
     "192.0.0.9",
     "192.0.2.1",
     "198.18.0.1",
@@ -48,6 +59,14 @@ describe("public address policy", () => {
     "::ffff:8.8.8.8",
     "8.8.8.999",
   ])("rejects %s", (ip) => expect(isPublicIPv4(ip)).toBe(false));
+  it.each(["192.0.66.108", "192.0.1.1", "192.0.3.1"])(
+    "accepts %s: only 192.0.0.0/24 and 192.0.2.0/24 are reserved",
+    (ip) => expect(isPublicIPv4(ip)).toBe(true),
+  );
+  it("resolves a host served from 192.0/16 public space (nasa.gov on WordPress VIP)", async () => {
+    mocks.resolve4.mockResolvedValue(["192.0.66.108"]);
+    await expect(resolvePublicAddress("www.nasa.gov")).resolves.toBe("192.0.66.108");
+  });
   it("accepts public literals without DNS", async () => {
     await expect(resolvePublicAddress("8.8.8.8")).resolves.toBe("8.8.8.8");
     expect(mocks.resolve4).not.toHaveBeenCalled();
@@ -81,6 +100,23 @@ describe("public address policy", () => {
       "Capture DNS failed: ENOTFOUND",
     );
   });
+  it.each([
+    [{ code: 3221225794 }, "Capture DNS failed: the lookup helper exited with code 3221225794"],
+    [
+      { code: null, signal: "SIGKILL" },
+      "Capture DNS failed: the lookup helper was ended by SIGKILL",
+    ],
+  ])(
+    "names how the system lookup helper ended when it says nothing (%j)",
+    async (ended, message) => {
+      mocks.resolve4.mockRejectedValue(new Error("queryA ENOTFOUND"));
+      mocks.execFile.mockImplementation((_file, _args, _options, callback) => {
+        callback(Object.assign(new Error("Command failed"), ended), "", "");
+        return liveChild();
+      });
+      await expect(resolvePublicAddress("helper-died.example.org")).rejects.toThrow(message);
+    },
+  );
   it("checks a system answer like a DNS one, and asks the system once per host", async () => {
     mocks.resolve4.mockRejectedValue(new Error("queryA ENOTFOUND"));
     systemLookupPrints('["127.0.0.1"]');
@@ -94,7 +130,7 @@ describe("public address policy", () => {
     vi.useFakeTimers();
     try {
       mocks.resolve4.mockRejectedValue(new Error("queryA ENOTFOUND"));
-      mocks.execFile.mockImplementation(() => new EventEmitter());
+      mocks.execFile.mockImplementation(() => liveChild());
       const first = resolvePublicAddress("slow.example.org").catch((error: Error) => error.message);
       await vi.advanceTimersByTimeAsync(9_000);
       const second = resolvePublicAddress("slow.example.org").catch(
@@ -214,5 +250,18 @@ describe("transport lifecycle", () => {
     });
     await expect(publicRequest("https://example.com")).rejects.toThrow("content encoding");
     expect(incoming.destroyed).toBe(true);
+  });
+});
+
+describe("system lookup children", () => {
+  it("kills every lookup still live when the process exits", () => {
+    const child = liveChild();
+    mocks.execFile.mockImplementation(() => child);
+    void systemLookupInKillableChild("live.example.org", 60_000).catch(() => {});
+    const exitHooks = process.listeners("exit").filter((hook) => hook.name === "killLiveLookups");
+    expect(exitHooks).toHaveLength(1);
+    // Earlier tests' children are still live too, so this also fails if any fake lacks kill().
+    for (const hook of exitHooks) hook(0);
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
   });
 });

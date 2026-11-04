@@ -54,9 +54,18 @@ export class RenderChunkValidationError extends Error {
 
 /** One injector per browser session: a hook reused on a fresh page can skip its first injection. */
 export function createChunkVideoFrameInjectorFactory(
-  frameLookup: FrameLookupTable | null,
+  frameLookup: FrameLookupTable | Promise<FrameLookupTable> | null,
+  options?: Parameters<typeof createVideoFrameInjector>[1],
 ): () => BeforeCaptureHook | null {
-  return () => createVideoFrameInjector(frameLookup);
+  if (!(frameLookup instanceof Promise))
+    return () => createVideoFrameInjector(frameLookup, options);
+  return () => {
+    let hook: BeforeCaptureHook | null | undefined;
+    return async (page, time, heldVideoTime) => {
+      hook ??= createVideoFrameInjector(await frameLookup, options);
+      await hook?.(page, time, heldVideoTime);
+    };
+  };
 }
 
 function frameNumberFromFileName(name: string): number | null {
@@ -138,7 +147,10 @@ export function buildChunkCaptureOptions(input: {
     fpsDen: number;
     format: DistributedFormat;
   };
-  encoder: Pick<LockedRenderConfig, "quality" | "deviceScaleFactor" | "variables">;
+  encoder: Pick<
+    LockedRenderConfig,
+    "quality" | "deviceScaleFactor" | "variables" | "pageMotionBlur"
+  >;
   videoCount: number;
   html: string;
   skipReadinessVideoIds?: string[];
@@ -161,6 +173,7 @@ export function buildChunkCaptureOptions(input: {
     ...(videoCaptureBeyondViewport !== undefined
       ? { captureBeyondViewport: videoCaptureBeyondViewport }
       : {}),
+    pageMotionBlur: encoder.pageMotionBlur ?? "distributed-render",
     // A fixed warmup count keeps `beginFrameTimeTicks` host-independent.
     lockWarmupTicks: true,
     requiresWebGpu: compositionRequiresWebGpu(input.html),

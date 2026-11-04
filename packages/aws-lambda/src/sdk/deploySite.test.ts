@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import type { S3Client } from "@aws-sdk/client-s3";
+import { AUDIO_SIDECAR_MIN_BYTES } from "@hyperframes/producer/distributed";
+import { audioSidecarUri, probeFactsUri } from "../contentStore.js";
 import { parseSiteManifest } from "../siteManifest.js";
 import { asS3Client, FakeS3 } from "./__fixtures__/fakeS3.js";
 import { deploySite } from "./deploySite.js";
@@ -206,5 +209,121 @@ describe("deploySite", () => {
       "logo.txt",
       "media/clip.txt",
     ]);
+  });
+});
+
+const FFMPEG = process.env.HYPERFRAMES_FFMPEG_PATH?.trim() || "ffmpeg";
+const HAS_FFMPEG = spawnSync(FFMPEG, ["-version"]).status === 0;
+
+describe.skipIf(!HAS_FFMPEG)("deploySite audio sidecars", { timeout: 60_000 }, () => {
+  function addLargeVideo(): void {
+    const made = spawnSync(FFMPEG, [
+      ...[
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=gray:size=640x360:rate=25:duration=30,noise=alls=100:allf=t+u",
+      ],
+      ...["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=30"],
+      ...["-c:v", "mpeg4", "-b:v", "16M", "-c:a", "aac", join(projectDir, "assets", "take.mp4")],
+    ]);
+    expect(made.status).toBe(0);
+  }
+
+  it("stores a large video's audio beside it, and leaves the site's file list as it was", async () => {
+    addLargeVideo();
+    const s3 = new FakeS3();
+    const site = await deploySite({ projectDir, bucketName: "test-bucket", s3: asS3Client(s3) });
+
+    const take = parseSiteManifest(
+      s3.bodies.get(`test-bucket/sites/${site.siteId}/files.json`)?.toString() ?? "",
+    ).find((file) => file.path === "assets/take.mp4");
+    expect(take?.sizeBytes).toBeGreaterThan(AUDIO_SIDECAR_MIN_BYTES);
+    const sidecar = audioSidecarUri("test-bucket", take?.sha256 ?? "").replace("s3://", "");
+    expect(s3.existing.has(sidecar)).toBe(true);
+    expect(s3.bodies.get(sidecar)?.length).toBeLessThan((take?.sizeBytes ?? 0) / 4);
+    expect(sitePaths(s3, site.siteId)).toEqual([
+      "assets/style.css",
+      "assets/take.mp4",
+      "index.html",
+    ]);
+  });
+
+  it("deploys the same site with no sidecar when there is no ffmpeg, and says so", async () => {
+    addLargeVideo();
+    const notices: string[] = [];
+    const before = process.env.HYPERFRAMES_FFMPEG_PATH;
+    process.env.HYPERFRAMES_FFMPEG_PATH = join(scratch, "no-such-ffmpeg");
+    const s3 = new FakeS3();
+    try {
+      await deploySite({
+        projectDir,
+        bucketName: "test-bucket",
+        s3: asS3Client(s3),
+        onNotice: (message) => notices.push(message),
+      });
+    } finally {
+      if (before === undefined) delete process.env.HYPERFRAMES_FFMPEG_PATH;
+      else process.env.HYPERFRAMES_FFMPEG_PATH = before;
+    }
+
+    expect([...s3.existing].filter((id) => id.endsWith(".audio.m4a"))).toEqual([]);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain("ffmpeg");
+  });
+});
+
+describe.skipIf(!HAS_FFMPEG)("deploySite probe facts", { timeout: 60_000 }, () => {
+  function addVideo(): void {
+    const made = spawnSync(FFMPEG, [
+      ...["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=25:duration=2"],
+      ...["-c:v", "mpeg4", join(projectDir, "assets", "take.mp4")],
+    ]);
+    expect(made.status).toBe(0);
+  }
+
+  it("stores each video's ffprobe JSON beside it, and leaves the site's file list as it was", async () => {
+    addVideo();
+    const s3 = new FakeS3();
+    const site = await deploySite({ projectDir, bucketName: "test-bucket", s3: asS3Client(s3) });
+
+    const take = parseSiteManifest(
+      s3.bodies.get(`test-bucket/sites/${site.siteId}/files.json`)?.toString() ?? "",
+    ).find((file) => file.path === "assets/take.mp4");
+    const facts = probeFactsUri("test-bucket", take?.sha256 ?? "").replace("s3://", "");
+    const stored = JSON.parse(s3.bodies.get(facts)?.toString() ?? "{}");
+    expect(stored.ffprobe.streams[0].codec_type).toBe("video");
+    expect(stored.finalFrame.seconds).toBeGreaterThan(1.5);
+    expect(stored.finalFrame.lastPacketSeconds).toBeGreaterThan(0);
+    expect(sitePaths(s3, site.siteId)).toEqual([
+      "assets/style.css",
+      "assets/take.mp4",
+      "index.html",
+    ]);
+  });
+
+  it("deploys the same site with no probe stored when there is no ffprobe, and says so", async () => {
+    addVideo();
+    const notices: string[] = [];
+    const before = process.env.HYPERFRAMES_FFPROBE_PATH;
+    process.env.HYPERFRAMES_FFPROBE_PATH = join(scratch, "no-such-ffprobe");
+    const s3 = new FakeS3();
+    try {
+      await deploySite({
+        projectDir,
+        bucketName: "test-bucket",
+        s3: asS3Client(s3),
+        onNotice: (message) => notices.push(message),
+      });
+    } finally {
+      if (before === undefined) delete process.env.HYPERFRAMES_FFPROBE_PATH;
+      else process.env.HYPERFRAMES_FFPROBE_PATH = before;
+    }
+
+    expect([...s3.existing].filter((id) => id.endsWith(".probe.v2.json"))).toEqual([]);
+    expect(notices.some((message) => message.includes("ffprobe"))).toBe(true);
   });
 });

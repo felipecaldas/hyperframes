@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context, type Next } from "hono";
 import type { StudioApiAdapter } from "./types.js";
 import { registerProjectRoutes } from "./routes/projects.js";
 import { registerFileRoutes } from "./routes/files.js";
@@ -23,6 +23,19 @@ import { registerGoogleFontProxyRoutes } from "./helpers/googleFontProxy.js";
 import { registerHistoryRoutes } from "./routes/history.js";
 import { replaceWithProjectDirMissing } from "./helpers/projectDirMissing.js";
 import { folderGone, isProjectRootMissing } from "./helpers/safePath.js";
+import { previewErrorPage } from "./helpers/previewErrorPage.js";
+
+async function answerRefusedFrameWithPage(c: Context, next: Next) {
+  await next();
+  if (c.req.header("sec-fetch-dest") !== "iframe" || c.res.status < 400) return;
+  const headers = new Headers(c.res.headers);
+  headers.set("content-type", "text/html; charset=utf-8");
+  headers.delete("content-length");
+  c.res = new Response(previewErrorPage(c.res.status), {
+    status: c.res.status,
+    headers,
+  });
+}
 
 /**
  * Create a Hono sub-app with all studio API routes.
@@ -33,8 +46,9 @@ import { folderGone, isProjectRootMissing } from "./helpers/safePath.js";
 export function createStudioApi(adapter: StudioApiAdapter): Hono {
   const api = new Hono();
   const agentRuntime = new AgentRuntime(adapter);
-
   registerAgentWriteLock(api, agentRuntime);
+  api.use("/projects/:id/preview/*", answerRefusedFrameWithPage);
+  api.use("/projects/:id/preview", answerRefusedFrameWithPage);
   api.use(async function answerProjectDirMissingAfterErrorHandlers(c, next) {
     const hostHeaders = new Headers(c.res.headers);
     await next();
