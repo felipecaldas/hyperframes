@@ -125,6 +125,11 @@ jobs:
         with:
           lfs: true
 
+      # Persistent passbolt workspaces can retain pointers from non-LFS jobs.
+      # Fetching objects does not rewrite those unchanged worktree files.
+      - name: Materialize LFS files
+        run: git lfs checkout
+
       - name: Validate LFS files
         run: |
           echo "Checking golden baseline MP4s are real files (not LFS pointers)..."

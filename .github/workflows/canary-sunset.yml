@@ -21,6 +21,9 @@ on:
 
 jobs:
   sunset:
+    # This registry tracks HeyGen-owned telemetry calibration, not Tabario rollouts.
+    # Preserve upstream application code without scheduling its operational alerts here.
+    if: github.repository == 'heygen-com/hyperframes'
     runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
