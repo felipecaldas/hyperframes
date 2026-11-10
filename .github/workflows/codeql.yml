@@ -51,6 +51,9 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           config-file: ./.github/codeql/codeql-config.yml
+          # passbolt-hyperframes has 5 GiB; leave headroom for the runner/JVM.
+          ram: ${{ matrix.language == 'javascript-typescript' && '4096' || '2048' }}
+          threads: 2
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
