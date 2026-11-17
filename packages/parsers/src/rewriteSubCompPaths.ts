@@ -16,10 +16,11 @@
 // submodule so Windows builds don't emit backslash-separated paths (or worse,
 // drive-letter-prefixed artifacts from `resolve("/", ...)`).
 import { posix } from "path";
+import { cssUrlMatches, replaceMatches } from "./cssUrlScans.js";
+import { rewriteSrcsetUrls } from "./srcset.js";
 const { join, resolve, dirname } = posix;
 
 import {
-  CSS_URL_RE,
   PATH_ATTRS,
   isNonRelativeUrl,
   splitUrlSuffix,
@@ -111,6 +112,12 @@ export function rewriteAssetPaths<T>(
         setAttr(el, attr, rewritten);
       }
     }
+    const srcset = getAttr(el, "srcset");
+    if (!srcset) continue;
+    const rewritten = rewriteSrcsetUrls(srcset, (url) =>
+      rewriteAssetPath(compSrcPath, url, assetExists),
+    );
+    if (rewritten !== srcset) setAttr(el, "srcset", rewritten);
   }
 }
 
@@ -147,7 +154,7 @@ export function rewriteCssAssetUrls(
   assetExists?: AssetExists,
 ): string {
   if (!cssText) return cssText;
-  return cssText.replace(CSS_URL_RE, (full, quote: string, rawUrl: string) => {
+  return replaceMatches(cssText, cssUrlMatches(cssText), (full, quote, rawUrl) => {
     const urlValue = (rawUrl || "").trim();
     const rewritten = rewriteAssetPath(compSrcPath, urlValue, assetExists);
     if (rewritten === urlValue) return full;

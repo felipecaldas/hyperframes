@@ -1,7 +1,16 @@
-export { createStudioApi } from "./createStudioApi.js";
+export { createStudioApi, type StudioApiOptions } from "./createStudioApi.js";
+export {
+  refuseServiceWorkerScripts,
+  serviceWorkerScriptFetch,
+} from "./helpers/serviceWorkerScripts.js";
+export {
+  PREVIEW_ALLOWED_HOSTS_ENV,
+  previewAllowedHostsFromEnv,
+} from "./helpers/requestIdentity.js";
 export { MAX_UPLOAD_BYTES } from "./routes/files.js";
 export {
   createProjectSignature,
+  createProjectSignatureAsync,
   affectsProjectSignature,
   STUDIO_SIGNATURE_MANIFEST_PATHS,
 } from "./helpers/projectSignature.js";
@@ -12,6 +21,8 @@ export { cleanupProxyCache } from "./helpers/proxyCache.js";
 export { CACHE_DIR_NAME as PROXY_CACHE_DIR_NAME } from "./helpers/proxyTranscoder.js";
 export type {
   StudioApiAdapter,
+  StudioRefusal,
+  StudioRefusalWhy,
   ResolvedProject,
   RenderJobState,
   MediaProcessingJobState,
@@ -21,7 +32,7 @@ export type {
   StudioSelectionTextField,
 } from "./types.js";
 export { isSafePath, walkDir } from "./helpers/safePath.js";
-export { stampProjectHfIds } from "./helpers/hfIdPersist.js";
+export { stampProjectHfIds, stampProjectHfIdsAsync } from "./helpers/hfIdPersist.js";
 export {
   patchElementInHtml,
   splitElementInHtml,
@@ -43,6 +54,8 @@ export { PREVIEW_BUNDLE_OPTIONS } from "./routes/preview.js";
 export { createPreviewDocumentStore } from "./helpers/previewDocumentStore.js";
 export { getMimeType, MIME_TYPES } from "./helpers/mime.js";
 export { decodeWellFormedEscapes, requestSubPath } from "./helpers/requestSubPath.js";
+export { originForListeningAddress } from "./helpers/serverOrigin.js";
+export { MAX_OPEN_MEDIA_RANGE_BYTES, openRangeEnd } from "./helpers/mediaRange.js";
 export {
   consumeFileWriteReceipt,
   identifyFileWrite,
@@ -52,6 +65,7 @@ export {
   type FileWriteReceipt,
 } from "./helpers/fileVersion.js";
 export { buildSubCompositionHtml } from "./helpers/subComposition.js";
+export { captureLoadGrant, grantCaptureLoads } from "./helpers/captureLoads.js";
 export {
   clearElementScreenshotIsolation,
   getElementScreenshotClip,
@@ -76,3 +90,12 @@ export {
   createStudioMotionRenderBodyScript,
   type StudioMotionRenderScriptOptions,
 } from "./helpers/studioMotionRenderScript.js";
+export type {
+  LocalShareAudience,
+  LocalShareSpace,
+  LocalShareState,
+  LocalShareJob,
+  LocalShareSnapshot,
+  LocalShareAction,
+  LocalShareInteraction,
+} from "./localShare.js";

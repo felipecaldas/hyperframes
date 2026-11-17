@@ -62,7 +62,7 @@ const tinyEncodeOptions = {
 };
 
 function encodeTimeoutMessage(timeoutMs: number): string {
-  return `FFmpeg killed after exceeding ffmpegEncodeTimeout (${timeoutMs} ms)`;
+  return `FFmpeg killed after writing no new frame for ffmpegEncodeTimeout (${timeoutMs} ms)`;
 }
 
 type FakeProc = EventEmitter & {
@@ -130,8 +130,8 @@ describe("ENCODER_PRESETS", () => {
     expect(ENCODER_PRESETS.draft.codec).toBe("h264");
   });
 
-  it("high uses slow preset with low CRF for better quality", () => {
-    expect(ENCODER_PRESETS.high.preset).toBe("slow");
+  it("high uses the fast preset with low CRF for better quality", () => {
+    expect(ENCODER_PRESETS.high.preset).toBe("fast");
     expect(ENCODER_PRESETS.high.quality).toBeLessThan(ENCODER_PRESETS.standard.quality);
     expect(ENCODER_PRESETS.high.codec).toBe("h264");
   });
@@ -177,11 +177,41 @@ describe("encodeFramesFromDir ffmpegEncodeTimeout", () => {
     expect(result.error).toContain("FFmpeg exited with code 143");
     expect(result.error).toContain("terminated by timeout");
     expect(result.error).toContain(encodeTimeoutMessage(1000));
-    // Regression: the timeout message used to just state what happened, leaving
-    // the user to independently discover FFMPEG_ENCODE_TIMEOUT_MS and
-    // PRODUCER_ENABLE_CHUNKED_ENCODE (both already existed) on their own.
     expect(result.error).toContain("FFMPEG_ENCODE_TIMEOUT_MS");
-    expect(result.error).toContain("PRODUCER_ENABLE_CHUNKED_ENCODE");
+    // Chunking does not help an encode that writes no frames, so it is no longer suggested.
+    expect(result.error).not.toContain("PRODUCER_ENABLE_CHUNKED_ENCODE");
+  });
+
+  it("keeps an encode going past the timeout while its frame count advances", async () => {
+    vi.useFakeTimers();
+    const { spawn, calls } = createSpawnSpy();
+    vi.resetModules();
+    vi.doMock("child_process", () => ({ spawn }));
+
+    const { encodeFramesFromDir } = await import("./chunkEncoder.js");
+    const { root, framesDir } = createFrameFixture();
+
+    const encodePromise = encodeFramesFromDir(
+      framesDir,
+      "frame_%06d.png",
+      join(root, "slow.mp4"),
+      tinyEncodeOptions,
+      undefined,
+      { ffmpegEncodeTimeout: 1000 },
+    );
+
+    const proc = calls[0]!.proc;
+    for (let frame = 1; frame <= 4; frame += 1) {
+      vi.advanceTimersByTime(900);
+      proc.stderr.emit(
+        "data",
+        Buffer.from(`frame=${frame} fps=1 q=28.0 time=00:00:0${frame}.00\r`),
+      );
+    }
+    expect(proc.kill).not.toHaveBeenCalled();
+    emitClose(proc, 0);
+
+    await expect(encodePromise).resolves.toMatchObject({ success: true, framesEncoded: 2 });
   });
 
   it("keeps non-timeout ffmpeg failures unchanged", async () => {
@@ -871,6 +901,32 @@ describe("getEncoderPreset", () => {
     expect(preset.pixelFormat).toBe("yuva444p10le");
   });
 
+  it.each([
+    ["4444", "4444", "yuva444p10le"],
+    ["hq", "3", "yuv422p10le"],
+    ["422", "2", "yuv422p10le"],
+    ["lt", "1", "yuv422p10le"],
+    ["proxy", "0", "yuv422p10le"],
+  ] as const)("maps ProRes profile %s to -profile:v %s and %s", (name, profile, pixelFormat) => {
+    const preset = getEncoderPreset("standard", "mov", undefined, name);
+    expect(preset).toMatchObject({ codec: "prores", preset: profile, pixelFormat });
+    const args = buildEncoderArgs(
+      {
+        fps: { num: 30, den: 1 },
+        width: 1920,
+        height: 1080,
+        codec: "prores",
+        preset: preset.preset,
+        quality: 23,
+        pixelFormat,
+      },
+      ["-framerate", "30", "-i", "frames/%04d.png"],
+      "out.mov",
+    );
+    expect(args[args.indexOf("-profile:v") + 1]).toBe(profile);
+    expect(args[args.indexOf("-pix_fmt") + 1]).toBe(pixelFormat);
+  });
+
   it("uses prores 4444 for all mov quality levels", () => {
     for (const q of ["draft", "standard", "high"] as const) {
       const preset = getEncoderPreset(q, "mov");
@@ -883,6 +939,31 @@ describe("getEncoderPreset", () => {
     const preset = getEncoderPreset("standard");
     expect(preset.codec).toBe("h264");
     expect(preset.pixelFormat).toBe("yuv420p");
+  });
+
+  it("returns yuv444p for SDR mp4 when 4:4:4 chroma is requested", () => {
+    for (const q of ["draft", "standard", "high"] as const) {
+      const preset = getEncoderPreset(q, "mp4", undefined, undefined, "444");
+      expect(preset.codec).toBe("h264");
+      expect(preset.preset).toBe(ENCODER_PRESETS[q].preset);
+      expect(preset.pixelFormat).toBe("yuv444p");
+    }
+  });
+
+  it("keeps yuv420p for SDR mp4 when 4:2:0 chroma is requested explicitly", () => {
+    expect(getEncoderPreset("standard", "mp4", undefined, "420").pixelFormat).toBe("yuv420p");
+  });
+
+  it("ignores the chroma option for webm, mov and HDR presets", () => {
+    expect(getEncoderPreset("standard", "webm", undefined, undefined, "444").pixelFormat).toBe(
+      "yuva420p",
+    );
+    expect(getEncoderPreset("standard", "mov", undefined, undefined, "444").pixelFormat).toBe(
+      "yuva444p10le",
+    );
+    expect(
+      getEncoderPreset("standard", "mp4", { transfer: "pq" }, undefined, "444").pixelFormat,
+    ).toBe("yuv420p10le");
   });
 });
 
@@ -1005,6 +1086,18 @@ describe("buildEncoderArgs GPU preset mapping", () => {
     expect(presetArg(args)).toBe("p1");
   });
 
+  it("gives an NVENC build that lists only legacy presets a legacy preset, not p4", () => {
+    const legacy = new Set(["default", "slow", "medium", "fast", "hp", "hq"]);
+    const args = buildEncoderArgs(
+      { ...baseOptions, codec: "h264", preset: "medium", quality: 18, useGpu: true },
+      inputArgs,
+      "out.mp4",
+      "nvenc",
+      legacy,
+    );
+    expect(presetArg(args)).toBe("medium");
+  });
+
   it("translates the standard medium preset to NVENC p4", () => {
     const args = buildEncoderArgs(
       { ...baseOptions, codec: "h264", preset: "medium", quality: 18, useGpu: true },
@@ -1015,7 +1108,7 @@ describe("buildEncoderArgs GPU preset mapping", () => {
     expect(presetArg(args)).toBe("p4");
   });
 
-  it("translates the high slow preset to NVENC p5", () => {
+  it("translates the slow preset to NVENC p5", () => {
     const args = buildEncoderArgs(
       { ...baseOptions, codec: "h264", preset: "slow", quality: 15, useGpu: true },
       inputArgs,
@@ -1164,6 +1257,27 @@ describe("buildEncoderArgs color space", () => {
     );
     const vfIdx = args.indexOf("-vf");
     expect(args[vfIdx + 1]).toBe(`${SDR_CAPTURE_TO_BT709_FILTER},pad=ceil(iw/2)*2:ceil(ih/2)*2`);
+  });
+
+  it("encodes 4:4:4 at odd dimensions without padding, keeping BT.709 tags", () => {
+    const args = buildEncoderArgs(
+      {
+        ...baseOptions,
+        width: 1081,
+        height: 721,
+        codec: "h264",
+        preset: "medium",
+        quality: 18,
+        pixelFormat: "yuv444p",
+      },
+      inputArgs,
+      "out.mp4",
+    );
+    expect(args[args.indexOf("-c:v") + 1]).toBe("libx264");
+    expect(args[args.indexOf("-pix_fmt") + 1]).toBe("yuv444p");
+    expect(args[args.indexOf("-vf") + 1]).toBe(SDR_CAPTURE_TO_BT709_FILTER);
+    expect(args[args.indexOf("-colorspace:v") + 1]).toBe("bt709");
+    expect(args[args.indexOf("-color_range") + 1]).toBe("tv");
   });
 
   it("prepends range conversion to VAAPI filter chain", () => {

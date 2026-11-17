@@ -1,3 +1,4 @@
+import { isExpectedOutputDimensions } from "../render/outputDimensions.js";
 /**
  * Cloud-agnostic validation of a serializable `DistributedRenderConfig`.
  *
@@ -17,6 +18,7 @@
  * needs the actual planner.
  */
 
+import { validateDeliveryEncoderConfig } from "../render/deliveryEncoder.js";
 import {
   VIDEO_FRAME_FORMATS,
   isVideoFrameFormat,
@@ -24,7 +26,11 @@ import {
 } from "@hyperframes/engine";
 import { DISTRIBUTED_FPS, isDistributedFps } from "@hyperframes/core";
 import { type DistributedFormat } from "./shared.js";
-import { type DistributedRenderConfig, MAX_PARALLEL_CHUNKS_CEILING } from "./plan.js";
+import {
+  type DistributedRenderConfig,
+  MAX_CHUNK_SIZE,
+  MAX_PARALLEL_CHUNKS_CEILING,
+} from "./plan.js";
 
 /**
  * `DistributedRenderConfig` minus the runtime-only fields (`logger`,
@@ -62,7 +68,6 @@ const ALLOWED_HDR_MODES = ["auto", "force-sdr"] as const;
 
 const MAX_DIMENSION = 7680;
 const MIN_DIMENSION = 16;
-const MAX_CHUNK_SIZE = 3600;
 
 /**
  * Throw an `InvalidConfigError` if `config` is not a valid
@@ -86,8 +91,21 @@ export function validateDistributedRenderConfig(
     );
   }
 
+  if (
+    config.expectedOutputDimensions !== undefined &&
+    !isExpectedOutputDimensions(config.expectedOutputDimensions)
+  ) {
+    throw new InvalidConfigError(
+      "config.expectedOutputDimensions",
+      "must contain positive integer width and height",
+    );
+  }
   validateIntDimension("config.width", config.width);
   validateIntDimension("config.height", config.height);
+
+  if (config.pageMotionBlur !== undefined && config.pageMotionBlur !== "off") {
+    throw new InvalidConfigError("config.pageMotionBlur", 'must be "off" when provided');
+  }
 
   if (!ALLOWED_FORMATS.includes(config.format)) {
     throw new InvalidConfigError(
@@ -141,6 +159,34 @@ export function validateDistributedRenderConfig(
     );
   }
 
+  try {
+    validateDeliveryEncoderConfig({
+      format: config.format,
+      fps: { num: config.fps, den: 1 },
+      keyframeIntervalSeconds: config.keyframeIntervalSeconds,
+      maxBitrate: config.maxBitrate,
+      bufferSize: config.bufferSize,
+    });
+  } catch (error) {
+    throw new InvalidConfigError(
+      "config.maxBitrate",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+
+  try {
+    validateDeliveryEncoderConfig({
+      format: config.format,
+      fps: { num: config.fps, den: 1 },
+      proresProfile: config.proresProfile,
+    });
+  } catch (error) {
+    throw new InvalidConfigError(
+      "config.proresProfile",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+
   if (config.chunkSize !== undefined) {
     if (!Number.isInteger(config.chunkSize) || config.chunkSize < 1) {
       throw new InvalidConfigError(
@@ -186,6 +232,21 @@ export function validateDistributedRenderConfig(
     }
   }
 
+  if (config.minParallelChunks !== undefined) {
+    if (!Number.isInteger(config.minParallelChunks) || config.minParallelChunks < 1) {
+      throw new InvalidConfigError(
+        "config.minParallelChunks",
+        `must be a positive integer; got ${config.minParallelChunks}`,
+      );
+    }
+    if (config.minParallelChunks > MAX_PARALLEL_CHUNKS_CEILING) {
+      throw new InvalidConfigError(
+        "config.minParallelChunks",
+        `must be <= ${MAX_PARALLEL_CHUNKS_CEILING}; got ${config.minParallelChunks}`,
+      );
+    }
+  }
+
   for (const field of ["workerTimeoutSeconds", "workerConcurrency"] as const) {
     const value = config[field];
     if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
@@ -210,8 +271,19 @@ export function validateDistributedRenderConfig(
     );
   }
 
+  const chromaSubsampling = (config as { chromaSubsampling?: unknown }).chromaSubsampling;
+  if (chromaSubsampling !== undefined && chromaSubsampling !== "420") {
+    throw new InvalidConfigError(
+      "config.chromaSubsampling",
+      `distributed mode encodes 4:2:0 only; got ${String(chromaSubsampling)}`,
+    );
+  }
+
   if (config.variables !== undefined) {
     validateVariablesPayload(config.variables);
+  }
+  if (config.strictVariables !== undefined && typeof config.strictVariables !== "boolean") {
+    throw new InvalidConfigError("config.strictVariables", "must be a boolean");
   }
   if (config.engineConfig !== undefined) {
     try {

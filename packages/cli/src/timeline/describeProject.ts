@@ -10,7 +10,10 @@ import { HF_AUDIO_GROUP_ATTR } from "@hyperframes/core/audio-groups";
 import { byStart, type ClipFact, type ClipLane } from "@hyperframes/core/clip-facts";
 import { fpsToNumber, parseFpsWithDefault, parseNumeric } from "@hyperframes/core";
 import { findSyncPartner, readLinkTiming, syncOffsetFrames } from "@hyperframes/core/media-link";
-import { resolveAuthoredAssetFile } from "@hyperframes/parsers/asset-resolution";
+import {
+  namesAnotherNetworkRoot,
+  resolveAuthoredAssetFile,
+} from "@hyperframes/parsers/asset-resolution";
 import { readCompositionFps } from "../utils/compositionFps.js";
 import {
   readMediaOffsetSeconds,
@@ -23,9 +26,9 @@ import {
   isSubCompositionHost,
   topLevelElements,
   trackKindOf,
-  type StructureNode,
   type TrackKind,
 } from "@hyperframes/parsers";
+import { toDomNode, type DomNode } from "./domStructure.js";
 import {
   compositionOriginSeconds,
   cutToHostSlots,
@@ -105,17 +108,7 @@ export interface ProjectTimeline {
   tracks: TimelineTrack[];
 }
 
-interface DomNode extends StructureNode<DomNode> {
-  el: Element;
-}
-
 const TRACK_ORDER: readonly TrackKind[] = ["video", "graphics", "captions", "audio"];
-
-function toNode(el: Element): DomNode {
-  const attrs: Record<string, string | undefined> = {};
-  for (const { name, value } of Array.from(el.attributes)) attrs[name] = value;
-  return { tag: el.tagName, attrs, children: Array.from(el.children).map(toNode), el };
-}
 
 /** An unreadable chain drops only the fx lanes; the clip's own `volume` lane still shows. */
 function safeChain(raw: string): ReturnType<typeof parseAudioFxChain> | undefined {
@@ -388,7 +381,7 @@ async function readSubComposition(
     fps: parent.fps,
   };
   const rows = await Promise.all(
-    topLevelElements(toNode(root)).map((node) => describeRow(scope, node, 1)),
+    topLevelElements(toDomNode(root)).map((node) => describeRow(scope, node, 1)),
   );
   return rows.flatMap((row) => cutRow(row, slots)).sort(byStart);
 }
@@ -404,6 +397,7 @@ function cutRow(row: ClipDraft, slots: readonly HostSlot[]): ClipDraft[] {
 
 /** The file's real path when it is a regular file inside the project (symlinks resolved), else null. */
 function realFileInside(projectDir: string, path: string): string | null {
+  if (namesAnotherNetworkRoot(projectDir, path)) return null;
   try {
     const real = realpathSync(path);
     const inside = relative(realpathSync(projectDir), real);
@@ -517,7 +511,7 @@ export async function describeProject(
     fps: projectFps(source),
   };
   const rows = (
-    await Promise.all(topLevelElements(toNode(root)).map((node) => describeRow(scope, node, 0)))
+    await Promise.all(topLevelElements(toDomNode(root)).map((node) => describeRow(scope, node, 0)))
   ).sort(byStart);
   const declared = parseNumeric(root.getAttribute("data-duration"));
   return {

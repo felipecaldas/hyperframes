@@ -1,4 +1,4 @@
-import { defineCommand } from "citty";
+import { defineCommand } from "../utils/defineCommand.js";
 import type { Example } from "./_examples.js";
 
 export const examples: Example[] = [
@@ -10,15 +10,15 @@ export const examples: Example[] = [
   ["Search (positional, same as --query)", 'hyperframes catalog "crossfade"'],
 ];
 
-import * as clack from "@clack/prompts";
-import { realpath, type ItemType, type RegistryItem } from "@hyperframes/core";
+import * as clack from "../ui/prompts.js";
+import { realpath, terminalText, type ItemType, type RegistryItem } from "@hyperframes/core";
 import { c } from "../ui/colors.js";
 import { loadAllItems } from "../registry/resolver.js";
-import { fetchRegistryManifest } from "../registry/remote.js";
+import { readRegistryManifest } from "../registry/remote.js";
 import { loadProjectConfig, DEFAULT_PROJECT_CONFIG } from "../utils/projectConfig.js";
 import { relative, resolve } from "node:path";
-import { finishCommand } from "../utils/commandResult.js";
-import { isAttendedTerminal } from "../utils/attendedTerminal.js";
+import { CliUsageError, finishCommand } from "../utils/commandResult.js";
+import { isUnattended } from "../utils/attendedTerminal.js";
 import { runAdd } from "./add.js";
 import { hasNoSearchableTokens, searchByWords } from "../registry/localSearch.js";
 import {
@@ -226,15 +226,17 @@ export default defineCommand({
     if (args.type === "block") typeFilter = "hyperframes:block";
     else if (args.type === "component") typeFilter = "hyperframes:component";
     else if (args.type) {
-      console.error(`Invalid --type: "${args.type}". Use "block" or "component".`);
-      finishCommand(1);
+      throw new CliUsageError(`Invalid --type: "${args.type}". Use "block" or "component".`);
     }
 
     // Asked for the whole manifest on purpose: its item list defines coverage,
     // and its artifact revision is the one owner of vector freshness.
-    const manifest = await fetchRegistryManifest(config.registry);
-    const entries = manifest?.items ?? [];
-    const artifactRevision = manifest?.catalogArtifact?.revision;
+    const manifest = await readRegistryManifest(config.registry).catch((error: unknown) => {
+      console.error(terminalText(error instanceof Error ? error.message : String(error)));
+      return finishCommand(1);
+    });
+    const entries = manifest.items;
+    const artifactRevision = manifest.catalogArtifact?.revision;
     const catalog = entries.filter((e) => e.type !== "hyperframes:example");
     const registryNames = new Set(catalog.map((e) => e.name));
     const filtered = typeFilter ? catalog.filter((e) => e.type === typeFilter) : catalog;
@@ -271,7 +273,7 @@ export default defineCommand({
       warnings = await prepareOnDeviceTier({
         assumedYes: args.yes === true,
         artifactRevision,
-        canPrompt: isAttendedTerminal() && !json,
+        canPrompt: !isUnattended() && !json,
         installRuntime: args["on-device"] === true,
         registry: config.registry,
         registryNames,
@@ -469,7 +471,7 @@ export default defineCommand({
       const options = matching.map((item) => ({
         value: item.name,
         label: item.name,
-        hint: item.description,
+        hint: terminalText(item.description),
       }));
 
       const selected = await clack.select({
@@ -489,18 +491,18 @@ export default defineCommand({
       });
 
       for (const warning of result.warnings) {
-        console.warn(c.warn(`Warning: ${warning}`));
+        console.warn(c.warn(`Warning: ${terminalText(warning)}`));
       }
       console.log("");
       console.log(`${c.success("✓")} Installed ${c.accent(result.name)} (${result.type})`);
       const root = realpath(dir);
       for (const file of result.written) {
-        console.log(`  ${c.dim(relative(root, file))}`);
+        console.log(`  ${c.dim(terminalText(relative(root, file)))}`);
       }
       if (result.snippet) {
         console.log("");
         console.log(c.dim("Include snippet:"));
-        console.log(`  ${result.snippet}`);
+        console.log(`  ${terminalText(result.snippet)}`);
       }
       return;
     }
@@ -514,9 +516,9 @@ export default defineCommand({
 
     for (const item of matching) {
       const type = item.type.replace("hyperframes:", "");
-      const tags = item.tags?.length ? c.dim(` [${item.tags.join(", ")}]`) : "";
+      const tags = item.tags?.length ? c.dim(` [${terminalText(item.tags.join(", "))}]`) : "";
       console.log(
-        `${c.cyan(item.name.padEnd(NAME_COL))}${type.padEnd(TYPE_COL)}${item.description}${tags}`,
+        `${c.cyan(item.name.padEnd(NAME_COL))}${type.padEnd(TYPE_COL)}${terminalText(item.description)}${tags}`,
       );
     }
 
@@ -725,7 +727,7 @@ type LocalMode = "local-model" | "words";
  * person to prompt instead, or when that person has already answered.
  */
 function localModelHint(json: boolean, status: LocalModelStatus | undefined): string | null {
-  if (!json && isAttendedTerminal()) return null;
+  if (!json && !isUnattended()) return null;
   if (status?.status !== "not-asked") return null;
   return nonInteractiveConsentMessage();
 }
@@ -743,7 +745,7 @@ async function offerLocalModel(
   registryBaseUrl: string,
   artifactRevision?: string,
 ): Promise<void> {
-  if (json || !isAttendedTerminal()) return;
+  if (json || isUnattended()) return;
   if (localModelStatus().status !== "not-asked") return;
   // Deliberately not gated on the number of results. That gate was set when the
   // catalog was small; against 411 moves a word match nearly always returns

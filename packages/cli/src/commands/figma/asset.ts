@@ -4,7 +4,7 @@
  * provenance in the shared manifest, print a composition snippet.
  */
 
-import { defineCommand } from "citty";
+import { defineCommand } from "../../utils/defineCommand.js";
 import {
   appendRecord,
   buildAssetSnippet,
@@ -13,10 +13,10 @@ import {
   findAllByFigmaNode,
   freezeBytes,
   nextId,
+  ownTypeDir,
   parseFigmaRef,
   regenerateIndex,
   sanitizeSvg,
-  typeDirPath,
   updateRecord,
   type AssetSnippet,
   type FigmaAssetFormat,
@@ -134,7 +134,7 @@ async function freezeAndRecord(
     bytes = new TextEncoder().encode(sanitizeSvg(new TextDecoder().decode(bytes)));
   }
   const id = nextId(deps.projectDir, "image");
-  const destAbs = join(typeDirPath(deps.projectDir, "image"), `${id}.${ext}`);
+  const destAbs = join(ownTypeDir(deps.projectDir, "image"), `${id}.${ext}`);
   freezeBytes(bytes, destAbs);
   const record: FigmaManifestRecord = {
     id,

@@ -1,9 +1,21 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { noHandlerMessage, type StageDeps, stagePrebuiltHandler } from "./prebuiltHandler.js";
+
+const ownedByAnotherAccount = vi.hoisted(() => new Set<string>());
+vi.mock("node:fs", async (importOriginal) => {
+  const fs = await importOriginal<typeof import("node:fs")>();
+  const lstatSync = ((path: string, options?: object) => {
+    const stat = fs.lstatSync(path, options as never);
+    return stat && ownedByAnotherAccount.has(path)
+      ? Object.assign(stat, { uid: process.getuid!() + 1 })
+      : stat;
+  }) as typeof fs.lstatSync;
+  return { ...fs, lstatSync };
+});
 
 const ZIP = Buffer.from("prebuilt handler zip");
 const SHA = createHash("sha256").update(ZIP).digest("hex");
@@ -15,6 +27,7 @@ function setup(body: Buffer = ZIP) {
   dirs.push(root);
   const templatePath = join(root, "template.yaml");
   writeFileSync(templatePath, "CodeUri: handler.zip\n");
+  writeFileSync(join(root, "video-function.yaml"), "PackageType: Image\n");
   const downloads: string[] = [];
   const logs: string[] = [];
   const deps: StageDeps = {
@@ -44,6 +57,7 @@ function missingModule(): Error {
 }
 
 afterEach(() => {
+  ownedByAnotherAccount.clear();
   vi.unstubAllEnvs();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -57,10 +71,47 @@ describe("stagePrebuiltHandler", () => {
     expect(dir).toBe(join(deps.cacheDir, `9.8.7-${SHA}`));
     expect(readFileSync(join(dir, "handler.zip"))).toEqual(ZIP);
     expect(readFileSync(join(dir, "template.yaml"), "utf-8")).toBe("CodeUri: handler.zip\n");
+    expect(readFileSync(join(dir, "video-function.yaml"), "utf-8")).toBe("PackageType: Image\n");
 
     expect(await stagePrebuiltHandler(deps)).toBe(dir);
     expect(downloads).toEqual([URL]);
   });
+
+  it("lets concurrent installers publish their independently verified downloads", async () => {
+    const { deps } = setup();
+    const results = await Promise.all([stagePrebuiltHandler(deps), stagePrebuiltHandler(deps)]);
+    expect(results[0]).toBe(results[1]);
+    expect(readFileSync(join(results[0], "handler.zip"))).toEqual(ZIP);
+  });
+
+  it.skipIf(!process.getuid)(
+    "downloads nothing into a handler folder another account owns",
+    async () => {
+      const { deps, downloads } = setup();
+      const dir = join(deps.cacheDir, `9.8.7-${SHA}`);
+      mkdirSync(dir, { recursive: true });
+      ownedByAnotherAccount.add(dir);
+      await expect(stagePrebuiltHandler(deps)).rejects.toThrow(
+        `${dir} can be changed by another user account`,
+      );
+      expect(downloads).toEqual([]);
+    },
+  );
+
+  it.skipIf(!process.getuid)(
+    "hands on no handler whose folder stops being this account's during the download",
+    async () => {
+      const { deps } = setup();
+      const dir = join(deps.cacheDir, `9.8.7-${SHA}`);
+      deps.download = async (_url, dest) => {
+        writeFileSync(dest, ZIP);
+        ownedByAnotherAccount.add(dir);
+      };
+      await expect(stagePrebuiltHandler(deps)).rejects.toThrow(
+        `${dir} can be changed by another user account`,
+      );
+    },
+  );
 
   it("re-downloads a cached copy that no longer matches the pin", async () => {
     const { deps, downloads } = setup();
@@ -107,7 +158,9 @@ describe("stagePrebuiltHandler with nothing to deploy", () => {
     const message = noHandlerMessage(false);
     expect(message).toMatch(/npm install -g @hyperframes\/aws-lambda@/);
     expect(message).toMatch(/HYPERFRAMES_REPO_ROOT/);
-    expect(message).toMatch(/^Docs: https:\/\/hyperframes\.heygen\.com\/deploy\/aws-lambda$/m);
+    expect(message).toMatch(
+      /^Docs: https:\/\/hyperframes\.heygen\.com\/deploy\/aws-lambda\?utm_source=cli$/m,
+    );
     expect(downloads).toEqual([]);
   });
 

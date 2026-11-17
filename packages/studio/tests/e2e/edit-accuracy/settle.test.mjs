@@ -6,12 +6,13 @@ import {
   STILL_FRAMES,
   backgroundRequest,
   heldStill,
+  measureShown,
   networkBusy,
   seekBound,
   swapPending,
   unsettledBy,
 } from "./case.mjs";
-import { heldSize } from "./sequences.mjs";
+import { heldSize, keyedBy } from "./sequences.mjs";
 
 describe("settling on the shown preview", () => {
   const read = (pending, x = 0, frames = "a") => ({
@@ -52,9 +53,48 @@ describe("settling on the shown preview", () => {
     expect(await swapPending({ page: page(frame("/studio", false, true)), keys })).toBe(false);
   });
 
+  it("reads a preview that went away mid-read as holding nothing, not as an error", async () => {
+    const gone = {
+      url: () => "/preview/a?_t=1",
+      frameElement: async () => ({
+        evaluate: async () => {
+          throw new Error("Attempted to use detached Frame");
+        },
+      }),
+      $: async () => ({}),
+    };
+    expect(await swapPending({ page: page(gone), keys })).toBe(false);
+  });
+
+  it("calls a swap pending while Studio says the preview is changing, with no hidden preview yet", async () => {
+    const changing = (on) => ({ frames: () => [], evaluate: async () => on });
+    expect(await swapPending({ page: changing(true), keys })).toBe(true);
+    expect(await swapPending({ page: changing(false), keys })).toBe(false);
+    expect(await swapPending({ page: changing(true) }), "a case without keyframes").toBe(false);
+  });
+
   it("never waits on a swap in a case without keyframes, so its undo keeps main's timing", async () => {
     expect(await swapPending({ page: swapping })).toBe(false);
     expect(await swapPending({ page: swapping, keys: undefined, selector: "#other" })).toBe(false);
+  });
+});
+
+describe("a plain element that gains keyframes mid-sequence", () => {
+  const changing = { frames: () => [], evaluate: async () => true };
+  const plain = () => ({ A: { page: changing }, B: { page: changing } });
+
+  it("waits out Studio's swap from the step that writes its first keyframe", async () => {
+    const ctx = plain();
+    keyedBy(ctx, { do: "drag" }, { autokey: false });
+    expect(await swapPending(ctx.A), "a drag with auto-keyframe off writes none").toBe(false);
+    keyedBy(ctx, { do: "addkey" }, { autokey: false });
+    expect(await swapPending(ctx.A)).toBe(true);
+  });
+
+  it("keys the element a drag with auto-keyframe on moved, and only that one", async () => {
+    const ctx = plain();
+    keyedBy(ctx, { do: "drag", element: "B" }, { autokey: true });
+    expect([await swapPending(ctx.A), await swapPending(ctx.B)]).toEqual([false, true]);
   });
 });
 
@@ -176,5 +216,40 @@ describe("the size auto-record keys hold", () => {
     expect(heldSize(keys, 5)).toEqual({ width: 440, height: 294 });
     expect(heldSize(keys, 2.5)).toBeUndefined();
     expect(heldSize(new Map(), 1)).toBeUndefined();
+  });
+});
+
+describe("the box a press is measured against", () => {
+  const quad = (x) => [
+    [x, 0],
+    [x + 1, 0],
+    [x + 1, 1],
+    [x, 1],
+  ];
+  const marker = (answers) => ({
+    evaluate: async () => answers.shift() ?? false,
+    dispose: async () => {},
+  });
+  const read = async () => ({ map: { toComp: (p) => p }, visible: quad(0) });
+  const page = (markers) => ({ $: async () => markers.shift() ?? null });
+
+  it("reads the waiting marker while a press waits for its replay, not the element under it", async () => {
+    const shown = await measureShown({ page: page([marker([true])]) }, "move", read, async () =>
+      quad(260),
+    );
+    expect(shown.m.visible[0][0]).toBe(260);
+    expect(shown.actual[0][0]).toBe(0);
+  });
+
+  it("reads the element when nothing waits", async () => {
+    const shown = await measureShown({ page: page([]) }, "move", read, async () => quad(260));
+    expect(shown.m.visible[0][0]).toBe(0);
+  });
+
+  it("reads again when the replay took the marker away between the two reads", async () => {
+    const shown = await measureShown({ page: page([marker([false])]) }, "move", read, async () =>
+      quad(260),
+    );
+    expect(shown.m.visible[0][0]).toBe(0);
   });
 });

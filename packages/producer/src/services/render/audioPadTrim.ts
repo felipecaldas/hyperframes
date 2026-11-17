@@ -20,7 +20,6 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, renameSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   DEFAULT_CONFIG,
@@ -29,13 +28,17 @@ import {
   extractAudioMetadata,
   getFfprobeBinary,
   ManagedChildProcess,
+  removeScratch,
+  renameWithRetry,
   runFfmpeg,
   trackChildProcess,
   type AudioMetadata,
   type RunFfmpegResult,
+  withPublicOnlyProxy,
 } from "@hyperframes/engine";
 import { redactKnownPaths, redactTelemetryString } from "@hyperframes/core";
 import { measureTruePeakDbfs } from "./audioTruePeak.js";
+import { createStagingDir } from "@hyperframes/core/atomic-file";
 
 /**
  * Tolerance used to decide whether an audio file is already short enough to
@@ -76,6 +79,8 @@ export interface PadTrimAudioInput {
   audioPath: string;
   /** Path the helper writes the duration-corrected audio to. */
   outputPath: string;
+  /** The PCM `audioPath` was encoded from: a pad, trim or peak correction encodes it instead of decoding the AAC. */
+  sourcePath?: string;
   signal?: AbortSignal;
   /** Deadline for each ffmpeg process; defaults to the engine's `ffmpegProcessTimeout`. */
   timeoutMs?: number;
@@ -133,8 +138,10 @@ export interface PadTrimAudioPlan {
   cleanupPaths: string[];
 }
 
+const gainFilter = (gainDb: number) => `volume=${gainDb.toFixed(3)}dB`;
+
 function aacTruePeakCorrectionFilter(targetDurationSeconds: number, attenuationDb: number) {
-  return `volume=${attenuationDb.toFixed(3)}dB,apad,atrim=0:${formatSeconds(targetDurationSeconds)}`;
+  return `${gainFilter(attenuationDb)},apad,atrim=0:${formatSeconds(targetDurationSeconds)}`;
 }
 
 /**
@@ -233,7 +240,7 @@ export async function padOrTrimAudioToVideoFrameCount(
   const timeoutMs = input.timeoutMs ?? DEFAULT_CONFIG.ffmpegProcessTimeout;
   const runner =
     input.runFfmpeg ?? ((args: string[]) => defaultRunFfmpeg(args, timeoutMs, input.signal));
-  const encode = input.encodeAac ?? defaultAacEncoder(timeoutMs, input.signal);
+  const encode = input.encodeAac ?? defaultAacEncoder(timeoutMs, input.signal, input.sourcePath);
   // Injected runners usually do not materialize media. Tests that exercise
   // peak correction opt in with a matching probe; production always uses the
   // real post-codec measurement.
@@ -307,7 +314,12 @@ export async function padOrTrimAudioToVideoFrameCount(
       const ffmpegResult =
         step.kind === "copy"
           ? await runner(step.args)
-          : await encode(input.audioPath, input.outputPath, targetDurationSeconds, step.filter);
+          : await encode(
+              input.sourcePath ?? input.audioPath,
+              input.outputPath,
+              targetDurationSeconds,
+              step.filter,
+            );
       if (!ffmpegResult.success) {
         return {
           success: false,
@@ -332,13 +344,14 @@ export async function padOrTrimAudioToVideoFrameCount(
       }`,
     };
   } finally {
-    for (const path of plan.cleanupPaths) rmSync(path, { force: true });
+    for (const path of plan.cleanupPaths) removeScratch(path);
   }
 
   let loweredDb = 0;
   if (probeTruePeak) {
     const correction = await enforceAacTruePeak({
       audioPath: input.outputPath,
+      sourcePath: input.sourcePath,
       targetDurationSeconds,
       signal: input.signal,
       probeTruePeak,
@@ -378,28 +391,72 @@ export async function constrainAacTruePeak(input: {
   targetDurationSeconds: number;
   signal?: AbortSignal;
   timeoutMs?: number;
+  probeTruePeakDbfs?: (audioPath: string, signal?: AbortSignal) => Promise<number>;
+  encodeAac?: AacEncoder;
+  rewriteSource?: SourceRewriter;
 }): Promise<{
   success: boolean;
   error?: string;
   failureReason?: "external_interruption";
   loweredDb?: number;
+  sourceStale?: true;
 }> {
   const timeoutMs = input.timeoutMs ?? DEFAULT_CONFIG.ffmpegProcessTimeout;
   return enforceAacTruePeak({
     audioPath: input.audioPath,
+    sourcePath: input.sourcePath,
     targetDurationSeconds: input.targetDurationSeconds,
     signal: input.signal,
-    probeTruePeak: (audioPath, signal) => measureTruePeakDbfs(audioPath, { timeoutMs, signal }),
-    encode: defaultAacEncoder(timeoutMs, input.signal, input.sourcePath),
+    probeTruePeak:
+      input.probeTruePeakDbfs ??
+      ((audioPath, signal) => measureTruePeakDbfs(audioPath, { timeoutMs, signal })),
+    encode: input.encodeAac ?? defaultAacEncoder(timeoutMs, input.signal, input.sourcePath),
+    rewriteSource:
+      input.rewriteSource ??
+      ((sourcePath, outputPath, filter) =>
+        defaultRunFfmpeg(
+          ["-i", sourcePath, "-af", filter, "-c:a", "pcm_f32le", "-y", outputPath],
+          timeoutMs,
+          input.signal,
+        )),
   });
 }
 
+/** Writes `sourcePath` through `filter` to `outputPath` as float PCM. */
+type SourceRewriter = (
+  sourcePath: string,
+  outputPath: string,
+  filter: string,
+) => Promise<StepResult>;
+
 interface EnforceAacTruePeakInput {
   audioPath: string;
+  sourcePath?: string;
   targetDurationSeconds: number;
   signal?: AbortSignal;
   probeTruePeak: (audioPath: string, signal?: AbortSignal) => Promise<number>;
   encode: AacEncoder;
+  /** Given with `sourcePath`, a cut is also applied to the PCM so it still encodes to `audioPath`. */
+  rewriteSource?: SourceRewriter;
+}
+
+/** Applies the delivered cut to the PCM. False means the PCM no longer matches the delivered AAC, even if deleting it was refused. */
+async function cutSource(
+  input: EnforceAacTruePeakInput,
+  scratchDir: string,
+  attenuationDb: number,
+): Promise<boolean> {
+  if (!input.sourcePath || !input.rewriteSource) return true;
+  const cutPath = join(scratchDir, "source.wav");
+  try {
+    const result = await input.rewriteSource(input.sourcePath, cutPath, gainFilter(attenuationDb));
+    if (!result.success) throw new Error(result.error);
+    renameWithRetry(cutPath, input.sourcePath, { copyFallback: true });
+    return true;
+  } catch {
+    removeScratch(input.sourcePath);
+    return false;
+  }
 }
 
 async function enforceAacTruePeak(input: EnforceAacTruePeakInput): Promise<{
@@ -407,14 +464,15 @@ async function enforceAacTruePeak(input: EnforceAacTruePeakInput): Promise<{
   error?: string;
   failureReason?: "external_interruption";
   loweredDb?: number;
+  sourceStale?: true;
 }> {
   let scratchDir: string | undefined;
   try {
-    scratchDir = mkdtempSync(join(dirname(input.audioPath), ".true-peak-"));
+    scratchDir = createStagingDir(dirname(input.audioPath), ".true-peak-");
     const correctedPath = join(scratchDir, "audio.m4a");
-    const correctionTargetDbfs = AAC_DELIVERY_TRUE_PEAK_DBFS - AAC_TRUE_PEAK_CORRECTION_HEADROOM_DB;
     const measurements: string[] = [];
     let attenuationDb = 0;
+    let sourcePeakDbfs: number | undefined;
     let measuredPath = input.audioPath;
     for (let pass = 0; pass <= MAX_TRUE_PEAK_CORRECTION_PASSES; pass += 1) {
       const truePeakDbfs = await input.probeTruePeak(measuredPath, input.signal);
@@ -426,16 +484,27 @@ async function enforceAacTruePeak(input: EnforceAacTruePeakInput): Promise<{
       }
       if (truePeakDbfs <= AAC_DELIVERY_TRUE_PEAK_DBFS) {
         if (measuredPath !== correctedPath) return { success: true };
-        renameSync(correctedPath, input.audioPath);
-        return { success: true, loweredDb: Number((-attenuationDb).toFixed(2)) };
+        const sourceCut = await cutSource(input, scratchDir, attenuationDb);
+        renameWithRetry(correctedPath, input.audioPath, { copyFallback: true });
+        const loweredDb = Number((-attenuationDb).toFixed(2));
+        return sourceCut
+          ? { success: true, loweredDb }
+          : { success: true, loweredDb, sourceStale: true };
       }
       if (pass === MAX_TRUE_PEAK_CORRECTION_PASSES) break;
 
-      // Aim below the acceptance ceiling because this correction itself is
-      // another lossy AAC encode and can regenerate content-dependent peaks.
-      attenuationDb += correctionTargetDbfs - truePeakDbfs;
+      // Aim below the ceiling, twice as far each pass: the correction is another lossy AAC encode,
+      // whose peak can stall or rise over a few dB of attenuation instead of falling dB for dB.
+      const headroomDb = AAC_TRUE_PEAK_CORRECTION_HEADROOM_DB * 2 ** pass;
+      // The encoder clips what is left above full scale, so the AAC under-reads a hotter PCM and a
+      // cut sized from it never gets the PCM under: size it from the louder of the two.
+      if (input.sourcePath && sourcePeakDbfs === undefined) {
+        sourcePeakDbfs = await input.probeTruePeak(input.sourcePath, input.signal);
+      }
+      const referenceDbfs = Math.max(truePeakDbfs, (sourcePeakDbfs ?? -Infinity) + attenuationDb);
+      attenuationDb += AAC_DELIVERY_TRUE_PEAK_DBFS - headroomDb - referenceDbfs;
       const result = await input.encode(
-        input.audioPath,
+        input.sourcePath ?? input.audioPath,
         correctedPath,
         input.targetDurationSeconds,
         aacTruePeakCorrectionFilter(input.targetDurationSeconds, attenuationDb),
@@ -465,7 +534,7 @@ async function enforceAacTruePeak(input: EnforceAacTruePeakInput): Promise<{
       )}`,
     };
   } finally {
-    if (scratchDir) rmSync(scratchDir, { recursive: true, force: true });
+    if (scratchDir) removeScratch(scratchDir);
   }
 }
 
@@ -618,7 +687,23 @@ export async function runFfprobeJson<T>(args: string[], signal?: AbortSignal): P
   if (!args.includes("--")) {
     throw new Error('[audioPadTrim] ffprobe args must terminate options with "--".');
   }
+  // With a restricted page network, a URL input not declared by the render reaches only public hosts.
+  const proxying = withPublicOnlyProxy(args, [args.indexOf("--") + 1]);
+  const routed = proxying && (await proxying);
+  try {
+    return await spawnFfprobeJson<T>(routed?.args ?? args, routed?.env, signal);
+  } finally {
+    await routed?.close();
+  }
+}
+
+async function spawnFfprobeJson<T>(
+  args: string[],
+  env: NodeJS.ProcessEnv | undefined,
+  signal?: AbortSignal,
+): Promise<T> {
   const proc = spawn(getFfprobeBinary(), args, {
+    ...(env && { env }),
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });

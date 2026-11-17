@@ -25,7 +25,7 @@ import {
   EXTRAS_KEYS,
   GSAP_DEFAULT_DURATION,
 } from "./gsapConstants.js";
-import { buildArcPath } from "./gsapSerialize.js";
+import { buildArcPath, distributeArrayKeyframes } from "./gsapSerialize.js";
 import { inlineComputedTimelines, readProvenance } from "./gsapInline.js";
 import { getObjectArrayKeyframeTiming } from "./gsapObjectArrayTiming.js";
 
@@ -778,6 +778,7 @@ interface TimelineDetection {
   ref: TimelineRef | null;
   timelineCount: number;
   defaults?: TimelineDefaults;
+  declaration?: Pick<acorn.Node, "start" | "end">;
 }
 
 /** The static string key of a member access (`window.__timelines["scene"]` -> "scene"), else null. */
@@ -847,6 +848,7 @@ function findTimelineVar(ast: any, scope?: ScopeBindings): TimelineDetection {
   let ref: TimelineRef | null = null;
   let timelineCount = 0;
   let defaults: TimelineDefaults | undefined;
+  let declaration: TimelineDetection["declaration"];
   const emptyScope: ScopeBindings = scope ?? new Map();
 
   acornWalk.simple(ast, {
@@ -857,6 +859,7 @@ function findTimelineVar(ast: any, scope?: ScopeBindings): TimelineDetection {
           timelineVar = node.id.name;
           ref = { kind: "identifier", name: node.id.name };
           defaults = extractTimelineDefaults(node.init, emptyScope);
+          declaration = { start: node.start, end: node.end };
         }
       }
     },
@@ -874,12 +877,13 @@ function findTimelineVar(ast: any, scope?: ScopeBindings): TimelineDetection {
             ref = { kind: "member", node: left };
             defaults = extractTimelineDefaults(node.right, emptyScope);
           }
+          if (ref) declaration = { start: node.start, end: node.end };
         }
       }
     },
   });
 
-  return { timelineVar, ref, timelineCount, defaults };
+  return { timelineVar, ref, timelineCount, defaults, declaration };
 }
 
 // ── Tween call collection ─────────────────────────────────────────────────────
@@ -1181,21 +1185,9 @@ function parseSimpleArrayKeyframes(node: any, scope: ScopeBindings): GsapKeyfram
     }
   }
 
-  const maxLen = Math.max(...[...arrayProps.values()].map((a) => a.length), 0);
-  const keyframes: GsapPercentageKeyframe[] = [];
-
-  for (let i = 0; i < maxLen; i++) {
-    const percentage = maxLen > 1 ? Math.round((i / (maxLen - 1)) * 100) : 0;
-    const properties: Record<string, number | string> = {};
-    for (const [key, values] of arrayProps) {
-      if (i < values.length) properties[key] = values[i] as number | string;
-    }
-    keyframes.push({ percentage, properties });
-  }
-
   return {
     format: "simple-array",
-    keyframes,
+    keyframes: distributeArrayKeyframes(arrayProps),
     ...(ease ? { ease } : {}),
     ...(easeEach ? { easeEach } : {}),
   };
@@ -1947,6 +1939,7 @@ export interface ParsedGsapAcornForWrite {
   ast: any;
   timelineVar: string;
   hasTimeline: boolean;
+  timelineDeclaration?: TimelineDetection["declaration"];
   located: Array<{ id: string; call: TweenCallInfo; animation: GsapAnimation }>;
 }
 
@@ -1980,7 +1973,13 @@ export function parseGsapScriptAcornForWrite(script: string): ParsedGsapAcornFor
       call,
       animation: animations[i]!,
     }));
-    return { ast, timelineVar, hasTimeline: detection.ref !== null, located };
+    return {
+      ast,
+      timelineVar,
+      hasTimeline: detection.ref !== null,
+      timelineDeclaration: detection.declaration,
+      located,
+    };
   } catch {
     return null;
   }

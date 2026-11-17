@@ -13,9 +13,13 @@ export {
   type HistoryResult,
   type HistoryWindow,
   HistoryClosedError,
+  HistoryRefusedError,
 } from "./projectHistory.js";
+export { reclaimUncopiedBlobs, type ReclaimedHistory } from "./reclaimUncopied.js";
+export { isUncopiedMedia } from "./uncopied.js";
 export { HistoryBusyError } from "./ownerLock.js";
-export { HistoryIdError } from "./historyId.js";
+export { onRestoredInPlace, type InPlaceOutcome } from "./blobStore.js";
+export { HistoryIdError, isHistoryId } from "./historyId.js";
 export { historyCache } from "./historyCache.js";
 export {
   listProjectHistories,

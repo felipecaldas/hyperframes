@@ -19,6 +19,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { effectiveChunkFrames } from "./chunkWeights.js";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -38,7 +39,11 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type CaptureOptions, extractVideoFramesRange } from "@hyperframes/engine";
+import {
+  type CaptureOptions,
+  extractVideoFramesRange,
+  VideoSourceExtractionError,
+} from "@hyperframes/engine";
 import { HOST_CHROME_FAILURE_PATTERNS } from "./__test_utils__/hostChromeFailures.js";
 import { defaultLogger } from "../../logger.js";
 import { RenderQualityError } from "../renderOrchestrator.js";
@@ -50,11 +55,13 @@ import {
   CHUNK_INDEX_OUT_OF_RANGE,
   distributedCaptureSessionDependencies,
   extractDeferredVideoFramesForChunk,
+  interleavesCapture,
   MISSING_PLAN_ARTIFACT,
   MISSING_RUNTIME_ENV_SNAPSHOT,
   PLAN_HASH_MISMATCH,
   renderChunk,
   RenderChunkValidationError,
+  resolveChunkCaptureWorkers,
   resolveLockedVp9CpuUsed,
   resolvePresetForLockedEncoder,
 } from "./renderChunk.js";
@@ -261,6 +268,7 @@ describe("renderChunk()", () => {
         "sessionBootMs",
         "captureStageMs",
         "encodeStageMs",
+        "videoExtractMs",
         "workers",
       ]) {
         expect(typeof perf[key]).toBe("number");
@@ -732,6 +740,125 @@ describe("renderChunk() — a video shown smaller than its source", () => {
   }, 120_000);
 });
 
+describe("renderChunk() — a video whose frames cannot be extracted", () => {
+  it("fails with the extraction's own error while the capture browsers start", async () => {
+    if (!hasChrome) {
+      console.warn(
+        "[renderChunk.test] skipping extraction-failure test — chrome-headless-shell not available",
+      );
+      return;
+    }
+    const projectDir = join(runRoot, "project-extract-fail");
+    mkdirSync(projectDir, { recursive: true });
+    const synth = spawnSync("ffmpeg", [
+      ...["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=128x72:r=30:d=2"],
+      ...["-c:v", "libx264", "-pix_fmt", "yuv420p", join(projectDir, "clip.mp4")],
+    ]);
+    if (synth.status !== 0) throw new Error(synth.stderr.toString());
+    writeFileSync(
+      join(projectDir, "index.html"),
+      // A clip over a second long, so the planner defers it to the chunks.
+      FIXTURE_HTML.replace('data-duration="0.16667"', 'data-duration="1.2"').replace(
+        "</div>",
+        '<video id="clip" src="clip.mp4" muted data-start="0" data-duration="1.2" style="width:128px;height:72px"></video></div>',
+      ),
+      "utf-8",
+    );
+    const planDir = join(runRoot, "plan-extract-fail");
+    await planV2(
+      projectDir,
+      { fps: 30, width: 160, height: 120, format: "png-sequence", chunkSize: 36 },
+      planDir,
+    );
+    const chunkDir = join(runRoot, "chunk0-extract-fail");
+    // The clip is read by URL, as cloud chunks read it, from a port nothing listens on.
+    materializePlanV2Target(planDir, { role: "chunk", chunkIndex: 0 }, chunkDir, {
+      remoteSources: { "compiled/clip.mp4": "http://127.0.0.1:1/clip.mp4" },
+    });
+
+    let caught: unknown;
+    try {
+      await renderChunk(chunkDir, 0, join(runRoot, "chunk0-extract-fail-out"));
+    } catch (error) {
+      caught = error;
+    }
+    const message = caught instanceof Error ? caught.message : String(caught);
+    if (HOST_CHROME_FAILURE_PATTERNS.test(message)) {
+      console.warn(
+        "[renderChunk.test] skipping extraction-failure test — host Chrome stack can't render:",
+        message.slice(0, 240),
+      );
+      return;
+    }
+    // The extraction's own error, not the capture stage that waited on it.
+    expect(caught).toBeInstanceOf(VideoSourceExtractionError);
+  }, 120_000);
+});
+
+describe("renderChunk() — an alpha format at a larger output resolution", () => {
+  it("supersamples a transparent composition and keeps its alpha", async () => {
+    if (!hasChrome) {
+      console.warn(
+        "[renderChunk.test] skipping alpha supersample test — chrome-headless-shell not available",
+      );
+      return;
+    }
+    const projectDir = join(runRoot, "project-alpha-supersample");
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(
+      join(projectDir, "index.html"),
+      `<!doctype html><html><body style="margin:0;background:transparent">
+  <div data-composition-id="root" data-no-timeline data-width="320" data-height="180" data-duration="0.1">
+    <div style="position:absolute;left:80px;top:45px;width:160px;height:90px;background:#3a7"></div>
+  </div></body></html>`,
+      "utf-8",
+    );
+    const planDir = join(runRoot, "plan-alpha-supersample");
+    await planV2(
+      projectDir,
+      {
+        fps: 30,
+        width: 320,
+        height: 180,
+        format: "mov",
+        chunkSize: 30,
+        outputResolution: "landscape",
+      },
+      planDir,
+    );
+    const chunkDir = join(runRoot, "chunk0-alpha-supersample");
+    materializePlanV2Target(planDir, { role: "chunk", chunkIndex: 0 }, chunkDir);
+    const out = join(runRoot, "chunk0-alpha-supersample.mov");
+    try {
+      await renderChunk(chunkDir, 0, out);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!HOST_CHROME_FAILURE_PATTERNS.test(message)) throw err;
+      console.warn(
+        "[renderChunk.test] skipping alpha supersample test — host Chrome stack can't render:",
+        message.slice(0, 240),
+      );
+      return;
+    }
+    const probe = spawnSync("ffprobe", [
+      ...["-v", "error", "-select_streams", "v:0"],
+      ...["-show_entries", "stream=width,height,pix_fmt", "-of", "csv=p=0", "--", out],
+    ]);
+    expect(probe.stdout.toString().trim()).toMatch(/^1920,1080,yuva/);
+    const frame = spawnSync(
+      "ffmpeg",
+      [
+        ...["-v", "error", "-i", out, "-frames:v", "1"],
+        ...["-vf", "format=rgba", "-f", "rawvideo", "-"],
+      ],
+      { maxBuffer: 1920 * 1080 * 4 },
+    ).stdout;
+    const alphaAt = (x: number, y: number) => frame[(y * 1920 + x) * 4 + 3];
+    expect(alphaAt(10, 10)).toBe(0);
+    expect(alphaAt(960, 540)).toBe(255);
+  }, 120_000);
+});
+
 describe("renderChunk() — frameRange", () => {
   // A box sliding across the frame, so every frame differs and a misplaced,
   // dropped or repeated frame changes the assembled output.
@@ -976,6 +1103,44 @@ describe("resolvePresetForLockedEncoder", () => {
     const base = { preset: "medium", quality: 18, codec: "h264" as const, pixelFormat: "yuv420p" };
     const out = resolvePresetForLockedEncoder(base, "png-sequence");
     expect(out).toBe(base);
+  });
+});
+
+describe("interleavesCapture", () => {
+  it("is off for a caller that does not ask, so CPU-billed callers get contiguous ranges", () => {
+    expect(interleavesCapture(true, undefined)).toBe(false);
+    expect(interleavesCapture(true, { maxCaptureWorkers: 4 })).toBe(false);
+  });
+
+  it("is on only when the caller asks and the encoder overlaps", () => {
+    expect(interleavesCapture(true, { interleaveCapture: true })).toBe(true);
+    expect(interleavesCapture(false, { interleaveCapture: true })).toBe(false);
+  });
+});
+
+describe("resolveChunkCaptureWorkers", () => {
+  it("keeps the machine-wide sizing when the runtime sets no budget", () => {
+    expect(resolveChunkCaptureWorkers(121, 3, undefined)).toBe(3);
+  });
+
+  it("raises a chunk to the runtime's budget", () => {
+    expect(resolveChunkCaptureWorkers(121, 3, 5)).toBe(5);
+  });
+
+  it("gives each browser at least 20 frames", () => {
+    expect(resolveChunkCaptureWorkers(121, 3, 8)).toBe(6);
+    expect(resolveChunkCaptureWorkers(99, 3, 5)).toBe(4);
+  });
+
+  it("never lowers the machine-wide sizing", () => {
+    expect(resolveChunkCaptureWorkers(121, 3, 1)).toBe(3);
+    expect(resolveChunkCaptureWorkers(30, 2, 5)).toBe(2);
+  });
+
+  it("gives a 28-frame chunk of 3.6x frames three browsers; a light 75-frame chunk is unchanged", () => {
+    expect(resolveChunkCaptureWorkers(28, 1, 3)).toBe(1);
+    expect(resolveChunkCaptureWorkers(effectiveChunkFrames(28, 3.6), 1, 3)).toBe(3);
+    expect(resolveChunkCaptureWorkers(effectiveChunkFrames(75, undefined), 3, 3)).toBe(3);
   });
 });
 

@@ -2,18 +2,13 @@
 // 64-bit mdat header); the payloads follow it unchanged and in order (a separate audio file's
 // first, then the chunks'), so storage can copy them into place.
 
-import {
-  createReadStream,
-  createWriteStream,
-  mkdirSync,
-  mkdtempSync,
-  renameSync,
-  rmSync,
-} from "node:fs";
+import { createReadStream, createWriteStream, mkdirSync, rmSync } from "node:fs";
 import { open } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { renameWithRetry } from "@hyperframes/engine";
+import { basename, dirname, join } from "node:path";
 import type { Writable } from "node:stream";
 import { finished, pipeline } from "node:stream/promises";
+import { createStagingDir } from "@hyperframes/core/atomic-file";
 
 // ── Box reading ─────────────────────────────────────────────────────────────
 
@@ -500,14 +495,14 @@ export async function writeStitchedMp4(
     ? buildStitchedHeader(layouts.slice(1), layouts[0])
     : buildStitchedHeader(layouts);
   mkdirSync(dirname(outputPath), { recursive: true });
-  const workDir = mkdtempSync(`${outputPath}.stitch-`);
+  const workDir = createStagingDir(dirname(outputPath), `${basename(outputPath)}.stitch-`);
   const out = createWriteStream(join(workDir, "out.mp4"));
   try {
     out.write(header);
     for (const [i, path] of sourcePaths.entries()) await copyPayload(path, layouts[i]!, i, out);
     out.end();
     await finished(out);
-    renameSync(join(workDir, "out.mp4"), outputPath);
+    renameWithRetry(join(workDir, "out.mp4"), outputPath);
   } finally {
     out.destroy();
     rmSync(workDir, { recursive: true, force: true });

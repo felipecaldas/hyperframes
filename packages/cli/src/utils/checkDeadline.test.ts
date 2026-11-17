@@ -1,5 +1,11 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { CheckDeadline, CheckDeadlineError } from "./checkDeadline.js";
+import {
+  CheckChromeStartError,
+  CheckDeadline,
+  CheckDeadlineError,
+  CheckStoppedError,
+  idleWindow,
+} from "./checkDeadline.js";
 
 afterEach(() => vi.useRealTimers());
 
@@ -11,7 +17,7 @@ function rejectOnAbort(signal: AbortSignal): Promise<never> {
   });
 }
 
-it("readiness and later sampling spend one 120-second budget", async () => {
+it("an idle check ends 120 s after its last progress", async () => {
   vi.useFakeTimers();
   const deadline = new CheckDeadline();
   deadline.start();
@@ -58,7 +64,30 @@ it("cleanup is bounded even when a losing operation ignores cancellation", async
   await closing;
 }, 2_000);
 
-it("browser provisioning does not spend the check budget, which starts once when ready", async () => {
+it("a Chrome that never becomes ready ends the check with a named error", async () => {
+  vi.useFakeTimers();
+  const deadline = new CheckDeadline();
+  const neverReady = deadline
+    .run(() => rejectOnAbort(deadline.signal))
+    .catch((error: unknown) => error);
+  try {
+    deadline.enter("launch");
+    await vi.advanceTimersByTimeAsync(179_999);
+    expect(deadline.signal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const error = (await neverReady) as Error;
+    expect(error).toBeInstanceOf(CheckChromeStartError);
+    expect(error.message).toBe(
+      "Chrome did not start within 180 s while starting Chrome. Seconds per phase: starting Chrome 180.0. " +
+        "On a first run it may still be downloading: run `hyperframes browser ensure`, then run check again.",
+    );
+    expect(deadline.signal.aborted).toBe(true);
+  } finally {
+    await deadline.close();
+  }
+});
+
+it("the Chrome start window is spent once; a ready Chrome starts the normal idle clock", async () => {
   vi.useFakeTimers();
   const deadline = new CheckDeadline();
   let complete!: () => void;
@@ -67,12 +96,11 @@ it("browser provisioning does not spend the check budget, which starts once when
   });
   const outcome = deadline.run(() => work).catch((error: unknown) => error);
   try {
-    await vi.advanceTimersByTimeAsync(150_000);
+    deadline.enter("launch");
+    await vi.advanceTimersByTimeAsync(170_000);
     expect(deadline.signal.aborted).toBe(false);
     deadline.start();
-    await vi.advanceTimersByTimeAsync(90_000);
-    deadline.start();
-    await vi.advanceTimersByTimeAsync(29_999);
+    await vi.advanceTimersByTimeAsync(119_999);
     expect(deadline.signal.aborted).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(deadline.signal.aborted).toBe(true);
@@ -80,6 +108,18 @@ it("browser provisioning does not spend the check budget, which starts once when
   } finally {
     complete();
     await outcome;
+    await deadline.close();
+  }
+});
+
+it("video copies keep their own budget and do not spend the idle window", async () => {
+  vi.useFakeTimers();
+  const deadline = new CheckDeadline();
+  try {
+    deadline.enter("copies");
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(deadline.signal.aborted).toBe(false);
+  } finally {
     await deadline.close();
   }
 });
@@ -92,4 +132,169 @@ it("closing before browser readiness prevents a later clock from starting", asyn
   await vi.advanceTimersByTimeAsync(150_000);
   expect(vi.getTimerCount()).toBe(0);
   expect(deadline.signal.aborted).toBe(false);
+});
+
+it("an expired check names the phase it was in and the seconds each phase took", async () => {
+  vi.useFakeTimers();
+  const deadline = new CheckDeadline();
+  const outcome = deadline
+    .run(() => rejectOnAbort(deadline.signal))
+    .catch((error: unknown) => error);
+  try {
+    deadline.enter("copies");
+    await vi.advanceTimersByTimeAsync(247_000);
+    deadline.enter("launch");
+    await vi.advanceTimersByTimeAsync(2_000);
+    deadline.start();
+    await vi.advanceTimersByTimeAsync(3_000);
+    deadline.enter("copies");
+    deadline.enter("settle");
+    await vi.advanceTimersByTimeAsync(60_000);
+    deadline.enter("samples");
+    await vi.advanceTimersByTimeAsync(50_000);
+    deadline.enter("overlap");
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(((await outcome) as Error).message).toBe(
+      "Check did not finish within its deadline (no progress for 120 s after Chrome was ready), while running the overlap pass. " +
+        "Seconds per phase: making video copies 247.0 (before the deadline), starting Chrome 2.0, " +
+        "loading the page 3.0, waiting for the page to be ready 60.0, checking samples 50.0, running the overlap pass 120.0.",
+    );
+  } finally {
+    await deadline.close();
+  }
+});
+
+it("keeps going while each step makes progress, and ends once none does", async () => {
+  vi.useFakeTimers();
+  const deadline = new CheckDeadline();
+  const outcome = deadline
+    .run(() => rejectOnAbort(deadline.signal))
+    .catch((error: unknown) => error);
+  try {
+    deadline.start();
+    for (let step = 0; step < 10; step++) {
+      await vi.advanceTimersByTimeAsync(90_000);
+      deadline.enter("overlap");
+    }
+    expect(deadline.signal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(await outcome).toBeInstanceOf(CheckDeadlineError);
+  } finally {
+    await deadline.close();
+  }
+});
+
+it("an operation that settles restarts the idle clock", async () => {
+  vi.useFakeTimers();
+  const deadline = new CheckDeadline();
+  try {
+    deadline.start();
+    await vi.advanceTimersByTimeAsync(100_000);
+    await deadline.run(async () => "done");
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect(deadline.signal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(deadline.signal.aborted).toBe(true);
+  } finally {
+    await deadline.close();
+  }
+});
+
+it("a stop ends the check at once, keeping what it already found", async () => {
+  vi.useFakeTimers();
+  const deadline = new CheckDeadline();
+  deadline.start();
+  deadline.keepPartial(() => ({ screenshots: [] }));
+  try {
+    const sample = deadline.run(() => rejectOnAbort(deadline.signal));
+    const failed = expect(sample).rejects.toThrow("Check stopped before finishing (SIGTERM).");
+    deadline.stop("SIGTERM");
+    await failed;
+    await expect(deadline.run(async () => "late")).rejects.toBeInstanceOf(CheckStoppedError);
+    expect(deadline.signal.aborted).toBe(true);
+    expect(deadline.partialResult()).toEqual({ screenshots: [] });
+  } finally {
+    await deadline.close();
+  }
+});
+
+it("an expired check names the step it was on", async () => {
+  vi.useFakeTimers();
+  const deadline = new CheckDeadline();
+  deadline.start();
+  try {
+    deadline.enter("samples", "layout sample at 2.5s");
+    const sample = deadline.run(() => rejectOnAbort(deadline.signal));
+    const failed = expect(sample).rejects.toThrow(
+      "while checking samples (layout sample at 2.5s). Seconds per phase",
+    );
+    await vi.advanceTimersByTimeAsync(120_000);
+    await failed;
+  } finally {
+    await deadline.close();
+  }
+});
+
+it("a check waits as long as the --timeout it was given before it counts as idle, and says so", async () => {
+  vi.useFakeTimers();
+  expect(idleWindow(10_000)).toBe(120_000);
+  expect(idleWindow(400_000)).toBe(410_000);
+  const deadline = new CheckDeadline(idleWindow(400_000));
+  deadline.start();
+  try {
+    const sample = deadline.run(() => rejectOnAbort(deadline.signal));
+    const failed = expect(sample).rejects.toThrow("no progress for 410 s");
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(deadline.signal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(110_000);
+    await failed;
+  } finally {
+    await deadline.close();
+  }
+});
+
+it("names a step once when it is entered again in a loop", () => {
+  const lines: string[] = [];
+  const spy = vi
+    .spyOn(console, "error")
+    .mockImplementation((line: string) => void lines.push(line));
+  const deadline = new CheckDeadline();
+  try {
+    deadline.start();
+    for (let i = 0; i < 5; i += 1) deadline.enter("frames", `frame ${i}`);
+    deadline.enter("crops");
+    deadline.enter("frames");
+    expect(lines).toEqual([
+      "[hyperframes] check: loading the page",
+      "[hyperframes] check: capturing finding frames",
+      "[hyperframes] check: capturing finding crops",
+      "[hyperframes] check: capturing finding frames",
+    ]);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+it("names each step and repeats it every 30 s on stderr while a step runs long", async () => {
+  vi.useFakeTimers();
+  const lines: string[] = [];
+  const spy = vi
+    .spyOn(console, "error")
+    .mockImplementation((line: string) => void lines.push(line));
+  const deadline = new CheckDeadline();
+  try {
+    deadline.start();
+    deadline.enter("copies");
+    deadline.enter("settle");
+    await vi.advanceTimersByTimeAsync(65_000);
+    expect(lines).toEqual([
+      "[hyperframes] check: loading the page",
+      "[hyperframes] check: waiting for the page to be ready",
+      "[hyperframes] check: still waiting for the page to be ready (30 s in this step)",
+      "[hyperframes] check: still waiting for the page to be ready (60 s in this step)",
+    ]);
+  } finally {
+    spy.mockRestore();
+    await deadline.close();
+  }
 });

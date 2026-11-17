@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { HYPERFRAMES_BROWSER_MARKER_ARG } from "@hyperframes/core/browser-marker";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -26,7 +27,8 @@ vi.mock("puppeteer-core", async (importOriginal) => ({
 // captureCompositionFrame.js imports these two from ../browser/gpuPolicy.js,
 // which re-exports them from this mocked module — unmocked here, they'd read
 // undefined and throw as soon as openSettledCompositionPage calls them.
-vi.mock("@hyperframes/engine", () => ({
+vi.mock("@hyperframes/engine", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@hyperframes/engine")>()),
   buildChromeArgs: mocks.buildChromeArgs,
   resolveBrowserGpuMode: mocks.resolveBrowserGpuMode,
   compositionRequiresWebGpu: mocks.compositionRequiresWebGpu,
@@ -72,6 +74,7 @@ function fakeBrowser() {
     evaluate: vi.fn(async () => undefined),
     setRequestInterception: vi.fn(async (_on: boolean) => undefined),
     on: vi.fn((_event: string, _handler: (request: unknown) => void) => undefined),
+    once: vi.fn((_event: string, _handler: () => void) => undefined),
   };
   return {
     browser: {
@@ -231,6 +234,7 @@ describe("openSettledCompositionPage when nothing may listen", () => {
         "--headless",
         "--single-process",
         "--disable-gpu-compositing",
+        HYPERFRAMES_BROWSER_MARKER_ARG,
       ]);
       expect(opened.page.setRequestInterception).toHaveBeenCalledWith(true);
       const onRequest = opened.page.on.mock.calls.find(([event]) => event === "request")![1];
@@ -262,7 +266,16 @@ describe("openSettledCompositionPage when nothing may listen", () => {
     mocks.launch.mockResolvedValue(opened.browser);
     await openSettledCompositionPage(HTML, "http://127.0.0.1:3000", OPTIONS);
     expect(launched().pipe).toBe(true);
-    expect(launched().args).toEqual(["--headless"]);
+    expect(launched().args).toEqual(["--headless", HYPERFRAMES_BROWSER_MARKER_ARG]);
     expect(opened.page.setRequestInterception).not.toHaveBeenCalled();
+  });
+
+  it("asks the page to replay skipped frames, so a still shows what playback shows", async () => {
+    const opened = fakeBrowser();
+    mocks.launch.mockResolvedValue(opened.browser);
+    await openSettledCompositionPage(HTML, "http://127.0.0.1:3000", OPTIONS);
+    expect(opened.page.evaluateOnNewDocument).toHaveBeenCalledWith(
+      "window.__HF_REPLAY_SKIPPED_FRAMES = true",
+    );
   });
 });

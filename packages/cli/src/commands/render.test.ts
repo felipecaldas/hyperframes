@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
+import { VERSION } from "../version.js";
 
 const producerState = vi.hoisted(() => ({
   createdJobs: [] as Array<Record<string, unknown>>,
@@ -100,6 +101,7 @@ const browserManagerState = vi.hoisted(() => ({
 
 vi.mock("../utils/producer.js", () => ({
   loadProducer: vi.fn(async () => ({
+    ...(await import("../../../engine/src/services/referenceBackground.js")),
     createConsoleLogger: vi.fn((level: string) => {
       producerState.loggerLevels.push(level);
       return { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
@@ -122,9 +124,17 @@ vi.mock("../utils/producer.js", () => ({
       }),
     ),
     renderConfigFromRequest: vi.fn(
-      (request: { options: Record<string, unknown> }, runtime: { logger?: unknown }) => {
+      (
+        request: { options: Record<string, unknown> },
+        runtime: { logger?: unknown; allowOutsideProjectAssets?: boolean },
+      ) => {
         const { engineConfig, ...options } = request.options;
-        return { ...options, producerConfig: engineConfig, logger: runtime.logger };
+        return {
+          ...options,
+          producerConfig: engineConfig,
+          logger: runtime.logger,
+          allowOutsideProjectAssets: runtime.allowOutsideProjectAssets,
+        };
       },
     ),
     createRenderJob: vi.fn((config: Record<string, unknown>) => {
@@ -176,6 +186,10 @@ vi.mock("../telemetry/config.js", () => ({
     configState.disk = { ...config };
     configState.cache = { ...config };
     return true;
+  }),
+  releaseDeParallelRouterLatch: vi.fn(() => {
+    configState.disk = { ...configState.disk, deParallelRouterTrialFired: undefined };
+    configState.cache = { ...configState.disk };
   }),
   // The breaker's safety path uses this rather than writeConfig, so it can
   // see a mirror failure instead of having it collapsed into `true`.
@@ -529,6 +543,130 @@ describe("renderLocal browser GPU config", () => {
     expect(cpuSamplerState.samplers.map((s) => s.stopped)).toEqual([true, true]);
   });
 
+  it("shows control characters in a failed render's message as escapes, one line each", async () => {
+    producerState.executeImpl = async () => {
+      throw new Error("FFmpeg could not read clip\u009b\b\r.mp4\nsecond\u0007 line");
+    };
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(
+        renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
+          fps: { num: 30, den: 1 },
+          quality: "standard",
+          format: "mp4",
+          gpu: false,
+          browserGpuMode: "software",
+          hdrMode: "auto",
+          quiet: true,
+        }),
+      ).rejects.toMatchObject({ name: "CliRuntimeError" });
+      const output = errors.mock.calls.map((call) => String(call[0])).join("\n");
+      expect(output).toContain("clip\\x9b\\x08\\x0d.mp4");
+      expect(output).toMatch(/\n\s*.*second\\x07 line/);
+      for (const control of ["\u009b", "\b", "\r", "\u0007"]) expect(output).not.toContain(control);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it.each([
+    { kind: "solid", rgb: [10, 46, 138] },
+    { kind: "none" },
+    { kind: "unsupported_non_solid" },
+    { kind: "unknown" },
+  ])("returns the same $kind background object as the remote receipt", async (background) => {
+    producerState.executeImpl = async (job) => {
+      job.reference_background = background;
+    };
+    const result = await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
+      fps: { num: 30, den: 1 },
+      quality: "standard",
+      format: "mp4",
+      gpu: false,
+      browserGpuMode: "software",
+      hdrMode: "auto",
+      quiet: true,
+      throwOnError: true,
+    });
+    expect(result?.reference_background).toEqual(background);
+  });
+
+  it("warns that the whole mix was lowered, and the render still completes", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    producerState.executeImpl = async (job: { audioLoweredDb?: number }) => {
+      job.audioLoweredDb = 7.3;
+    };
+
+    const result = await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
+      fps: { num: 30, den: 1 },
+      quality: "standard",
+      format: "mp4",
+      gpu: false,
+      browserGpuMode: "software",
+      hdrMode: "auto",
+      quiet: true,
+      throwOnError: true,
+    });
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("[audio_lowered] Audio lowered 7.3"));
+    expect(result?.outcome).toBe("completed");
+    expect(result?.warnings?.map((warning) => warning.code)).toEqual(["audio_lowered"]);
+    warn.mockRestore();
+  });
+
+  it.each([
+    { name: "a received entry", files: ["index.html"], allowed: false },
+    { name: "a record listing only an image", files: ["assets/in.png"], allowed: true },
+    { name: "a record listing a received stylesheet", files: ["style.css"], allowed: false },
+    { name: "a record listing no files", files: [], allowed: true },
+    { name: "no received-files record", files: undefined, allowed: true },
+  ])("brings in outside files for $name: $allowed", async ({ files, allowed }) => {
+    const projectDir = mkdtempSync(join(tmpdir(), "hf-render-received-"));
+    writeFileSync(join(projectDir, "index.html"), "<div></div>");
+    mkdirSync(join(projectDir, "assets"));
+    writeFileSync(
+      join(projectDir, "assets", "in.png"),
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
+    if (files) {
+      mkdirSync(join(projectDir, ".hyperframes"));
+      writeFileSync(
+        join(projectDir, ".hyperframes", "received-files.json"),
+        JSON.stringify({ files }),
+      );
+    }
+    try {
+      await renderLocal(projectDir, join(projectDir, "out.mp4"), {
+        fps: { num: 30, den: 1 },
+        quality: "standard",
+        format: "mp4",
+        gpu: false,
+        browserGpuMode: "software",
+        hdrMode: "auto",
+        quiet: true,
+        throwOnError: true,
+      });
+      expect(producerState.createdJobs.at(-1)?.allowOutsideProjectAssets).toBe(allowed);
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  it("brings in no outside file when the render is told to refuse them", async () => {
+    await renderLocal(PROJECT_DIR, join(PROJECT_DIR, "out.mp4"), {
+      fps: { num: 30, den: 1 },
+      quality: "standard",
+      format: "mp4",
+      gpu: false,
+      browserGpuMode: "software",
+      hdrMode: "auto",
+      quiet: true,
+      throwOnError: true,
+      refuseOutsideFiles: true,
+    });
+    expect(producerState.createdJobs.at(-1)?.allowOutsideProjectAssets).toBe(false);
+  });
+
   it("cleans orphaned browser trees before starting a local render", async () => {
     orphanCleanupState.killed = 1;
 
@@ -841,6 +979,7 @@ describe("renderLocal browser GPU config", () => {
     expect(producerState.resolveConfigCalls).toContainEqual({
       browserGpuMode: "auto",
       forceScreenshot: false,
+      beginFrameFirstFrameDeadlineMs: 20_000,
     });
     expect(producerState.createdJobs[0]?.producerConfig).toMatchObject({
       browserGpuMode: "auto",
@@ -883,6 +1022,9 @@ describe("renderLocal browser GPU config", () => {
 
     expect(producerState.resolveConfigCalls).toContainEqual({ browserGpuMode: "auto" });
     expect(producerState.resolveConfigCalls[0]).not.toHaveProperty("forceScreenshot");
+    expect(producerState.resolveConfigCalls[0]).not.toHaveProperty(
+      "beginFrameFirstFrameDeadlineMs",
+    );
   });
 
   it("passes an explicit hardware override for default local browser GPU", async () => {
@@ -1162,6 +1304,21 @@ describe("renderLocal browser GPU config", () => {
     expect(producerState.createdJobs[0]?.videoFrameFormat).toBe("png");
   });
 
+  it("forwards chromaSubsampling to createRenderJob", async () => {
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
+      fps: { num: 30, den: 1 },
+      quality: "standard",
+      format: "mp4",
+      gpu: false,
+      browserGpuMode: "software",
+      hdrMode: "auto",
+      quiet: true,
+      chromaSubsampling: "444",
+    });
+
+    expect(producerState.createdJobs[0]?.chromaSubsampling).toBe("444");
+  });
+
   it("forwards debug mode to createRenderJob", async () => {
     await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
       fps: { num: 30, den: 1 },
@@ -1219,6 +1376,23 @@ describe("renderLocal browser GPU config", () => {
 
     expect(producerState.createdJobs[0]?.variables).toBeUndefined();
   });
+
+  it.each([undefined, "off"] as const)(
+    "preserves page motion blur %s in the producer request",
+    async (pageMotionBlur) => {
+      await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
+        fps: { num: 30, den: 1 },
+        quality: "standard",
+        format: "mp4",
+        gpu: false,
+        browserGpuMode: "software",
+        hdrMode: "auto",
+        quiet: true,
+        pageMotionBlur,
+      });
+      expect(producerState.createdJobs[0]?.pageMotionBlur).toBe(pageMotionBlur);
+    },
+  );
 
   it("forwards entryFile to createRenderJob when --composition is set", async () => {
     await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
@@ -1350,6 +1524,35 @@ describe("renderLocal browser GPU config", () => {
     expect(consumeCommandResult().exitCode).toBe(0);
   });
 
+  it("does not finalize the host command or mask a later upload failure when embedded", async () => {
+    const success = await import("../utils/render-success-state.js");
+    const lifecycle = await import("../utils/commandResult.js");
+    const exit = vi.spyOn(lifecycle, "scheduleCliExit");
+    success._resetRenderSuccessForTests();
+    const uploadFailure = new Error("upload failed after render");
+    try {
+      const share = async () => {
+        await renderLocal(PROJECT_DIR, "/tmp/out.mp4", {
+          fps: { num: 30, den: 1 },
+          quality: "standard",
+          format: "mp4",
+          gpu: false,
+          browserGpuMode: "software",
+          hdrMode: "auto",
+          quiet: true,
+          embedded: true,
+          exitAfterComplete: true,
+        });
+        throw uploadFailure;
+      };
+      await expect(share()).rejects.toBe(uploadFailure);
+      expect(exit).not.toHaveBeenCalled();
+      expect(success.isRunDelivered()).toBe(false);
+    } finally {
+      success._resetRenderSuccessForTests();
+    }
+  });
+
   it("still completes the render when the output registry cannot be written", async () => {
     const project = mkdtempSync(join(tmpdir(), "hf-render-unrecorded-"));
     mkdirSync(join(project, ".hyperframes"));
@@ -1415,6 +1618,34 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
     }
     vi.clearAllMocks();
   });
+
+  const strike = (over: Record<string, unknown> = {}) => ({
+    reason: "psnr",
+    at: "2026-10-01T00:00:00.000Z",
+    version: VERSION,
+    atRender: 0,
+    ...over,
+  });
+  /** One earlier revert on record: the next one trips the breaker. */
+  const afterOneStrike = () => ({
+    telemetryEnabled: true,
+    deParallelRouterTrialFired: false,
+    telemetryNoticeShown: true,
+    deParallelRouterBreaker: { strike: strike() },
+    deParallelRouterTrialRenderCount: 1,
+  });
+  const tripped = (over: Record<string, unknown> = {}) => ({
+    telemetryEnabled: true,
+    deParallelRouterTrialFired: true,
+    telemetryNoticeShown: true,
+    deParallelRouterBreaker: { trip: { ...strike(), cleanRenders: 0, ...over } },
+  });
+  const revertedRender = async (job: { perfSummary?: unknown }) => {
+    job.perfSummary = {
+      resolution: { width: 100, height: 100 },
+      drawElement: { parallelRouter: "reverted" },
+    };
+  };
 
   const baseOptions = {
     fps: { num: 30, den: 1 },
@@ -1488,11 +1719,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
     // router by DELETING the var. With a default-ON router, absent means ON,
     // so deleting would silently re-enable it on the very host that just
     // failed. Only an explicit "false" is a real off-switch.
-    configState.disk = {
-      telemetryEnabled: true,
-      deParallelRouterTrialFired: true,
-      telemetryNoticeShown: true,
-    };
+    configState.disk = tripped();
     await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     expect(process.env.HF_DE_PARALLEL_ROUTER).toBe("false");
   });
@@ -1504,11 +1731,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
       // user choice, the breaker would no-op and this install would keep
       // retrying a failing router forever — losing the first-fallback
       // protection that is the point of the breaker.
-      configState.disk = {
-        telemetryEnabled: true,
-        deParallelRouterTrialFired: false,
-        telemetryNoticeShown: true,
-      };
+      configState.disk = afterOneStrike();
       process.env.HF_DE_PARALLEL_ROUTER = emptyish;
       producerState.executeImpl = async (job) => {
         job.perfSummary = {
@@ -1580,20 +1803,34 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
   });
 
   it("persists the trial as fired when the router's own safety net actually reverted", async () => {
-    configState.disk = {
-      telemetryEnabled: true,
-      deParallelRouterTrialFired: false,
-      telemetryNoticeShown: true,
-    };
+    configState.disk = afterOneStrike();
     producerState.executeImpl = async (job) => {
       job.perfSummary = {
         resolution: { width: 100, height: 100 },
-        drawElement: { parallelRouter: "reverted" },
+        drawElement: {
+          parallelRouter: "reverted",
+          fallbackReason: "psnr",
+          fallbackFrameIndex: 812,
+          fallbackFailedDb: 24.5,
+          fallbackThresholdDb: 32,
+        },
       };
     };
     await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     expect(configState.writeConfigCalls).toContainEqual(
-      expect.objectContaining({ deParallelRouterTrialFired: true }),
+      expect.objectContaining({
+        deParallelRouterTrialFired: true,
+        deParallelRouterBreaker: {
+          trip: expect.objectContaining({
+            reason: "psnr",
+            frameIndex: 812,
+            failedDb: 24.5,
+            thresholdDb: 32,
+            version: VERSION,
+            cleanRenders: 0,
+          }),
+        },
+      }),
     );
   });
 
@@ -1643,11 +1880,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
   });
 
   it("persists the trial as fired from the failure path when the router's safety net reverted but the retry still failed", async () => {
-    configState.disk = {
-      telemetryEnabled: true,
-      deParallelRouterTrialFired: false,
-      telemetryNoticeShown: true,
-    };
+    configState.disk = afterOneStrike();
     producerState.executeImpl = async (job) => {
       job.errorDetails = { observability: { capture: { deParallelRouter: "reverted" } } };
       throw new Error("worker crashed even after fallback");
@@ -1660,40 +1893,91 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
     );
   });
 
-  it("persists a later --batch row's revert even though this process already armed the trial on an earlier row", async () => {
-    // The --batch scenario: multiple renderLocal calls in one process. Row 1
-    // succeeds (breaker stays out of the way, env untouched); row 2 reverts
-    // and must still be recorded and trip the breaker.
+  it("trips on the second revert of a --batch, not the first", async () => {
     configState.disk = {
       telemetryEnabled: true,
       deParallelRouterTrialFired: false,
       telemetryNoticeShown: true,
     };
+    producerState.executeImpl = revertedRender;
 
-    producerState.executeImpl = async (job) => {
-      job.perfSummary = {
-        resolution: { width: 100, height: 100 },
-        drawElement: { parallelRouter: "routed" },
-      };
-    };
     await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
     expect(process.env.HF_DE_PARALLEL_ROUTER).toBeUndefined();
     expect(configState.disk.deParallelRouterTrialFired).toBe(false);
 
-    producerState.executeImpl = async (job) => {
-      job.perfSummary = {
-        resolution: { width: 100, height: 100 },
-        drawElement: { parallelRouter: "reverted" },
-      };
-    };
     await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
-
-    expect(configState.writeConfigCalls).toContainEqual(
-      expect.objectContaining({ deParallelRouterTrialFired: true }),
-    );
+    expect(configState.disk.deParallelRouterTrialFired).toBe(true);
     // Explicit "false", not deleted: with a default-ON router, unsetting the
     // var would re-enable it on the host that just reverted.
     expect(process.env.HF_DE_PARALLEL_ROUTER).toBe("false");
+  });
+
+  it("keeps the router on after a single revert and remembers the strike", async () => {
+    configState.disk = { telemetryEnabled: true, telemetryNoticeShown: true };
+    producerState.executeImpl = revertedRender;
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
+    expect(process.env.HF_DE_PARALLEL_ROUTER).toBeUndefined();
+    expect(configState.disk.deParallelRouterTrialFired).toBeFalsy();
+    expect(configState.disk.deParallelRouterBreaker).toEqual({
+      strike: expect.objectContaining({ reason: "reverted", atRender: 1, version: VERSION }),
+    });
+  });
+
+  it("forgets a strike that is 20 or more router renders old", async () => {
+    configState.disk = { ...afterOneStrike(), deParallelRouterTrialRenderCount: 20 };
+    producerState.executeImpl = revertedRender;
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
+    expect(configState.disk.deParallelRouterTrialFired).toBeFalsy();
+    expect(configState.disk.deParallelRouterBreaker).toEqual({
+      strike: expect.objectContaining({ atRender: 21 }),
+    });
+  });
+
+  it("brings the router back for a new CLI version", async () => {
+    configState.disk = tripped({ version: "0.0.1-older" });
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
+    expect(process.env.HF_DE_PARALLEL_ROUTER).toBeUndefined();
+    expect(configState.disk.deParallelRouterTrialFired).toBeFalsy();
+    expect(configState.disk.deParallelRouterBreaker).toBeUndefined();
+  });
+
+  it("brings the router back when the latch has no record (set by an older CLI)", async () => {
+    configState.disk = {
+      telemetryEnabled: true,
+      deParallelRouterTrialFired: true,
+      telemetryNoticeShown: true,
+    };
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
+    expect(process.env.HF_DE_PARALLEL_ROUTER).toBeUndefined();
+    expect(configState.disk.deParallelRouterTrialFired).toBeFalsy();
+  });
+
+  it("brings the router back after 20 clean renders, not before", async () => {
+    configState.disk = tripped({ cleanRenders: 17 });
+    for (const expected of [18, 19]) {
+      await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
+      expect(process.env.HF_DE_PARALLEL_ROUTER).toBe("false");
+      expect(configState.disk.deParallelRouterBreaker).toEqual({
+        trip: expect.objectContaining({ cleanRenders: expected }),
+      });
+    }
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", baseOptions);
+    expect(process.env.HF_DE_PARALLEL_ROUTER).toBeUndefined();
+    expect(configState.disk.deParallelRouterTrialFired).toBeFalsy();
+    expect(configState.disk.deParallelRouterBreaker).toBeUndefined();
+  });
+
+  it("does not count a failed render toward bringing the router back", async () => {
+    configState.disk = tripped({ cleanRenders: 5 });
+    producerState.executeImpl = async () => {
+      throw new Error("render failed");
+    };
+    await renderLocal(PROJECT_DIR, "/tmp/out.mp4", { ...baseOptions, throwOnError: true }).catch(
+      () => {},
+    );
+    expect(configState.disk.deParallelRouterBreaker).toEqual({
+      trip: expect.objectContaining({ cleanRenders: 5 }),
+    });
   });
 
   it("does not arm the trial for programmatic callers that never opted in (opt-in polarity — also covers --batch-concurrency N>=2, which leaves it unset)", async () => {
@@ -1767,11 +2051,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
   // safety fact on the erasable store only. writeConfig() collapsed
   // {ok:true, mirrored:false} to success and the loop stopped there.
   it("retries when the install-state mirror fails even though config.json landed", async () => {
-    configState.disk = {
-      telemetryEnabled: true,
-      deParallelRouterTrialFired: false,
-      telemetryNoticeShown: true,
-    };
+    configState.disk = afterOneStrike();
     configState.failMirrors = 1; // first attempt mirrors nothing
     producerState.executeImpl = async (job) => {
       job.perfSummary = {
@@ -1790,11 +2070,7 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
   });
 
   it("re-asserts the fired flag when the write is lost (concurrent clobber / transient failure), without re-counting the render", async () => {
-    configState.disk = {
-      telemetryEnabled: true,
-      deParallelRouterTrialFired: false,
-      telemetryNoticeShown: true,
-    };
+    configState.disk = afterOneStrike();
     configState.failWrites = 1; // the consume's main write is silently dropped
     producerState.executeImpl = async (job) => {
       job.perfSummary = {
@@ -1808,15 +2084,11 @@ describe("renderLocal — DE parallel-router circuit breaker", () => {
     // ...but the render counter is deliberately NOT re-applied — a lost
     // increment under a race is benign, a re-applied one double-counts the
     // render and trips the exposure cap early (review finding).
-    expect(configState.disk.deParallelRouterTrialRenderCount).toBeUndefined();
+    expect(configState.disk.deParallelRouterTrialRenderCount).toBe(1);
   });
 
   it("blocks re-arming for the rest of the process when the fired flag can never persist (unwritable config)", async () => {
-    configState.disk = {
-      telemetryEnabled: true,
-      deParallelRouterTrialFired: false,
-      telemetryNoticeShown: true,
-    };
+    configState.disk = afterOneStrike();
     configState.failWrites = Number.MAX_SAFE_INTEGER; // ~/.hyperframes is unwritable
     producerState.executeImpl = async (job) => {
       job.perfSummary = {
@@ -1948,6 +2220,21 @@ describe("checkRenderResolutionPreflight", () => {
       ).toBeUndefined();
     });
 
+    it("clears a landscape-1440p preset on a portrait 720p composition (an exact 2×)", async () => {
+      expect(
+        await checkRenderResolutionPreflight(comp(720, 1280), "landscape-1440p", agnostic),
+      ).toBeUndefined();
+    });
+
+    it("refuses `--resolution 1440p` on a 1920×1080 composition: 4/3 is not an integer scale", async () => {
+      const result = await checkRenderResolutionPreflight(
+        landscapeHtml,
+        "landscape-1440p",
+        agnostic,
+      );
+      expect(result?.kind).toBe("non-integer-scale");
+    });
+
     it("clears a landscape preset on a square composition", async () => {
       // aspect > 1 → landscape, aspect = 1 → square. Both self-heal.
       expect(
@@ -2069,12 +2356,17 @@ describe("render command explicit composition", () => {
     const preparationBlocked = new Promise<void>((resolve) => {
       releasePreparation = resolve;
     });
+    let markWrapperExited!: () => void;
+    const wrapperExited = new Promise<void>((resolve) => {
+      markWrapperExited = resolve;
+    });
     orphanCleanupState.parentPid = (pid) => (pid === process.pid ? wrapper.pid! : null);
     orphanCleanupState.identity = (pid) => (pid === wrapper.pid ? "wrapper-birth-token" : null);
     browserManagerState.onEnsure = async (signal) => {
       const exited = new Promise<void>((resolve) => wrapper.once("exit", () => resolve()));
       wrapper.kill("SIGTERM");
       await exited;
+      markWrapperExited();
       await new Promise<void>((resolve, reject) => {
         const onAbort = () => reject(signal?.reason);
         signal?.addEventListener("abort", onAbort, { once: true });
@@ -2099,11 +2391,14 @@ describe("render command explicit composition", () => {
       await expect(
         Promise.race([
           command,
-          new Promise<never>((_resolve, reject) =>
-            setTimeout(
-              () => reject(new Error("Setup cancellation timed out")),
-              process.platform === "linux" ? 1_000 : 3_000,
-            ),
+          wrapperExited.then(
+            () =>
+              new Promise<never>((_resolve, reject) =>
+                setTimeout(
+                  () => reject(new Error("Setup cancellation timed out")),
+                  process.platform === "linux" ? 1_000 : 3_000,
+                ),
+              ),
           ),
         ]),
       ).rejects.toThrow("render_cancelled_parent_exited");
@@ -2198,6 +2493,62 @@ describe("render command batch options", () => {
   }, 60_000);
 });
 
+describe("dockerRenderOptions", () => {
+  const { dockerRenderOptions } = renderModule;
+  const options = {
+    fps: { num: 30, den: 1 },
+    quality: "standard",
+    format: "mp4",
+    gpu: false,
+    hdrMode: "auto",
+    quiet: true,
+  } as const;
+
+  function receivedProject(files: string[] | undefined): { root: string; projectDir: string } {
+    const root = mkdtempSync(join(tmpdir(), "hf-docker-received-"));
+    const projectDir = join(root, "scene");
+    mkdirSync(projectDir);
+    writeFileSync(join(projectDir, "index.html"), '<img src="../output/photo.png">');
+    writeFileSync(
+      join(projectDir, "photo.png"),
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
+    if (files) {
+      mkdirSync(join(root, ".hyperframes"));
+      writeFileSync(join(root, ".hyperframes", "received-files.json"), JSON.stringify({ files }));
+    }
+    return { root, projectDir };
+  }
+
+  it("refuses outside files when a record in a folder above the project lists its entry", () => {
+    const { root, projectDir } = receivedProject(["scene/index.html"]);
+    mkdirSync(join(root, "output"));
+    writeFileSync(join(root, "output", "photo.png"), "secret");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(dockerRenderOptions(projectDir, options).refuseOutsideFiles).toBe(true);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringMatching(/came from someone else.*photo\.png/),
+      );
+    } finally {
+      warn.mockRestore();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { name: "no received-files record", files: undefined },
+    { name: "a record listing only an image", files: ["scene/photo.png"] },
+  ])("leaves outside files in for $name", ({ files }) => {
+    const { root, projectDir } = receivedProject(files);
+    try {
+      expect(dockerRenderOptions(projectDir, options).refuseOutsideFiles).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("normalizeStageCode", () => {
   const { normalizeStageCode } = renderModule;
 
@@ -2221,6 +2572,9 @@ describe("normalizeStageCode", () => {
     expect(normalizeStageCode("Encoding frame 600/600")).toBe("encoding_video");
     expect(normalizeStageCode("Encoding frame 12/90")).toBe("encoding_video");
     expect(normalizeStageCode("Capturing frame 120/600 (6 workers)")).toBe("capturing_frame");
+    expect(normalizeStageCode("Checking effects, 240 of 240 frames")).toBe(
+      normalizeStageCode("Checking effects, 12 of 90 frames"),
+    );
     expect(normalizeStageCode("Streaming frame 3/40 (segment 1/2, 2 workers)")).toBe(
       "streaming_frame",
     );

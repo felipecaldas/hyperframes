@@ -19,6 +19,7 @@ env:
 
 jobs:
   publish:
+    if: github.ref == 'refs/heads/main'
     runs-on: [self-hosted, Linux, X64, tabario, passbolt]
     timeout-minutes: 30
     steps:

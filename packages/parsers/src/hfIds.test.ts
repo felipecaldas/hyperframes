@@ -44,6 +44,14 @@ describe("ensureHfIds fragment detection", () => {
 });
 
 describe("stampHfIdsInPlace keeps the source's own formatting", () => {
+  it.each(["script", "style"])("keeps source offsets after expanding Unicode near %s", (tag) => {
+    const html = `<div DATA-X='KeepCase'>${"İ".repeat(20)}<${tag}>/* İ <span> */</${tag.toUpperCase()} \n><p class='KeepMe'>after</p></div>`;
+    const out = stampHfIdsInPlace(html);
+    expect(out.replace(/ data-hf-id="hf-[a-z0-9]{4}"/g, "")).toBe(html);
+    expect(ids(out)).toEqual(ids(ensureHfIds(html)));
+    expect(stampHfIdsInPlace(out)).toBe(out);
+  });
+
   it("only inserts ids into a composition written without whitespace", () => {
     const html =
       '<template id="s-template"><div data-composition-id="s" data-start="0" data-duration="4"><style>#t{color:red}</style><img src="a.png"/><input disabled><p class=\'t\' id=t>Hi<br></p></div></template>';
@@ -218,6 +226,31 @@ describe("ensureHfIds", () => {
     expect(a).not.toBe(b);
     expect(a).toMatch(/^hf-[a-z0-9]{4}$/);
     expect(b).toMatch(/^hf-[a-z0-9]{4}$/);
+  });
+
+  it("mints a run of identical elements with a few set lookups each, not one per earlier twin", () => {
+    const { document } = parseHTML(`<p class="x">same</p>`);
+    const el = document.querySelector("p") as Element;
+    let lookups = 0;
+    class Counted extends Set<string> {
+      override has(id: string) {
+        lookups += 1;
+        return super.has(id);
+      }
+    }
+    const assigned = new Counted();
+    const twins = 2000;
+    for (let i = 0; i < twins; i += 1) mintHfId(el, assigned);
+    expect(assigned.size).toBe(twins);
+    expect(lookups).toBeLessThan(3 * twins);
+  });
+
+  it("past 10,000 identical elements, every id is still unique", () => {
+    const { document } = parseHTML(`<p class="x">same</p>`);
+    const el = document.querySelector("p") as Element;
+    const assigned = new Set<string>();
+    for (let i = 0; i < 10050; i += 1) mintHfId(el, assigned);
+    expect(assigned.size).toBe(10050);
   });
 
   // Post-persist stability: once data-hf-id is written back to source, edits

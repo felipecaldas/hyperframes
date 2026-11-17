@@ -2,6 +2,7 @@
 import { watch } from "node:fs";
 import { dirname, join } from "node:path";
 import { COMPOSITION, PLAYHEAD } from "./grid.mjs";
+import { hashOf, traceBench } from "./trace.mjs";
 import { centre, dist, percentile, quadDistance } from "./geometry.mjs";
 import {
   VIEWPORT,
@@ -10,6 +11,7 @@ import {
   chord,
   controlDrag,
   measure,
+  measureShown,
   nextFrame,
   openStudio,
   pointerGesture,
@@ -108,7 +110,10 @@ export function watchVersions(dir, files) {
   const versions = [readFiles(dir, files)];
   const record = () => {
     const now = readFiles(dir, files);
-    if (!sameFiles(now, versions.at(-1))) versions.push(now);
+    if (!sameFiles(now, versions.at(-1))) {
+      versions.push(now);
+      traceBench("version", { n: versions.length - 1, hash: hashOf(JSON.stringify(now)) });
+    }
   };
   const watchers = [...new Set(files.map((f) => dirname(join(dir, f))))].map((d) =>
     watch(d, record),
@@ -119,9 +124,11 @@ export function watchVersions(dir, files) {
 /** Studio's own history replies in arrival order: each claim's group, each undo or redo's entry and what it reverts. */
 function watchHistory(page) {
   const replies = [];
+  const at = { list: null };
   const read = (response) => {
     const kind = /\/history\/(claim|step|undo)$/.exec(new URL(response.url()).pathname)?.[1];
     if (!kind || response.request().method() !== "POST") return;
+    at.list ??= response.url().replace(/\/(claim|step|undo)$/, "");
     const status = response.status();
     replies.push(
       response
@@ -136,7 +143,20 @@ function watchHistory(page) {
     );
   };
   page.on("response", read);
-  return { replies, stop: () => page.off("response", read) };
+  return { replies, at, stop: () => page.off("response", read) };
+}
+
+/** Whether every group the gestures took is already an entry in the history list, polled for `ms`. */
+async function groupsListed(listUrl, ids, ms = 3000) {
+  if (!listUrl || !ids.length) return null;
+  for (const deadline = Date.now() + ms; ; await sleep(100)) {
+    const view = await fetch(listUrl)
+      .then((r) => r.json())
+      .catch(() => null);
+    const listed = new Set((view?.entries ?? []).map((entry) => entry.id));
+    if (ids.every((id) => listed.has(id))) return true;
+    if (Date.now() > deadline) return false;
+  }
 }
 
 /** The groups left to undo, oldest first: a claim opens one unless it names the newest (one gesture writing
@@ -272,8 +292,13 @@ async function driveStep(ctx, step, state) {
   }
   const name = step.element ?? "A";
   const c = ctx[name];
-  // In flight: pressed where the last drag let go, without reading the preview first.
-  let pre = step.inFlight ? state.last.lastMeasure : await measure(c);
+  // In flight: pressed where the last drag let go, without reading the preview first. The waiting
+  // marker belongs to the selected element, so another element is read bare until it is selected.
+  let pre = step.inFlight
+    ? state.last.lastMeasure
+    : name === state.selected
+      ? (await measureShown(c)).m
+      : await measure(c);
   if (name !== state.selected) {
     await selectTarget(c, pre);
     state.selected = name;
@@ -398,6 +423,13 @@ function rememberBox(step, state, m) {
 }
 
 /** Under auto-record, size keys hold their nearest value before the first and after the last. */
+/** An element that gains keyframes mid-sequence is keyframed from then on: its settles wait out Studio's swap. */
+export function keyedBy(ctx, step, state) {
+  const writesKeys = step.do === "addkey" || (step.do === "drag" && state.autokey);
+  const c = ctx[step.element ?? "A"];
+  if (writesKeys && c && !c.keys) c.keys = true;
+}
+
 export function heldSize(sizeKeys, time) {
   const times = [...sizeKeys.keys()].sort((a, b) => a - b);
   if (!times.length) return undefined;
@@ -471,6 +503,7 @@ async function measureSequence({ spec, dir, files, evidence }, session, control,
   for (const step of spec.steps) {
     if (step.do !== "drag") await collect();
     steps.push(await driveStep(ctx, step, state));
+    keyedBy(ctx, step, state);
     if (spec.settle) await settleStep(ctx.A, steps, step, state, watcher);
   }
   // Every saving step saves once (a nudge burst saves once); wait for all of them. An undo may
@@ -485,16 +518,11 @@ async function measureSequence({ spec, dir, files, evidence }, session, control,
     if (backSince !== null && Date.now() - backSince >= UNDONE_QUIET_MS) break;
   }
   await page.waitForFunction(
-    () => {
-      if (document.querySelector("[data-dom-edit-press-waiting]")) return false;
-      const frames = Array.from(document.querySelectorAll("iframe, hyperframes-player")).flatMap(
-        (host) =>
-          host.shadowRoot ? Array.from(host.shadowRoot.querySelectorAll("iframe")) : [host],
-      );
-      return frames.every(
-        (frame) => !frame.contentDocument?.querySelector("[data-hf-studio-manual-edit-gesture]"),
-      );
-    },
+    // Asked over each preview's editing port: a preview that cannot answer yet is not clear.
+    async () =>
+      !document.querySelector("[data-dom-edit-press-waiting]") &&
+      (await window.__editBenchFrames.matchesInPreviews("[data-hf-studio-manual-edit-gesture]")) ===
+        false,
     { timeout: 20_000 },
   );
   await waitForFiles(ctx.A, { timeout: 5000 });
@@ -513,6 +541,8 @@ async function measureSequence({ spec, dir, files, evidence }, session, control,
   const groups = historyGroups(await Promise.all(history.replies));
   const ids = groups.stack.toReversed();
   const groupsOk = !groups.faults.length && groups.stack.length === state.depth;
+  // Each gesture is its own entry in the list once its saves are in, before anything else happens.
+  const listed = await groupsListed(history.at.list, groups.stack);
   // A settled case knows each step's bytes (its saves ended before the next step); a fast one only
   // where all are undone and all redone, since one gesture may write more than once.
   const stack = [];
@@ -609,6 +639,7 @@ async function measureSequence({ spec, dir, files, evidence }, session, control,
     reloaded: { ...reloaded, time: state.time },
     undo: {
       groups: groupsOk,
+      listed,
       bytes: undo.ok && sameFiles(committedFiles, expected ?? {}),
       box: quadDistance(undone.visible, pre.visible),
       redoBytes: redo.ok,

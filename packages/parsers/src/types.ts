@@ -23,6 +23,9 @@ export const CANVAS_DIMENSIONS = {
   "portrait-4k": { width: 2160, height: 3840 },
   square: { width: 1080, height: 1080 },
   "square-4k": { width: 2160, height: 2160 },
+  "landscape-1440p": { width: 2560, height: 1440 },
+  "portrait-1440p": { width: 1440, height: 2560 },
+  "square-1440p": { width: 1440, height: 1440 },
   "landscape-720p": { width: 1280, height: 720 },
   "portrait-720p": { width: 720, height: 1280 },
   "square-720p": { width: 720, height: 720 },
@@ -56,6 +59,10 @@ const RESOLUTION_ALIASES: Record<string, CanvasResolution> = {
   "1080p-square": "square",
   "square-1080p": "square",
   "4k-square": "square-4k",
+  "1440p": "landscape-1440p",
+  qhd: "landscape-1440p",
+  "1440p-portrait": "portrait-1440p",
+  "1440p-square": "square-1440p",
   "720p": "landscape-720p",
   "720p-portrait": "portrait-720p",
   "720p-square": "square-720p",
@@ -83,6 +90,8 @@ const ASPECT_AGNOSTIC_RESOLUTION_ALIASES: ReadonlySet<string> = new Set([
   "hd",
   "4k",
   "uhd",
+  "1440p",
+  "qhd",
   "720p",
   "480p",
 ]);
@@ -280,17 +289,21 @@ export interface EnumVariable extends CompositionVariableBase {
   options: { value: string; label: string }[];
 }
 
-/**
- * Font variable — value is a `{name, source}` object (object-valued; LOCKED §7).
- * `default` is the fallback font-family name string.
- * `source` is the font stylesheet URL (e.g. Google Fonts CSS).
- * `default_name` / `default_source` are the CSS-level fallbacks when the
- * brand font is absent.
- */
+export interface FontValue {
+  name: string;
+  source: string;
+}
+
+export interface ImageValue {
+  url: string;
+  alt?: string;
+  fit?: "cover" | "contain" | "fill" | "none" | "scale-down";
+}
+
 export interface FontVariable extends CompositionVariableBase {
   type: "font";
-  /** Fallback font-family name, e.g. "Inter". */
-  default: string;
+  /** Font-family fallback or a persisted font value. */
+  default: string | FontValue;
   /** Font stylesheet URL (e.g. Google Fonts CSS link). */
   source?: string;
   /** CSS font-family name to use when source is unavailable, e.g. "sans-serif". */
@@ -299,15 +312,10 @@ export interface FontVariable extends CompositionVariableBase {
   default_source?: string;
 }
 
-/**
- * Image variable — value is a `{url, …}` object (object-valued; LOCKED §7).
- * `default` is the fallback image URL string.
- * `brandRole` is an optional semantic label, e.g. "logo:primary".
- */
 export interface ImageVariable extends CompositionVariableBase {
   type: "image";
-  /** Fallback image URL. */
-  default: string;
+  /** Image URL fallback or a persisted image value. */
+  default: string | ImageValue;
   /** Brand role identifier, e.g. "logo:primary". */
   brandRole?: string;
 }

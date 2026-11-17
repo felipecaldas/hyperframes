@@ -1,10 +1,18 @@
+import { runsWithoutInstallPrompt } from "../../../utils/appleStubs.js";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, rename, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { createStagingDir } from "@hyperframes/core/atomic-file";
+import { rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AudioAnalysisProvider, AudioSignal } from "@hyperframes/core/audio-analysis";
 import { AVAILABLE, runFile, unavailable, withWavFile } from "./shared.js";
+import {
+  assertPrivateCachePath,
+  ensurePrivateCacheDir,
+  foreignWritablePath,
+  sealCacheInstall,
+  trustedCacheRoot,
+} from "@hyperframes/core/cache-dir";
 
 const SOUND_ANALYSIS = "/System/Library/Frameworks/SoundAnalysis.framework";
 const MUSIC_UNDERSTANDING_MACOS = 27;
@@ -62,7 +70,7 @@ function atLeastOneWindow(signal: AudioSignal): AudioSignal {
   };
 }
 
-const helperDir = () => join(homedir(), ".cache", "hyperframes", "audio-helpers");
+const helperDir = () => join(trustedCacheRoot(), "audio-helpers");
 
 function helperPath(name: string, source: string): string {
   const hash = createHash("sha256").update(source).digest("hex").slice(0, 12);
@@ -70,6 +78,7 @@ function helperPath(name: string, source: string): string {
 }
 
 async function hasSwiftCompiler(): Promise<boolean> {
+  if (!runsWithoutInstallPrompt("xcrun")) return false;
   try {
     await runFile("xcrun", ["--find", "swiftc"], { timeout: 30_000 });
     return true;
@@ -81,35 +90,51 @@ async function hasSwiftCompiler(): Promise<boolean> {
 const firstLine = (error: unknown) =>
   ((error as { stderr?: string }).stderr || String(error)).trim().split("\n")[0];
 
+// The compiler's module cache sits beside the helper: the default one is outside an agent's sandbox.
+export function swiftcArgs(source: string, output: string): string[] {
+  return [
+    "--sdk",
+    "macosx",
+    "swiftc",
+    "-O",
+    "-swift-version",
+    "5",
+    "-module-cache-path",
+    join(helperDir(), "module-cache"),
+    source,
+    "-o",
+    output,
+  ];
+}
+
 const builds = new Map<string, Promise<string>>();
 
 /** The helper compiled from `source`, built once per source into the cache; Swift is never fetched. */
 function compiled(name: string, source: string): Promise<string> {
   const binary = helperPath(name, source);
-  if (existsSync(binary)) return Promise.resolve(binary);
+  if (existsSync(binary) && !foreignWritablePath(binary, trustedCacheRoot())) {
+    return Promise.resolve(binary);
+  }
   let build = builds.get(binary);
   if (!build) {
     build = (async () => {
-      await mkdir(helperDir(), { recursive: true });
-      const file = `${binary}.swift`;
-      await writeFile(file, source);
-      // Through xcrun, so the compiler finds the SDK it belongs to.
-      const args = [
-        "--sdk",
-        "macosx",
-        "swiftc",
-        "-O",
-        "-swift-version",
-        "5",
-        file,
-        "-o",
-        `${binary}.tmp`,
-      ];
-      await runFile("xcrun", args, { timeout: 5 * 60_000 }).catch((error: unknown) => {
-        throw new Error(`could not build the ${name} helper: ${firstLine(error)}`);
-      });
-      await rename(`${binary}.tmp`, binary);
-      return binary;
+      const root = trustedCacheRoot();
+      ensurePrivateCacheDir(join(helperDir(), "module-cache"), root);
+      const staging = createStagingDir(helperDir(), ".build-");
+      try {
+        const file = join(staging, "helper.swift");
+        const output = join(staging, "helper");
+        await writeFile(file, source, { flag: "wx" });
+        const args = swiftcArgs(file, output);
+        await runFile("xcrun", args, { timeout: 5 * 60_000 }).catch((error: unknown) => {
+          throw new Error(`could not build the ${name} helper: ${firstLine(error)}`);
+        });
+        sealCacheInstall(output, root);
+        await rename(output, binary);
+        return assertPrivateCachePath(binary, root);
+      } finally {
+        await rm(staging, { recursive: true, force: true });
+      }
     })();
     builds.set(binary, build);
   }

@@ -1,18 +1,28 @@
+import { emptyStyleBlocks, hasScriptWithSrc, replaceBlockComments } from "../linearScans";
 import type { LintContext, HyperframeLintFinding, ExtractedBlock, OpenTag } from "../context";
+import selectorParser from "postcss-selector-parser";
+import { parseHTML } from "linkedom";
 import {
   findHtmlTag,
   extractTimelineRegistryKeys,
+  parseHtmlStructure,
   readAttr,
   readDecodedAttr,
   readJsonAttr,
   stripCssComments,
+  stripHtmlComments,
   stripJsComments,
   stripJsCode,
   truncateSnippet,
   WINDOW_TIMELINE_ASSIGN_PATTERN,
 } from "../utils";
-import { COMPOSITION_VARIABLE_TYPES, isSafeMediaUrl } from "@hyperframes/parsers/composition";
-import { COMPOSITION_ATTRIBUTES, readClipTiming } from "@hyperframes/parsers/composition-contract";
+import {
+  COMPOSITION_VARIABLE_TYPES,
+  isCompositionVariable,
+  isSafeMediaUrl,
+} from "@hyperframes/parsers/composition";
+import { readClipTiming } from "@hyperframes/parsers/composition-contract";
+import { rawCssUrlMatches } from "@hyperframes/parsers/css-url-scans";
 import { resolveCompositionDuration } from "@hyperframes/parsers/composition-duration";
 import {
   readAuthoredDurationSeconds,
@@ -28,7 +38,7 @@ import {
 const INSPECTION_VIEWPORT_CAP = 4096;
 
 const MAX_COMPOSITION_LINES = 300;
-const MAX_TIMED_ELEMENTS_PER_TRACK = 3;
+const MAX_TIMED_ELEMENTS_PER_FILE = 3;
 const TRACK_DENSITY_EXEMPT_TAGS = new Set(["audio", "script", "style", "video"]);
 const CAPTION_CUE_TOKEN =
   /^(?:caption(?:[-_](?:group|word|line|block|cue|text))?|subtitle(?:[-_](?:group|line|cue|text))?|cg-.+)$/i;
@@ -88,7 +98,7 @@ function countPhysicalLines(source: string): number {
 }
 
 function countStructuralLines(source: string): number {
-  return countPhysicalLines(source.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "<style></style>"));
+  return countPhysicalLines(emptyStyleBlocks(source));
 }
 
 function isCaptionCue(tag: OpenTag): boolean {
@@ -123,11 +133,8 @@ function isCompositionRootOrMount(rawTag: string): boolean {
 // rules that consume this — the helper just yields raw URL values.
 function extractCssUrlReferences(css: string): string[] {
   const out: string[] = [];
-  const noComments = css.replace(/\/\*[\s\S]*?\*\//g, "");
-  const urlPattern = /\burl\(\s*(["']?)([^)"']+)\1\s*\)/g;
-  let m: RegExpExecArray | null;
-  while ((m = urlPattern.exec(noComments)) !== null) {
-    const raw = (m[2] ?? "").trim();
+  for (const { parts } of rawCssUrlMatches(replaceBlockComments(css, ""))) {
+    const raw = (parts[2] ?? "").trim();
     if (raw) out.push(raw);
   }
   return out;
@@ -158,8 +165,8 @@ function climbsAboveRoot(fileDepth: number, path: string): boolean {
 // full CSS parser, and rules elsewhere in this file scan CSS the same way.
 function extractCssSelectors(css: string): string[] {
   const out: string[] = [];
-  const noComments = css.replace(/\/\*[\s\S]*?\*\//g, "");
-  const ruleHeader = /([^{}]+)\{/g;
+  const noComments = replaceBlockComments(css, "");
+  const ruleHeader = /(?<![^{}])([^{}]+)\{/g;
   let m: RegExpExecArray | null;
   while ((m = ruleHeader.exec(noComments)) !== null) {
     const header = (m[1] ?? "").trim();
@@ -200,8 +207,8 @@ function collectHeavyOverlayHooks(styles: ExtractedBlock[]): {
   const classes = new Set<string>();
   const ids = new Set<string>();
   for (const style of styles) {
-    const noComments = style.content.replace(/\/\*[\s\S]*?\*\//g, "");
-    const ruleWithBody = /([^{}]+)\{([^{}]*)\}/g;
+    const noComments = replaceBlockComments(style.content, "");
+    const ruleWithBody = /(?<![^{}])([^{}]+)\{([^{}]*)\}/g;
     let m: RegExpExecArray | null;
     while ((m = ruleWithBody.exec(noComments)) !== null) {
       const header = (m[1] ?? "").trim();
@@ -268,22 +275,210 @@ function firstRescalingZoom(css: string): string | null {
   return null;
 }
 
-/**
- * Does this selector's leftmost compound target the canvas itself — the
- * composition root, or an ancestor of it? A zoom on a DESCENDANT is ordinary
- * authoring and renders exactly as authored; only the canvas-level one
- * desynchronises painted content from the declared frame.
- */
-function targetsCanvasRoot(
-  selector: string,
-  rootId: string | null,
-  rootClasses: string[],
-): boolean {
+function canvasScopeCandidate(selector: string, root: ReturnType<typeof canvasIdentity>): boolean {
   const leftmost = selector.trim().split(/[\s>+~]+/)[0] ?? "";
-  const bare = leftmost.toLowerCase();
-  if (bare === "html" || bare === "body" || bare === ":root" || bare === "*") return true;
-  if (rootId && leftmostCompoundId(selector) === rootId) return true;
-  return leftmostCompoundClasses(selector).some((cls) => rootClasses.includes(cls));
+  if (["html", "body", ":root", "*"].includes(leftmost.toLowerCase())) return true;
+  if (root.id && leftmostCompoundId(selector) === root.id) return true;
+  return leftmostCompoundClasses(selector).some((name) => root.classes.includes(name));
+}
+
+// Unknown predicates retain the conservative canvas guard.
+type CanvasMatch = boolean | undefined;
+type CanvasMatchResult = { match: CanvasMatch; hasIdentity: boolean };
+
+function canvasIdentity(tag: Pick<OpenTag, "name" | "raw">) {
+  return {
+    name: tag.name,
+    raw: tag.raw,
+    id: readDecodedAttr(tag.raw, "id"),
+    classes: (readDecodedAttr(tag.raw, "class") ?? "").split(/[\t\n\f\r ]+/),
+  };
+}
+
+type CanvasElement = ReturnType<typeof canvasIdentity> & {
+  parent: CanvasElement | null | undefined;
+};
+
+function anyCanvasMatch(matches: CanvasMatch[]): CanvasMatch {
+  if (matches.includes(true)) return true;
+  return matches.includes(undefined) ? undefined : false;
+}
+
+function allCanvasMatch(matches: CanvasMatch[]): CanvasMatch {
+  if (matches.includes(false)) return false;
+  return matches.includes(undefined) ? undefined : true;
+}
+
+function canvasTokenMatch(tokens: string[], value: string): CanvasMatch {
+  if (tokens.includes(value)) return true;
+  const fold = (token: string) => token.replace(/[A-Z]/g, (char) => char.toLowerCase());
+  return tokens.some((token) => fold(token) === fold(value)) ? undefined : false;
+}
+
+function canvasPseudoMatch(
+  node: selectorParser.Pseudo,
+  element: CanvasElement,
+  hasIdentity: boolean,
+): CanvasMatchResult {
+  const name = node.value.toLowerCase();
+  if (name.startsWith("::") || [":before", ":after", ":first-letter", ":first-line"].includes(name))
+    return { match: false, hasIdentity: false };
+  if ([":is", ":where"].includes(name)) {
+    const branches = node.nodes.map((branch) =>
+      canvasPathMatch(branch.nodes, element, hasIdentity),
+    );
+    const match = anyCanvasMatch(branches.map((branch) => branch.match));
+    return { match, hasIdentity: match === true || branches.some((branch) => branch.hasIdentity) };
+  }
+  if (name === ":root") {
+    const match = element.name === "html";
+    return { match, hasIdentity: match };
+  }
+  if (name === ":nth-child" && element.name === "body") {
+    // Body follows head even when their tags are implicit.
+    // https://html.spec.whatwg.org/multipage/semantics.html#the-html-element
+    const argument = node.nodes
+      .map((branch) => branch.toString())
+      .join(",")
+      .trim();
+    if (/^[1-9]\d*$/.test(argument)) {
+      const match = Number(argument) === 2;
+      return { match, hasIdentity: match };
+    }
+  }
+  return { match: undefined, hasIdentity: false };
+}
+
+function canvasTagMatch(node: selectorParser.Tag, element: CanvasElement): CanvasMatchResult {
+  if (node.namespace !== undefined) return { match: undefined, hasIdentity: false };
+  if (node.value.toLowerCase() !== element.name.toLowerCase())
+    return { match: false, hasIdentity: false };
+  return { match: ["html", "body"].includes(element.name) ? true : undefined, hasIdentity: true };
+}
+
+function canvasAttributeMatch(node: selectorParser.Attribute, element: CanvasElement): CanvasMatch {
+  if (
+    node.namespace === undefined &&
+    node.operator === undefined &&
+    /^data-[a-z0-9_-]+$/.test(node.attribute)
+  )
+    return readDecodedAttr(element.raw, node.attribute) !== null;
+  return undefined;
+}
+
+function canvasNodeMatch(
+  node: selectorParser.Node,
+  element: CanvasElement,
+  hasIdentity: boolean,
+): CanvasMatchResult {
+  switch (node.type) {
+    case "id": {
+      const match = canvasTokenMatch(element.id === null ? [] : [element.id], node.value);
+      return { match, hasIdentity: match === true };
+    }
+    case "class": {
+      const match = canvasTokenMatch(element.classes, node.value);
+      return { match, hasIdentity: match === true };
+    }
+    case "tag":
+      return canvasTagMatch(node, element);
+    case "universal":
+      return { match: node.toString().trim() === "*" ? true : undefined, hasIdentity: false };
+    case "attribute":
+      return { match: canvasAttributeMatch(node, element), hasIdentity: false };
+    case "pseudo":
+      return canvasPseudoMatch(node, element, hasIdentity);
+    default:
+      return { match: undefined, hasIdentity: false };
+  }
+}
+
+function canvasAncestorMatch(
+  nodes: selectorParser.Node[],
+  relation: string,
+  element: CanvasElement,
+): CanvasMatch {
+  if (!["", ">"].includes(relation)) return undefined;
+  const matches: CanvasMatch[] = [];
+  let parent = element.parent;
+  while (parent) {
+    matches.push(canvasPathMatch(nodes, parent).match);
+    if (relation === ">") break;
+    parent = parent.parent;
+  }
+  if (parent === undefined) matches.push(undefined);
+  return anyCanvasMatch(matches);
+}
+
+function canvasPathMatch(
+  nodes: selectorParser.Node[],
+  element: CanvasElement,
+  inheritedIdentity = false,
+): CanvasMatchResult {
+  let split = -1;
+  let relation = "";
+  for (const [index, node] of nodes.entries()) {
+    if (node.type === "combinator") {
+      split = index;
+      relation = node.value.trim();
+    }
+  }
+  const subjectNodes = nodes.slice(split + 1);
+  if (subjectNodes.length === 0) return { match: undefined, hasIdentity: false };
+  const matches = subjectNodes.map((node) => canvasNodeMatch(node, element, inheritedIdentity));
+  const hasIdentity = inheritedIdentity || matches.some((result) => result.hasIdentity);
+  const subject = allCanvasMatch(
+    subjectNodes.map((node, index) => {
+      const match = matches[index]?.match;
+      if (!hasIdentity || match !== false) return match;
+      // Scripts can change the remaining identity tokens on a known canvas element.
+      if (["id", "class", "attribute"].includes(node.type)) return undefined;
+      if (node.type === "pseudo" && !inheritedIdentity)
+        return canvasNodeMatch(node, element, true).match;
+      return match;
+    }),
+  );
+  const match =
+    subject === false || split === -1
+      ? subject
+      : allCanvasMatch([subject, canvasAncestorMatch(nodes.slice(0, split), relation, element)]);
+  return { match, hasIdentity: match !== false && hasIdentity };
+}
+
+function canvasElements(rootTag: OpenTag, tags: OpenTag[]) {
+  const root = canvasIdentity(rootTag);
+  const html: CanvasElement = {
+    ...(root.name === "html"
+      ? root
+      : canvasIdentity(findHtmlTag(tags) ?? { name: "html", raw: "<html>" })),
+    parent: null,
+  };
+  const body: CanvasElement = {
+    ...(root.name === "body"
+      ? root
+      : canvasIdentity(tags.find((tag) => tag.name === "body") ?? { name: "body", raw: "<body>" })),
+    parent: html,
+  };
+  const elements = [html, body];
+  if (!["html", "body"].includes(root.name))
+    elements.push({ ...root, parent: ["head", "template"].includes(root.name) ? undefined : body });
+  return { root, elements };
+}
+
+function canvasSelectorMatcher(rootTag: OpenTag, tags: OpenTag[]) {
+  let canvas: ReturnType<typeof canvasElements> | undefined;
+  return (selector: selectorParser.Selector, allowNewHits: boolean): boolean => {
+    const { root, elements } = (canvas ??= canvasElements(rootTag, tags));
+    const match = anyCanvasMatch(
+      elements.map((element) => canvasPathMatch(selector.nodes, element).match),
+    );
+    if (match === false) return false;
+    if (match === true && allowNewHits) return true;
+    return selector
+      .toString()
+      .split(",")
+      .some((part) => canvasScopeCandidate(part, root));
+  };
 }
 
 /**
@@ -321,12 +516,15 @@ function inlineCanvasZoomHits(rootTag: OpenTag, tags: OpenTag[]): CanvasZoomHit[
  */
 function firstCanvasSelector(
   header: string,
-  rootId: string | null,
-  rootClasses: string[],
+  matchesCanvas: (selector: selectorParser.Selector) => boolean,
 ): string | null {
-  for (const selector of header.split(",")) {
-    const trimmed = selector.trim();
-    if (trimmed && targetsCanvasRoot(trimmed, rootId, rootClasses)) return trimmed;
+  try {
+    for (const selector of selectorParser().astSync(header).nodes) {
+      const trimmed = selector.toString().trim();
+      if (matchesCanvas(selector)) return trimmed;
+    }
+  } catch {
+    return null;
   }
   return null;
 }
@@ -335,15 +533,14 @@ function firstCanvasSelector(
 function canvasZoomInRule(
   header: string,
   body: string,
-  rootId: string | null,
-  rootClasses: string[],
+  matchesCanvas: (selector: selectorParser.Selector) => boolean,
 ): CanvasZoomHit | null {
   const trimmedHeader = header.trim();
   // An at-rule's "header" is `@media ...`, not a selector list.
   if (!trimmedHeader || trimmedHeader.startsWith("@")) return null;
   const value = firstRescalingZoom(body);
   if (!value) return null;
-  const selector = firstCanvasSelector(trimmedHeader, rootId, rootClasses);
+  const selector = firstCanvasSelector(trimmedHeader, matchesCanvas);
   if (!selector) return null;
   return {
     where: `\`${selector}\``,
@@ -354,16 +551,19 @@ function canvasZoomInRule(
 
 function stylesheetCanvasZoomHits(
   styles: ExtractedBlock[],
-  rootId: string | null,
-  rootClasses: string[],
+  matchesCanvas: ReturnType<typeof canvasSelectorMatcher>,
 ): CanvasZoomHit[] {
   const hits: CanvasZoomHit[] = [];
   for (const style of styles) {
-    const ruleWithBody = /([^{}]+)\{([^{}]*)\}/g;
+    const ruleWithBody = /(?<![^{}])([^{}]+)\{([^{}]*)\}/g;
     const content = stripCssComments(style.content);
+    // At-rules and style attributes can restrict selector applicability.
+    const allowNewHits = style.attrs.trim() === "" && !content.includes("@");
     let match: RegExpExecArray | null;
     while ((match = ruleWithBody.exec(content)) !== null) {
-      const hit = canvasZoomInRule(match[1] ?? "", match[2] ?? "", rootId, rootClasses);
+      const hit = canvasZoomInRule(match[1] ?? "", match[2] ?? "", (selector) =>
+        matchesCanvas(selector, allowNewHits),
+      );
       if (hit) hits.push(hit);
     }
   }
@@ -374,12 +574,10 @@ function canvasZoomHits(
   rootTag: OpenTag,
   tags: OpenTag[],
   styles: ExtractedBlock[],
-  rootId: string | null,
-  rootClasses: string[],
 ): CanvasZoomHit[] {
   return [
     ...inlineCanvasZoomHits(rootTag, tags),
-    ...stylesheetCanvasZoomHits(styles, rootId, rootClasses),
+    ...stylesheetCanvasZoomHits(styles, canvasSelectorMatcher(rootTag, tags)),
   ];
 }
 
@@ -463,6 +661,8 @@ function variablesDeclarationFindings(
         code: "invalid_composition_variables_declaration",
         severity: "error",
         message: `data-composition-variables entry [${i}] must be an object with id, type, label, and default.`,
+        fixHint:
+          'Replace the entry with an object such as {"id":"title","type":"string","label":"Title","default":"Hello"}.',
         snippet: truncateSnippet(tag.raw),
       });
       continue;
@@ -478,16 +678,30 @@ function variablesDeclarationFindings(
         code: "invalid_composition_variables_declaration",
         severity: "error",
         message: `data-composition-variables entry [${i}] is missing or has invalid: ${missing.join(", ")}. Type must be one of string, number, color, boolean, enum, font, image.`,
+        fixHint: `Give entry [${i}] a string id and label, a supported type, and a default, e.g. {"id":"title","type":"string","label":"Title","default":"Hello"}.`,
         snippet: truncateSnippet(tag.raw),
       });
       continue;
     }
-    const id = String(e.id);
+    if (!isCompositionVariable(e)) {
+      findings.push({
+        code: "invalid_composition_variables_declaration",
+        severity: "error",
+        message: `data-composition-variables entry [${i}] has a default that does not match its type, or an enum without an options array.`,
+        fixHint:
+          "Use number defaults for number variables, boolean defaults for boolean variables, and string defaults for other types. Font/image also accept font {name, source} or image {url, alt?, fit?} objects. Enum variables also require an options array.",
+        snippet: truncateSnippet(tag.raw),
+      });
+      continue;
+    }
+    const id = e.id;
+    const mediaUrl =
+      e.type === "image" && typeof e.default !== "string" ? e.default.url : e.default;
     if (
       (e.type === "image" || varSrcIds.has(id)) &&
-      typeof e.default === "string" &&
-      e.default.length > 0 &&
-      !isSafeMediaUrl(e.default)
+      typeof mediaUrl === "string" &&
+      mediaUrl.length > 0 &&
+      !isSafeMediaUrl(mediaUrl)
     ) {
       findings.push({
         code: "unloadable_media_variable_default",
@@ -525,14 +739,18 @@ function declaredIdsForBindingCheck(tags: readonly OpenTag[]): Set<string> | nul
   return declared;
 }
 
-function isInsideInertTemplate(tag: OpenTag, tags: readonly OpenTag[]): boolean {
+function isInsideTag(tag: OpenTag, tags: readonly OpenTag[], name: string): boolean {
   return tags.some(
     (candidate) =>
-      candidate.name === "template" &&
+      candidate.name === name &&
       candidate.closeIndex != null &&
       tag.index > candidate.index &&
       tag.index < candidate.closeIndex,
   );
+}
+
+function isInsideInertTemplate(tag: OpenTag, tags: readonly OpenTag[]): boolean {
+  return isInsideTag(tag, tags, "template");
 }
 
 // `(?<![\w-])` not `\b`: the hyphen in a custom property is a word break, so a
@@ -568,7 +786,7 @@ function stackingContextSelectors(styles: readonly ExtractedBlock[]): Set<string
   const selectors = new Set<string>();
   for (const style of styles) {
     const content = stripCssComments(style.content);
-    const rule = /([^{}]+)\{([^{}]*)\}/g;
+    const rule = /(?<![^{}])([^{}]+)\{([^{}]*)\}/g;
     let match: RegExpExecArray | null;
     while ((match = rule.exec(content)) !== null) {
       if (!STACKING_CONTEXT_DECLARATION.test(match[2] ?? "")) continue;
@@ -693,7 +911,7 @@ export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding
     for (const tag of tags) {
       if (isInsideInertTemplate(tag, tags)) continue;
       // A `data-composition-src` element is a MOUNT of a sub-composition, not a
-      // composition root, and sub-compositions.md documents mounting one source
+      // composition root, and the hyperframes skill's format.md documents mounting one source
       // repeatedly with different `data-variable-values` to get per-instance
       // variations. Those mounts legitimately share an id: the runtime rewrites
       // repeated ones to `id__hf1`, `id__hf2` so they coexist. Counting them
@@ -809,35 +1027,28 @@ export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding
   },
 
   // timeline_track_too_dense
-  // fallow-ignore-next-line complexity
+  // Counted per file, so moving clips to other lanes never silences it.
   ({ tags, options }) => {
-    const trackCounts = new Map<string, number>();
-    for (const tag of tags) {
-      if (TRACK_DENSITY_EXEMPT_TAGS.has(tag.name)) continue;
-      if (isCaptionCue(tag)) continue;
-      if (isCompositionRootOrMount(tag.raw)) continue;
-      if (!readAttr(tag.raw, "data-start")) continue;
+    const count = tags.filter(
+      (tag) =>
+        !TRACK_DENSITY_EXEMPT_TAGS.has(tag.name) &&
+        !isCaptionCue(tag) &&
+        !isCompositionRootOrMount(tag.raw) &&
+        readAttr(tag.raw, "data-start"),
+    ).length;
+    if (count <= MAX_TIMED_ELEMENTS_PER_FILE) return [];
 
-      const track = readAttr(tag.raw, COMPOSITION_ATTRIBUTES.trackIndex);
-      if (!track) continue;
-      trackCounts.set(track, (trackCounts.get(track) ?? 0) + 1);
-    }
-
-    const findings: HyperframeLintFinding[] = [];
-    for (const [track, count] of trackCounts) {
-      if (count <= MAX_TIMED_ELEMENTS_PER_TRACK) continue;
-      const splitTarget = options.isSubComposition
-        ? "Move coherent scene groups into smaller .html files"
-        : "Move coherent scene groups into separate .html files under compositions/";
-      findings.push({
+    const splitTarget = options.isSubComposition
+      ? "Move coherent scene groups into smaller .html files"
+      : "Move coherent scene groups into separate .html files under compositions/";
+    return [
+      {
         code: "timeline_track_too_dense",
         severity: "warning",
-        message: `Track ${track} has ${count} timed elements in this HTML file. Smaller sub-compositions keep timelines easier to read, iterate on, and diff.`,
+        message: `This HTML file has ${count} timed elements. Smaller sub-compositions keep timelines easier to read, iterate on, and diff.`,
         fixHint: `${splitTarget} and mount them from the parent with data-composition-src so the timeline stays easier to inspect, revise, and validate.`,
-      });
-    }
-
-    return findings;
+      },
+    ];
   },
 
   // deprecated_data_layer + deprecated_data_end
@@ -1040,7 +1251,7 @@ export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding
     if (!rootCompositionId || !rootTag) return [];
     // Can't scan external script files for timeline registration; skip to avoid
     // false positives on compositions that register via a bundled JS file.
-    if (/<script\b[^>]*\bsrc\s*=/i.test(rawSource)) return [];
+    if (hasScriptWithSrc(rawSource)) return [];
     // A computed key may map to any authored id. When static analysis cannot
     // resolve that key, stay silent rather than claim a registration is absent.
     if (hasComputedTimelineRegistration(scripts)) return [];
@@ -1250,11 +1461,11 @@ export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding
     const timed = tags
       .filter((tag) => tag.index !== rootTag.index && readAttr(tag.raw, "data-start") !== null)
       .map((tag) => {
-        const start = Number(readAttr(tag.raw, "data-start")) || 0;
-        const dur = Number(readAttr(tag.raw, "data-duration"));
-        const end = Number.isFinite(dur) && dur > 0 ? start + dur : Infinity;
-        return { tag, start, end };
-      });
+        const timing = readTagTiming(tag.raw);
+        if (timing.start === null) return null;
+        return { tag, start: timing.start, end: timing.end ?? Infinity };
+      })
+      .filter((row): row is { tag: OpenTag; start: number; end: number } => row !== null);
 
     // `tags` is a flat list (no nesting depth), so a timed element nested
     // *inside* a candidate slot is treated as a tail-covering sibling rather
@@ -1329,6 +1540,29 @@ export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding
     ];
   },
 
+  // subcomposition_style_outside_template
+  // Mounting keeps only the <template> content and the <head> stylesheet links.
+  ({ rawSource, options }) => {
+    if (!options.isSubComposition) return [];
+    const { tags } = parseHtmlStructure(stripHtmlComments(rawSource));
+    if (!tags.some((tag) => tag.name === "template")) return [];
+    const dropped = tags.filter((tag) => {
+      if (isInsideInertTemplate(tag, tags)) return false;
+      if (tag.name === "style") return true;
+      const rel = (readAttr(tag.raw, "rel") || "").toLowerCase().split(/\s+/);
+      return tag.name === "link" && rel.includes("stylesheet") && !isInsideTag(tag, tags, "head");
+    });
+    return dropped.map((tag) => ({
+      code: "subcomposition_style_outside_template",
+      severity: "warning" as const,
+      message:
+        `<${tag.name}> sits outside this sub-composition's <template>. Mounting keeps only the template's ` +
+        "content, so these styles never apply in preview, snapshot or render.",
+      fixHint: "Move it inside <template>, next to the composition root.",
+      snippet: truncateSnippet(tag.raw),
+    }));
+  },
+
   // root_composition_missing_duration_source
   //
   // The render engine (packages/engine/src/services/frameCapture.ts) needs a
@@ -1383,7 +1617,7 @@ export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding
 
     const allCss = styles.map((s) => s.content).join("\n");
     const allInlineStyles = tags.map((t) => readAttr(t.raw, "style") || "").join("\n");
-    const combinedCss = `${allCss}\n${allInlineStyles}`.replace(/\/\*[\s\S]*?\*\//g, "");
+    const combinedCss = replaceBlockComments(`${allCss}\n${allInlineStyles}`, "");
 
     const usesLottie =
       tags.some((t) => readAttr(t.raw, "data-lottie-src") !== null) ||
@@ -1604,9 +1838,7 @@ export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding
   // fired on every `zoom` would be flagging correct authoring.
   ({ rootTag, tags, styles }) => {
     if (!rootTag) return [];
-    const rootId = readAttr(rootTag.raw, "id");
-    const rootClasses = (readAttr(rootTag.raw, "class") || "").split(/\s+/).filter(Boolean);
-    const hits = canvasZoomHits(rootTag, tags, styles, rootId, rootClasses);
+    const hits = canvasZoomHits(rootTag, tags, styles);
 
     // `noUncheckedIndexedAccess` makes hits[0] `T | undefined`, and a length
     // check does not narrow it — guard on the element itself.
@@ -1685,6 +1917,54 @@ export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding
       },
     ];
   },
+
+  // subcomposition_linked_style_names_root_id
+  // The compiler flattens a sub-composition root into its host and rewrites inline <style>
+  // selectors to match; a linked stylesheet is not rewritten, so `#root-id` in it matches nothing.
+  ({ styles, rootTag, options }) => {
+    if (!options.isSubComposition || !rootTag) return [];
+    const rootId = readAttr(rootTag.raw, "id");
+    if (!rootId) return [];
+    const escaped = rootId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const names = new RegExp(`#${escaped}(?![\\w-])`);
+    return styles
+      .filter((style) => style.index === -1 && names.test(stripCssComments(style.content)))
+      .map((style) => ({
+        code: "subcomposition_linked_style_names_root_id",
+        severity: "warning" as const,
+        message:
+          `The linked stylesheet "${style.rootRelativePath ?? style.file}" has a rule on #${rootId}, the id of this sub-composition's root. ` +
+          "The root is merged into its host when the composition is compiled, so that selector matches nothing (the same rule in an inline <style> is rewritten and works).",
+        fixHint: `Move the #${rootId} rules into a <style> inside the <template>, where they are rewritten for the merged root, or select a child element of the root in the linked file instead of the root itself.`,
+        snippet: truncateSnippet(style.content.slice(0, 120)),
+      }));
+  },
+
+  // multiple_scene_templates: the renderer takes the first scene template of a file with no live root.
+  ({ rawSource }) => {
+    const { document } = parseHTML(rawSource);
+    if (document.querySelector("[data-composition-id]")) return [];
+    const scenes = Array.from(document.querySelectorAll("template")).flatMap((template, index) => {
+      const compositionId = parseHTML(template.innerHTML)
+        .document.querySelector("[data-composition-id]")
+        ?.getAttribute("data-composition-id");
+      if (compositionId === undefined) return [];
+      const id = template.getAttribute("id");
+      return [
+        `template #${index + 1}${id ? ` (id="${id}")` : ""} holding composition "${compositionId}"`,
+      ];
+    });
+    if (scenes.length < 2) return [];
+    return [
+      {
+        code: "multiple_scene_templates",
+        severity: "warning",
+        message: `This file has more than one scene template and no live composition root, so only the first renders: ${scenes.join("; ")}.`,
+        fixHint:
+          "Keep one composition root per file, or move the other scenes into their own files.",
+      },
+    ];
+  },
 ];
 
 const CLIP_MEDIA_TAGS = new Set<string>(["img", "video", "audio"]);
@@ -1695,15 +1975,15 @@ function deriveDurationFromClips(tags: OpenTag[], rootTag: OpenTag) {
   const clipEnds: Array<number | null> = [];
   for (const tag of tags) {
     if (tag === rootTag) continue;
-    const startRaw = readAttr(tag.raw, "data-start");
-    if (startRaw === null) continue;
-    const start = Number(startRaw);
-    // A reference start ("intro+2") is resolved by the runtime; here it is a clip of unknown end.
-    if (!Number.isFinite(start)) {
+    const getAttr = (name: string) => readAttr(tag.raw, name);
+    if (getAttr("data-start") === null) continue;
+    const timing = readTagTiming(tag.raw);
+    // A reference start is resolved by the runtime; here it is a clip of unknown end.
+    if (timing.start === null) {
       clipEnds.push(null);
       continue;
     }
-    const getAttr = (name: string) => readAttr(tag.raw, name);
+    const start = timing.start;
     const authored = readAuthoredDurationSeconds(getAttr, start);
     if (CLIP_MEDIA_TAGS.has(tag.name)) {
       const { seconds } = resolveMediaDuration({

@@ -5,7 +5,7 @@
     "packages/studio/src/components/ui/index.ts",
     "packages/producer/src/**/*.test.ts",
     // Studio's browser-journey helpers are plain .mjs under tests/e2e; their unit tests live beside them.
-    "packages/studio/tests/e2e/*.test.mjs",
+    "packages/studio/tests/e2e/**/*.test.mjs",
     "packages/aws-lambda/src/**/*.test.ts",
     "packages/gcp-cloud-run/src/**/*.test.ts",
     "packages/gcp-cloud-run/terraform/*.test.ts",
@@ -30,6 +30,8 @@
     "packages/cli/scripts/generate-font-data.ts",
     "packages/engine/scripts/test-fitTextFontSize-browser.ts",
     "packages/aws-lambda/scripts/*.ts",
+    // Run inside the arm64 video image by the lambda-arm64-image workflow.
+    "packages/aws-lambda/image/smoke-video.mjs",
     // Built as standalone IIFE for the browser-side sandbox runtime;
     // referenced by file path (not import) in build-hyperframes-runtime-artifact.ts.
     "packages/core/src/runtime/entry.ts",
@@ -53,8 +55,13 @@
     "packages/producer/src/services/shaderTransitionWorker.ts",
     // Off-main-thread /health endpoint, spawned by path from healthWorker.ts.
     "packages/producer/src/services/healthWorkerThread.ts",
+    // Worker thread of runHyperframeLint, spawned by path from hyperframeLint.ts.
+    "packages/producer/src/services/hyperframeLintWorker.ts",
     // Render-setup worker, spawned by path from cancellableProcess.ts.
     "packages/cli/src/renderSetupWorker.ts",
+    // Sub-composition build worker, started by path from subCompositionBuild.ts (.dev.mjs from source under Node).
+    "packages/studio-server/src/helpers/subCompositionWorker.ts",
+    "packages/studio-server/src/helpers/subCompositionWorker.dev.mjs",
     // Update/skills cache refresh, spawned detached by path from backgroundChecks.ts.
     "packages/cli/src/backgroundChecksWorker.ts",
     // Parakeet decode worker, spawned by path from whisper/sherpa.ts.
@@ -64,10 +71,13 @@
     "packages/cli/src/browser/chromeOrphans.fixture.ts",
     "packages/cli/src/capture/publicNetwork.fixture.ts",
     "packages/cli/src/utils/commandResult.fixture.ts",
+    "packages/studio-server/src/routes/recoveryDrafts.fixture.ts",
     // Test fixture worker, spawned by path via the pools' workerEntryPath
     // option from the crash-recovery tests; has no import-graph referrer.
     "packages/producer/src/services/__fixtures__/crashOnMessageWorker.mjs",
-    "scripts/*.{ts,mjs,js}",
+    // Test fixture worker for runHyperframeLint, passed by path as its workerEntry option.
+    "packages/producer/src/services/__fixtures__/lintWorkerStuck.mjs",
+    "scripts/**/*.{ts,mjs,js}",
     "scripts/*/run.mjs",
     // Keyframe UI components — wired dynamically via EaseCurveSection/MotionPanel.
     "packages/studio/src/components/editor/KeyframeDiamond.tsx",
@@ -94,14 +104,6 @@
     // The relocated media-use .mjs files are agent-invoked scripts outside the
     // import graph; keep the exemption scoped to that shipped script type.
     "packages/cli/src/media-use/**/*.mjs",
-    // Agent-invoked motion-graphics tools co-located with their docs (run via
-    // `node <path>` per grounding/PROTOCOL.md / categories/maps/module.md
-    // prose), not import-graph reachable.
-    "skills/motion-graphics/grounding/**",
-    "skills/motion-graphics/categories/**",
-    // Agent-invoked reference materials (template + motion-primitive HTML, catalogs),
-    // forked by path by the frame-worker per SKILL.md prose, not import-graph reachable.
-    "skills/music-to-video/references/**",
     // Bundled @font-face data (read at runtime via fs.readFileSync, invisible
     // to the import graph) + its manual rebuild tool.
     "skills/**/fonts/**",
@@ -255,7 +257,7 @@
     // CLI command files: every command exports a const `examples` per the
     // convention documented in CLAUDE.md. This is a namespace barrel, not a
     // collision.
-    { "file": "packages/cli/src/commands/*.ts", "exports": ["examples"] },
+    { "file": "packages/cli/src/commands/**/*.ts", "exports": ["examples"] },
     // Options type for the render-queue hook's public startRender callback —
     // consumed structurally by callers (StudioRightPanels), not by import.
     {
@@ -443,6 +445,8 @@
     // as a direct dep to guarantee installation even when transitive
     // resolution fails (corrupted cache, dedup edge cases).
     "debug",
+    // The engine loads it at runtime; tsup keeps it external in the CLI bundle.
+    "undici",
     // @puppeteer/browsers' optional peer: its zip fallback when no system `unzip` exists.
     "yauzl",
     // Loaded through the optional package loader for Gemini vision captioning.
@@ -800,6 +804,9 @@
       // recordSample to coalesce display-rate events onto authored frames;
       // the import and helper insertion shift the untouched functions' lines.
       "packages/studio/src/hooks/useGestureRecording.ts",
+      // useShadowPreviewReload.ts: the reload hook is inherited large React control flow; this change only wires in
+      // useShadowReloadRetry (no new branch here), and touching the file makes fallow report the whole hook.
+      "packages/studio/src/player/hooks/useShadowPreviewReload.ts",
       // sourcePatcher.ts: resolveSourceFile / splitInlineStyleDeclarations /
       // patch*InTag pre-date this PR; only the PatchOperation type gained two
       // optional fields, but the line-shift fingerprint re-flags the inherited
@@ -1058,6 +1065,9 @@
       "packages/inspector/src/timelineReport.ts",
       "packages/inspector/src/pageQueries.ts",
       "packages/core/src/runtime/timelineValues.ts",
+      // useColorGradingController.ts: the hook's complexity is inherited; the sealed-preview
+      // status read adds no branch to it, but its import lines shift the hook's fingerprint.
+      "packages/studio/src/components/editor/useColorGradingController.ts",
     ],
   },
 }

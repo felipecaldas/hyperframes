@@ -22,3 +22,11 @@ Windows and macOS/Safari jobs are deliberately disabled, including dependent
 summary jobs. The CLI matrix covers Linux only. ARM64 jobs added by future
 upstream updates must also stay disabled until compatible local hardware exists.
 These skipped jobs do not prove platform coverage.
+
+Jobs that `needs:` a disabled job are disabled too, transitively. Since the v0.9.64 sync
+(TAB-1336) that includes `publish.yml`'s `pack` and `publish`: upstream's release pack now
+needs an ARM64 Lambda ffmpeg build. The fork ships by tarball and never publishes to npm.
+
+Workflows that run heygen-com's own operations are disabled outright, whatever their
+runner: `publish-mcp-registry.yml`, `mcp-registry-watch.yml` and `stale.yml`. The fork
+does not publish to the MCP registry and does not auto-close its issues or PRs.

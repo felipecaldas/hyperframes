@@ -1,5 +1,9 @@
 import type { HfColorGradingTarget } from "../colorGrading";
+import type { PreviewTarget } from "../studioPreviewMark";
 import type { RuntimeAnalyticsEvent } from "./analytics";
+import type { AudioFades } from "../audioFade";
+import type { RateSpec } from "../speedRamp";
+import type { VolumeKeyframe } from "./mediaVolumeEnvelope";
 
 export type RuntimeJson =
   | string
@@ -22,10 +26,15 @@ type RuntimeBridgeControlActionBase =
   | "set-web-audio-media-disabled"
   | "set-idle-heartbeat"
   | "set-display-scale"
+  | "set-preview-quality"
+  | "set-copies-ahead"
+  | "retry-preview-copies"
+  | "request-preview-facts"
   | "set-root-duration"
   | "set-play-range"
   | "stop-media"
-  | "flash-elements";
+  | "flash-elements"
+  | "scrub-audio";
 
 type RuntimeBridgeControlMessageBase = {
   source: "hf-parent";
@@ -41,8 +50,11 @@ type RuntimeBridgeControlMessageBase = {
   disabled?: boolean;
   slow?: boolean;
   scale?: number;
+  level?: number;
+  on?: boolean;
   playbackRate?: number;
-  target?: HfColorGradingTarget | string | null;
+  target?: HfColorGradingTarget | PreviewTarget | string | null;
+  time?: number | null;
   grading?: RuntimeJson;
   compare?: RuntimeJson;
   seekMode?: "drag" | "commit";
@@ -55,6 +67,7 @@ export type RuntimeStateMessage = {
   currentTime: number;
   ended: boolean;
   isPlaying: boolean;
+  buffering: boolean;
   muted: boolean;
   playbackRate: number;
 };
@@ -246,8 +259,74 @@ export type RuntimeGroupLevelsMessage = {
   levels: Array<{ groupId: string; level: number; clipped: boolean }>;
 };
 
+export type RuntimePreviewCopiesMessage = {
+  source: "hf-preview";
+  type: "preview-copies";
+  /** The lighter copies wanted at the current quality; null when none are. */
+  copies: {
+    total: number;
+    ready: number;
+    failed: number;
+    progress: number;
+    error: string | null;
+  } | null;
+};
+
+export type FetchNotSeenToStart = null;
+
+export type PlaybackHeldBy = {
+  kind: "audio" | "video";
+  readyState: number;
+  networkState: number;
+  fetchMs: number | FetchNotSeenToStart;
+};
+
+export type RuntimePreviewHealthMessage = {
+  source: "hf-preview";
+  type: "preview-health";
+  /** How playback went over the last few seconds of play; null while paused, seeking or warming up. */
+  health: {
+    droppedShare: number;
+    seconds: number;
+    choppy: boolean;
+    fps: number;
+    worstFrameMs: number;
+    skippedShare: number;
+    waitingShare: number;
+    frozenShare: number;
+    gapP50Ms: number;
+    gapP95Ms: number;
+    clockSource: "audio" | "webaudio" | "monotonic";
+    heldBy: PlaybackHeldBy | null;
+    mode: "play";
+  } | null;
+};
+
+export type RuntimePreviewFactsMessage = {
+  source: "hf-preview";
+  type: "preview-facts";
+  facts: {
+    sceneCount: number;
+    mountedElementCount: number;
+    durationSeconds: number;
+    videos: Array<{
+      codec: string;
+      width: number;
+      height: number;
+      bitDepth: number;
+      count: number;
+    }>;
+    /** The lower levels at which at least one video gets a lighter copy. */
+    lighterAt: number[];
+    copiesReady: boolean;
+  };
+};
+
 export type RuntimeOutboundMessage =
   | RuntimeStateMessage
+  | RuntimePreviewCopiesMessage
+  | RuntimePreviewHealthMessage
+  | RuntimePreviewFactsMessage
   | RuntimeTimelineMessage
   | RuntimeDiagnosticMessage
   | RuntimePickerHoveredMessage
@@ -271,7 +350,7 @@ export type RuntimePlayer = {
   _timeline: RuntimeTimelineLike | null;
   play: () => void;
   pause: () => void;
-  seek: (timeSeconds: number, options?: { keepPlaying?: boolean }) => HeldSeek;
+  seek: (timeSeconds: number, options?: { keepPlaying?: boolean; settled?: boolean }) => HeldSeek;
   renderSeek: (timeSeconds: number, options?: RuntimeSeekOptions) => void;
   getTime: () => number;
   getDuration: () => number;
@@ -317,6 +396,7 @@ export type RuntimeTimelineLike = {
   seek: (timeSeconds?: number, suppressEvents?: boolean) => unknown;
   totalTime?: (timeSeconds?: number, suppressEvents?: boolean) => unknown;
   totalDuration?: () => number;
+  shiftChildren?: (amount: number) => unknown;
   progress?: (value?: number, suppressEvents?: boolean) => unknown;
   time: () => number;
   duration: () => number;
@@ -401,3 +481,22 @@ type RuntimeBridgeControlAction =
 
 export type RuntimeBridgeControlMessage = RuntimeBridgeControlMessageBase &
   RuntimeDataControlFields;
+
+export type RuntimeMediaClip = {
+  el: HTMLVideoElement | HTMLAudioElement;
+  start: number;
+  /** The clip's own t=0 when a host's in-point cut its head; source time, lanes and fades run from it. */
+  origin?: number;
+  mediaStart: number;
+  duration: number;
+  end: number;
+  volume: number | null;
+  playbackRate: number;
+  /** The rate lane when the clip has one; otherwise `playbackRate`. */
+  rate?: RateSpec;
+  loop: boolean;
+  sourceDuration: number | null;
+  /** Probed from the GSAP timeline as the renderer does; when set they drive volume, not `data-volume`. */
+  volumeKeyframes?: VolumeKeyframe[];
+  fades?: AudioFades;
+};

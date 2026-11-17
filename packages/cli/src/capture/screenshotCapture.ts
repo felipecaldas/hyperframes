@@ -8,6 +8,7 @@
 import { DEFAULT_MAX_SCREENSHOTS } from "./types.js";
 import { CaptureDirRefusedError } from "./captureErrors.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
+import { screenshotOnceMore } from "../utils/screenshotOnceMore.js";
 import type { Page } from "puppeteer-core";
 import { isDegradableEvaluateTimeoutError } from "./captureTimeout.js";
 import { waitForPageReady } from "./navigateForCapture.js";
@@ -97,18 +98,18 @@ export function pngHeight(buf: Uint8Array): number | null {
  * Returns the captured path or the cause for omitting the plate.
  */
 export async function captureFullPagePlate(
-  page: Page,
+  page: Pick<Page, "evaluate" | "screenshot">,
   screenshotsDir: string,
   budget: { remainingMs?: () => number; files?: string[] } = {},
 ): Promise<PlateCaptureResult> {
-  // Record the inline value before overwriting so the page is handed back unchanged — the
-  // caller keeps using it (asset extraction, DOM reads) after this returns.
+  // Preserve the inline value and priority: asset and DOM extraction reuse this page afterward.
   await page.evaluate(
     `document.querySelectorAll('*').forEach((el) => {
       const p = getComputedStyle(el).position;
       if (p === 'fixed' || p === 'sticky') {
         el.setAttribute('data-hf-plate-position', el.style.position || '');
-        el.style.position = 'static';
+        el.setAttribute('data-hf-plate-position-priority', el.style.getPropertyPriority('position'));
+        el.style.setProperty('position', 'static', 'important');
       }
     })`,
   );
@@ -124,7 +125,7 @@ export async function captureFullPagePlate(
     if (docHeight > MAX_PLATE_HEIGHT_PX) return { kind: "omitted", reason: "height-limit" };
     if ((budget.remainingMs?.() ?? 1) <= 0) return { kind: "omitted", reason: "budget-exhausted" };
 
-    const buffer = await page.screenshot({ type: "png", fullPage: true });
+    const buffer = await screenshotOnceMore(() => page.screenshot({ type: "png", fullPage: true }));
     // Confirm what Chrome produced instead of trusting the measurement: the capture itself can
     // trigger another round of lazy loading. A clipped plate is undetectable downstream — the
     // skill only teaches the tile fallback when the file is *absent* — so emit nothing rather
@@ -141,8 +142,10 @@ export async function captureFullPagePlate(
     try {
       await page.evaluate(
         `document.querySelectorAll('[data-hf-plate-position]').forEach((el) => {
-          el.style.position = el.getAttribute('data-hf-plate-position');
+          el.style.setProperty('position', el.getAttribute('data-hf-plate-position') || '',
+            el.getAttribute('data-hf-plate-position-priority') || '');
           el.removeAttribute('data-hf-plate-position');
+          el.removeAttribute('data-hf-plate-position-priority');
         })`,
       );
     } catch {
@@ -322,7 +325,7 @@ export async function captureScrollScreenshots(
       if (budgetSpent()) break;
       let buffer: Uint8Array;
       try {
-        buffer = await page.screenshot({ type: "png" });
+        buffer = await screenshotOnceMore(() => page.screenshot({ type: "png" }));
       } catch (err) {
         result.failures.push(shotFailure(err, `screenshots/${filename}`, finalPositions[i]!));
         continue;

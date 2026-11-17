@@ -24,6 +24,18 @@ function swappableIframe(swap: Swap = vi.fn(async () => {})) {
 }
 
 describe("sceneSwapFor", () => {
+  it("returns no swap for an opaque frame, without reading its window", () => {
+    const iframe = document.createElement("iframe");
+    const blocked = new Proxy({} as Window, {
+      get: () => {
+        throw new DOMException("blocked", "SecurityError");
+      },
+    });
+    Object.defineProperty(iframe, "contentWindow", { value: blocked });
+    Object.defineProperty(iframe, "contentDocument", { value: null });
+    expect(sceneSwapFor(iframe)).toBeNull();
+  });
+
   it("gives up on a preview download that never finishes, so the caller can reload", async () => {
     vi.useFakeTimers();
     vi.spyOn(globalThis, "fetch").mockImplementation(
@@ -96,6 +108,28 @@ describe("sceneSwapFor", () => {
     });
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(swap).not.toHaveBeenCalled();
+  });
+
+  it("leaves no listener on the caller's cancel signal once swaps settle, so a swapped film can be freed", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("<html></html>"));
+    const cancel = new AbortController();
+    const live = new Set<unknown>();
+    const { signal } = cancel;
+    const add = signal.addEventListener.bind(signal);
+    const remove = signal.removeEventListener.bind(signal);
+    signal.addEventListener = ((type: string, listener: EventListener, options?: unknown) => {
+      live.add(listener);
+      add(type, listener, options as AddEventListenerOptions);
+    }) as AbortSignal["addEventListener"];
+    signal.removeEventListener = ((type: string, listener: EventListener, options?: unknown) => {
+      live.delete(listener);
+      remove(type, listener, options as EventListenerOptions);
+    }) as AbortSignal["removeEventListener"];
+    const { iframe } = swappableIframe();
+    const refused = swappableIframe(vi.fn(async () => Promise.reject(new Error("refused")))).iframe;
+    for (let n = 0; n < 3; n++) await sceneSwapFor(iframe)!("/preview", () => true, signal);
+    await expect(sceneSwapFor(refused)!("/preview", () => true, signal)).rejects.toThrow("refused");
+    expect(live.size).toBe(0);
   });
 
   it("swaps a document that arrives in time", async () => {
