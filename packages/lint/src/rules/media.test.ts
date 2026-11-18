@@ -354,6 +354,7 @@ describe("media rules", () => {
     expect(hint).toContain('id="wrap"');
     expect(hint).toContain('data-start="2"');
     expect(hint).not.toContain('data-start="0"');
+    expect(hint).toContain("takes no timing from it");
 
     // The hint's one step: the video leaves the wrapper and takes its timing.
     const followed = await codes(
@@ -416,6 +417,35 @@ describe("media rules", () => {
       `<div id="w" data-start="2" data-duration="6"><audio id="a" src="a.mp3"></audio></div>`,
     );
     expect(audio).toContain('data-start="0"');
+  });
+
+  // The parser keeps any tag name up to whitespace, `/` or `>`, so a wrapper's name can hold
+  // regex syntax. Its close tag must be matched literally: unescaped, `x(` throws and a
+  // nested-quantifier name backtracks exponentially over the text before the video.
+  it("matches a timed wrapper's close tag literally whatever its name holds", async () => {
+    const nestedCodes = async (body: string) =>
+      (
+        await lintHyperframeHtml(`
+<html><body>
+  <div id="root" data-composition-id="c1" data-width="1920" data-height="1080">${body}</div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines["c1"] = gsap.timeline({ paused: true });</script>
+</body></html>`)
+      ).findings.map((f) => f.code);
+    const video = `<video id="v" src="a.mp4" data-start="0" data-duration="5" muted></video>`;
+
+    expect(await nestedCodes(`<x( data-start="0" data-duration="5">${video}</x(>`)).toContain(
+      "video_nested_in_timed_element",
+    );
+    expect(await nestedCodes(`<x( data-start="0" data-duration="3"></x(>${video}`)).not.toContain(
+      "video_nested_in_timed_element",
+    );
+
+    const started = performance.now();
+    const backtracking = await nestedCodes(
+      `<a(b+)+c data-start="0" data-duration="5"><span title="</a${"b".repeat(29)}!"></span>${video}</a(b+)+c>`,
+    );
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(backtracking).toContain("video_nested_in_timed_element");
   });
 
   it("allows audible video clips to omit muted when data-has-audio is true", async () => {
@@ -550,6 +580,21 @@ describe("media rules", () => {
     <audio id="a" data-start="9" data-duration="4" src="clip.mp4"></audio>`),
     );
     expect(found).toContain("video_audio_double_source");
+  });
+
+  it("says a timed video inside a timed wrapper gets no timing from the wrapper, so the wrapper stays untimed", async () => {
+    const result = await lintHyperframeHtml(`
+<html><body>
+  <div id="root" data-composition-id="c1" data-width="1920" data-height="1080">
+    <div id="wrap" class="clip" data-start="2" data-duration="3" data-track-index="0">
+      <video id="nv" src="clip.mp4" data-start="2" data-duration="3" muted playsinline></video>
+    </div>
+  </div>
+  <script>window.__timelines = window.__timelines || {}; window.__timelines["c1"] = gsap.timeline({ paused: true });</script>
+</body></html>`);
+    const hint = result.findings.find((f) => f.code === "video_nested_in_timed_element")?.fixHint;
+    expect(hint).toContain("takes no timing from its wrapper");
+    expect(hint).not.toContain("wrapper OR the video");
   });
 
   it("does NOT flag <video> as nested in a void element with data-start (regression)", async () => {

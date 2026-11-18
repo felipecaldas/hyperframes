@@ -32,7 +32,7 @@ import { probe as probeMedia } from "./lib/probe.mjs";
 import { track } from "./lib/telemetry.mjs";
 import { recordMiss } from "./lib/misses.mjs";
 import { buildStats } from "./lib/stats.mjs";
-import { typesMatch } from "./lib/match.mjs";
+import { nameMatch, typesMatch } from "./lib/match.mjs";
 import { listCandidates, formatCandidates, CANDIDATE_CAP } from "./lib/candidates.mjs";
 import { findGlobalBySha } from "./lib/cache.mjs";
 import { heygenAuthMethod } from "../audio/scripts/lib/heygen.mjs";
@@ -56,14 +56,21 @@ import {
   flushHeygenFailureTracking,
   versionLessThan,
 } from "./lib/heygen-cli.mjs";
-import { BundledSfxAssetsError, inspectBundledSfxAssets } from "./lib/bundled-sfx-provider.mjs";
-import { OPENVERSE_SFX_PROVIDER } from "./lib/sfx-provider.mjs";
-import { writeSfxCredit } from "./lib/openverse.mjs";
 import {
-  fetchMediaVectors,
-  mediaVectorRows,
-  rankMediaRowsWithVectors,
-} from "./lib/local-media-search.mjs";
+  BUNDLED_SFX_RECOVERY_COMMAND,
+  BundledSfxAssetsError,
+  bundledSfxAssetPath,
+  inspectBundledSfxAssets,
+} from "./lib/bundled-sfx-provider.mjs";
+import {
+  OPENVERSE_SFX_PROVIDER,
+  SFX_CONFIDENT_SCORE,
+  SFX_MIN_SCORE,
+  scoreMatch,
+} from "./lib/sfx-provider.mjs";
+import { writeSfxCredit } from "./lib/openverse.mjs";
+import { terminalText } from "./lib/terminal-text.mjs";
+import { mediaVectorRows, rankMediaRowsWithVectors } from "./lib/local-media-search.mjs";
 
 const INGEST_TYPES = listTypes();
 const DEFAULT_EXT = {
@@ -173,7 +180,7 @@ if (args.adopt) {
     console.log("no new assets to adopt (assets/ empty or already registered)");
   } else {
     console.log(`adopted ${adopted.length} asset${adopted.length === 1 ? "" : "s"} from assets/`);
-    for (const r of adopted) console.log(`  ${r.id} → ${r.path} (${r.type})`);
+    for (const r of adopted) console.log(terminalText(`  ${r.id} → ${r.path} (${r.type})`));
   }
   process.exit(0);
 }
@@ -274,11 +281,14 @@ if (type === "recipe") {
       console.log(JSON.stringify({ ok: true, ...used }));
     } else {
       console.log(
-        `resolved recipe ${used.recipe.name} (v${used.recipe.version}, ${used.recipe.workflow})`,
+        terminalText(
+          `resolved recipe ${used.recipe.name} (v${used.recipe.version}, ${used.recipe.workflow})`,
+        ),
       );
-      console.log(`  frame spec → ${used.frameSpecPath} (copied over)`);
-      console.log(`  storyboard skeleton → ${used.skeletonPath}`);
-      if (used.briefSkeletonPath) console.log(`  brief skeleton → ${used.briefSkeletonPath}`);
+      console.log(terminalText(`  frame spec → ${used.frameSpecPath} (copied over)`));
+      console.log(terminalText(`  storyboard skeleton → ${used.skeletonPath}`));
+      if (used.briefSkeletonPath)
+        console.log(terminalText(`  brief skeleton → ${used.briefSkeletonPath}`));
     }
     process.exit(0);
   } catch (err) {
@@ -376,7 +386,8 @@ async function run() {
       : findExistingAsset(projectDir, intent, type);
   if (existingAsset) {
     const recorded = latestRecordFor(projectDir, existingAsset.relativePath);
-    if (recorded) return result(recorded, "cached");
+    const match = nameMatch(intent, existingAsset.name, recorded?.provenance?.prompt);
+    if (recorded) return result(recorded, "cached", match);
     const id = nextId(projectDir, type);
     const record = {
       id,
@@ -388,7 +399,7 @@ async function run() {
     };
     appendRecord(projectDir, record);
     regenerateIndex(projectDir);
-    return result(record, "existing");
+    return result(record, "existing", match);
   }
 
   // 2. global cache — exact-prompt or entity match
@@ -458,21 +469,14 @@ async function run() {
   try {
     searchResult = await runCapability(type, "search", intent, ctx);
     if (!searchResult && type === "sfx" && !args.provider && !localOnly) {
-      const registry =
-        process.env.HYPERFRAMES_REGISTRY ||
-        "https://raw.githubusercontent.com/heygen-com/hyperframes/main/registry";
       try {
-        await fetchMediaVectors(registry);
         const ranked = await rankMediaRowsWithVectors(
           intent,
           mediaVectorRows().filter((row) => row.kind === "sfx"),
         );
         const row = ranked.rows[0];
-        const candidates = row
-          ? [resolve(row.file), join(import.meta.dirname, "..", "..", "..", row.file)]
-          : [];
-        const localPath = candidates.find((candidate) => existsSync(candidate));
-        if (row && localPath) {
+        const localPath = row ? bundledSfxAssetPath(row.file) : null;
+        if (localPath) {
           searchResult = {
             localPath,
             ext: extname(localPath),
@@ -541,7 +545,9 @@ async function run() {
           ? "no brand spec found — add a frame.md or design.md (colors/font/logo) to this project. Run the HyperFrames design flow to create one; brand tokens are read locally for deterministic rendering."
           : args.provider
             ? `provider "${args.provider}" could not resolve ${type}: "${intent}"${localOnly ? " (--local-only skips network providers; drop it or the --provider override)" : ""}`
-            : `no provider could resolve ${type}: "${intent}"`;
+            : type === "sfx" && !localOnly
+              ? `no sound effect matched "${intent}": HeyGen sound search (min score ${SFX_MIN_SCORE}), Openverse and the bundled library had nothing. Try other words for the sound.`
+              : `no provider could resolve ${type}: "${intent}"`;
     if (args.json) {
       console.log(
         JSON.stringify({
@@ -551,7 +557,7 @@ async function run() {
         }),
       );
     } else {
-      console.error(`error: ${msg}`);
+      console.error(terminalText(`error: ${msg}`));
     }
     process.exit(1);
   }
@@ -606,7 +612,7 @@ async function run() {
   } catch {
     // promotion is best-effort; a resolve still succeeds locally
   }
-  return result(record, searchResult.source || "search");
+  return result(record, searchResult.source || "search", searchResult.match);
 }
 
 function mergeSmartAdjust(block) {
@@ -669,7 +675,7 @@ function exitError(message, status = 1) {
   if (args.json) {
     console.log(JSON.stringify({ ok: false, error: message }));
   } else {
-    console.error(`error: ${message}`);
+    console.error(terminalText(`error: ${message}`));
   }
   process.exit(status);
 }
@@ -741,7 +747,7 @@ async function colorMiss(type, intent) {
   if (args.json) {
     console.log(JSON.stringify({ ok: false, error: msg }));
   } else {
-    console.error(`error: ${msg}`);
+    console.error(terminalText(`error: ${msg}`));
   }
   process.exit(1);
 }
@@ -1150,7 +1156,13 @@ function printDoctor(checks) {
     const freePath = heygenChecks.has(check.name)
       ? " — free-usage path: bgm/image/voice/avatar-video"
       : "";
-    const fix = check.ok || !check.fix ? "" : ` — fix: ${check.fix}`;
+    // Repairing a skill is the person's step, so that fix is addressed to them, not to the agent.
+    const fix =
+      check.ok || !check.fix
+        ? ""
+        : check.fix === BUNDLED_SFX_RECOVERY_COMMAND
+          ? ` — For the user: \`${check.fix}\` repairs it`
+          : ` — fix: ${check.fix}`;
     console.log(`${prefix} ${check.detail}${freePath}${fix}`);
   }
 }
@@ -1176,8 +1188,8 @@ function printStats(report) {
     return;
   }
   for (const [type, misses] of entries) {
-    console.log(`  ${type}:`);
-    for (const miss of misses) console.log(`    ${miss.count}  ${miss.intent}`);
+    console.log(terminalText(`  ${type}:`));
+    for (const miss of misses) console.log(terminalText(`    ${miss.count}  ${miss.intent}`));
   }
 }
 
@@ -1188,7 +1200,7 @@ function printMap(label, values) {
     console.log("  none");
     return;
   }
-  for (const [key, value] of entries) console.log(`  ${key}: ${value}`);
+  for (const [key, value] of entries) console.log(terminalText(`  ${key}: ${value}`));
 }
 
 function ffDoctorCheck(name, binary) {
@@ -1272,7 +1284,7 @@ async function reuseGlobal(shaArg) {
   }
   // Do not import an asset under the wrong type.
   if (!typesMatch(rec.type, type)) {
-    console.error(`error: sha "${shaArg}" is a ${rec.type} asset, not ${type}`);
+    console.error(terminalText(`error: sha "${shaArg}" is a ${rec.type} asset, not ${type}`));
     process.exit(2);
   }
   const ext = extname(rec.cached_path || "") || defaultExt(type);
@@ -1291,7 +1303,33 @@ async function reuseGlobal(shaArg) {
   await result(imported, "reused-explicit");
 }
 
-async function result(record, source) {
+function warnLowConfidence(record, match) {
+  if (!match?.low_confidence) return;
+  const why =
+    "min_score" in match
+      ? `search score ${match.score ?? "missing"}, under the ${SFX_CONFIDENT_SCORE} a good match reaches`
+      : match.resolved_for
+        ? `found by its file name, resolved earlier for "${match.resolved_for}"`
+        : `found by its file name, sharing ${match.matched_words.length} of ${match.intent_words} words`;
+  console.error(
+    terminalText(
+      `media-use: low-confidence match for "${intent}": ${record.description || record.path} (${why}). Listen before placing it, or resolve again with other words.`,
+    ),
+  );
+}
+
+// A reused record gets back the advisory its first resolve gave, rebuilt from its provenance.
+function recordedMatch(record) {
+  const kept = record.provenance ?? {};
+  if (record.type === "sfx" && kept.provider === "heygen.audio.sounds")
+    return scoreMatch(kept.score);
+  if (kept.adopted && record.path)
+    return nameMatch(intent, basename(record.path, extname(record.path)), kept.prompt);
+  return undefined;
+}
+
+async function result(record, source, match = recordedMatch(record)) {
+  warnLowConfidence(record, match);
   const { provider, license, credit, source_url: sourceUrl } = record.provenance ?? {};
   // Under the media lock: two resolves at once each read, then rewrite, the whole credits file.
   if (provider === OPENVERSE_SFX_PROVIDER)
@@ -1329,12 +1367,13 @@ async function result(record, source) {
         ...record,
         ...(grading || {}),
         ...(grading && { grading }),
+        ...(match && { match }),
         _source: source,
       }),
     );
   } else {
     const meta = formatMeta(record, source);
-    console.log(`resolved ${record.id} → ${record.path || "inline"} (${meta})`);
+    console.log(terminalText(`resolved ${record.id} → ${record.path || "inline"} (${meta})`));
   }
 }
 
@@ -1366,7 +1405,7 @@ run().catch((err) => {
   if (args.json) {
     console.log(JSON.stringify({ ok: false, error: err.message }));
   } else {
-    console.error(`error: ${err.message}`);
+    console.error(terminalText(`error: ${err.message}`));
   }
   process.exit(1);
 });

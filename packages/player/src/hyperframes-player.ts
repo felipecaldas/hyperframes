@@ -55,6 +55,7 @@ const ASSETS_LOADING_UI_ATTR = "assets-loading-ui";
 const BUFFERING_ATTR = "buffering";
 const LOW_POWER_IDLE_ATTR = "low-power-idle";
 const DISABLE_CLICK_TO_PLAY_ATTR = "disable-click-to-play";
+const DISABLE_FULLSCREEN_ATTR = "disable-fullscreen";
 const RANGE_START_ATTR = "range-start";
 const RANGE_END_ATTR = "range-end";
 // paint-and-idle now always has a frame to wait on, so the overlay would
@@ -279,7 +280,7 @@ class HyperframesPlayer extends HTMLElement {
         // message fire before connectedCallback installs the parent message listener. Initial
         // attributes are applied below by connectedCallback; only live changes navigate here.
         if (!this.isConnected) break;
-        if (val) this._navigateSrc(val);
+        if (val || this._videoSource) this._navigateSrc(val ?? "");
         break;
       case "type": {
         const src = this.getAttribute("src");
@@ -718,6 +719,13 @@ class HyperframesPlayer extends HTMLElement {
     this.toggleAttribute(DISABLE_CLICK_TO_PLAY_ATTR, disabled);
   }
 
+  get disableFullscreen() {
+    return this.hasAttribute(DISABLE_FULLSCREEN_ATTR);
+  }
+  set disableFullscreen(disabled: boolean) {
+    this.toggleAttribute(DISABLE_FULLSCREEN_ATTR, disabled);
+  }
+
   get loop() {
     return this.hasAttribute("loop");
   }
@@ -1100,7 +1108,11 @@ class HyperframesPlayer extends HTMLElement {
     this.controlsApi?.updateTime(0, 0);
     this._syncVideoAudio();
     adapter.timeScale?.(this.playbackRate);
-    video.src = src;
+    if (src) video.src = src;
+    else {
+      video.removeAttribute("src");
+      video.load();
+    }
   }
 
   private _teardownVideo(): void {

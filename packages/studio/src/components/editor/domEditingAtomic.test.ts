@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { isAtomicCapture, isAtomicContainer, resolveGroupCapture } from "./domEditingGroups";
-import { collectDomEditLayerItems } from "./domEditingLayers";
+import { isAtomicCapture, isAtomicContainer } from "./domEditingGroups";
+import { collectDomEditLayerItems, resolveDomEditSelection } from "./domEditingLayers";
 import { buildElementLabel } from "./domEditingDom";
 import { parseCaptionComposition } from "../../captions/parser";
 
@@ -56,25 +56,37 @@ describe("atomic container predicates", () => {
   });
 });
 
-describe("resolveGroupCapture with data-hf-atomic", () => {
-  it("captures the atomic container as one unit when a word is clicked", () => {
+// Upstream v0.9.64 resolves selection through `selectionTargetIndex`; the fork's
+// `isGroupUnit` rule makes an atomic or legacy caption container one unit there.
+describe("resolveDomEditSelection with atomic caption containers", () => {
+  it("selects the atomic container as one unit when a word is clicked", async () => {
     const { root, caption } = buildCaption();
     const word = caption.children[2] as HTMLElement;
 
-    const capture = resolveGroupCapture(word, null);
+    const selection = await resolveDomEditSelection(word, opts);
     document.body.removeChild(root);
 
-    expect(capture).toEqual({ kind: "unit", element: caption });
+    expect(selection?.element).toBe(caption);
   });
 
-  it("resolves the word normally once drilled into the container", () => {
+  it("selects a legacy hf-captions container as one unit too", async () => {
+    const { root, caption } = buildCaption(4, { atomicAttribute: false });
+    const word = caption.children[1] as HTMLElement;
+
+    const selection = await resolveDomEditSelection(word, opts);
+    document.body.removeChild(root);
+
+    expect(selection?.element).toBe(caption);
+  });
+
+  it("resolves the word normally once drilled into the container", async () => {
     const { root, caption } = buildCaption();
     const word = caption.children[2] as HTMLElement;
 
-    const capture = resolveGroupCapture(word, caption);
+    const selection = await resolveDomEditSelection(word, { ...opts, activeGroupElement: caption });
     document.body.removeChild(root);
 
-    expect(capture).toEqual({ kind: "child" });
+    expect(selection?.element).toBe(word);
   });
 });
 

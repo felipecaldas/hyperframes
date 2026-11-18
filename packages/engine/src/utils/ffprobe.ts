@@ -11,8 +11,14 @@ import {
   pixelFormatHasAlpha,
   videoStreamHasAlpha,
 } from "@hyperframes/parsers/media-alpha";
-import { urlInputArgs } from "./urlInput.js";
-import { decodableAudioStream } from "@hyperframes/parsers/media-streams";
+import {
+  contentAddressedSha256,
+  declareContentAddressedUrl,
+  urlInputArgs,
+  withPublicOnlyProxy,
+} from "./urlInput.js";
+import { TextArtMediaError } from "./notMediaPayload.js";
+import { decodableAudioStream, misstatesPcmByteRate } from "@hyperframes/parsers/media-streams";
 import { runFfmpeg } from "./runFfmpeg.js";
 import { FFPROBE_PATH_ENV, getFfprobeBinary } from "./ffmpegBinaries.js";
 import { ManagedChildProcess } from "./managedChildProcess.js";
@@ -57,6 +63,8 @@ function sanitizeFfprobeDiagnostic(stderr: string, filePath: string): string {
 }
 
 /** Spawn ffprobe with given args, return stdout. Throws on non-zero exit or missing binary. */
+const REFUSED_TEXT_ART = /^\[(?:tty|bin|xbin|idf|adf) @ [^\]]*\] Format not on whitelist/m;
+
 export async function runFfprobe(
   filePath: string,
   argsWithoutInput: string[],
@@ -82,7 +90,33 @@ export async function runFfprobe(
     "--",
     filePath,
   ];
+  // With a restricted page network, a URL input not declared by the render reaches only public hosts.
+  const proxying = withPublicOnlyProxy(args, [args.length - 1]);
+  const routed = proxying && (await proxying);
+  try {
+    return await spawnFfprobe(
+      command,
+      routed?.args ?? args,
+      routed?.env,
+      filePath,
+      signal,
+      stdoutOptions,
+    );
+  } finally {
+    await routed?.close();
+  }
+}
+
+async function spawnFfprobe(
+  command: string,
+  args: string[],
+  env: NodeJS.ProcessEnv | undefined,
+  filePath: string,
+  signal?: AbortSignal,
+  stdoutOptions?: { retainTail?: boolean; maxChars?: number },
+): Promise<string> {
   const proc = spawn(command, args, {
+    ...(env && { env }),
     // Nothing is ever written to the child's stdin; leaving it as a pipe is
     // what lets a stdin-reading invocation block indefinitely.
     stdio: ["ignore", "pipe", "pipe"],
@@ -141,6 +175,7 @@ export async function runFfprobe(
     throw outcome.error ?? new Error(outcome.stderr);
   }
   if (outcome.reason !== "exit" || outcome.exitCode !== 0) {
+    if (REFUSED_TEXT_ART.test(outcome.stderr)) throw new TextArtMediaError();
     const diagnostic = sanitizeFfprobeDiagnostic(outcome.stderr, filePath);
     throw new Error(
       `[FFmpeg] ffprobe ${outcome.reason} with code ${outcome.exitCode}: ${diagnostic}`,
@@ -225,6 +260,7 @@ export interface VideoMetadata {
   colorRange?: string;
   pixelFormat?: string;
   sampleAspectRatio?: number;
+  rotation?: number;
   /** Decoded frame count from the video stream's `nb_frames`. Omitted when the
    * container does not surface a reliable count (still images, malformed
    * streams, or muxes that require `-count_packets` to populate). Callers
@@ -247,6 +283,8 @@ export interface AudioMetadata {
   audioStreamLeadSeconds?: number;
   mediaTimeOffsetSeconds?: number;
   audioStreamCount?: number;
+  /** PCM whose header byte rate is not sample rate x channels x sample size: a seek by it lands at the wrong time. */
+  misstatedByteRate?: boolean;
   /** The track read for these facts and for the mix, by its place among the audio streams (decodableAudioStream). */
   audioStream: number;
 }
@@ -269,11 +307,14 @@ interface FFProbeStream {
   avg_frame_rate?: string;
   sample_rate?: string;
   channels?: number;
+  bit_rate?: string;
+  bits_per_sample?: number;
   color_range?: string;
   color_transfer?: string;
   color_primaries?: string;
   color_space?: string;
   tags?: Record<string, string>;
+  side_data_list?: { rotation?: number }[];
   disposition?: { attached_pic?: number };
 }
 
@@ -364,13 +405,8 @@ function isPngImageProbe(output: FFProbeOutput): boolean {
   );
 }
 
-const contentAddressedUrls = new Map<string, string>();
 const withoutQuery = (url: string) => url.split(/[?#]/, 1)[0] ?? url;
-
-/** A URL whose bytes can never change (its path holds their hash), so probes of it are cacheable. */
-export function declareContentAddressedUrl(url: string, sha256: string): void {
-  contentAddressedUrls.set(withoutQuery(url), sha256);
-}
+export { declareContentAddressedUrl };
 
 const probeFactsUrls = new Map<string, string>();
 
@@ -381,7 +417,7 @@ export function declareProbeFactsUrl(url: string, factsUrl: string): void {
 
 export function mediaFileIdentity(filePath: string): string | null {
   if (/^https?:\/\//i.test(filePath)) {
-    const sha256 = contentAddressedUrls.get(withoutQuery(filePath));
+    const sha256 = contentAddressedSha256(filePath);
     return sha256 ? `sha256:${sha256}` : null;
   }
   try {
@@ -565,7 +601,9 @@ async function probeMediaOutput(filePath: string, signal?: AbortSignal): Promise
     }
     return cached.promise;
   }
-  const promise = readProbeJson(filePath, signal).then(parseProbeJson);
+  const promise = readProbeJson(filePath, signal).then((json) =>
+    refuseTextArt(parseProbeJson(json)),
+  );
   if (identity !== null) {
     cache.set(filePath, { identity, promise });
     if (!signal && cache.size > MEDIA_PROBE_OUTPUT_CACHE_MAX_ENTRIES) {
@@ -582,6 +620,18 @@ async function probeMediaOutput(filePath: string, signal?: AbortSignal): Promise
 }
 
 class StructurallyIncompletePngError extends Error {}
+
+const TEXT_ART_CODECS = new Set(["ansi", "bintext", "xbin", "idf"]);
+
+function refuseTextArt(output: FFProbeOutput): FFProbeOutput {
+  const formats = (output.format?.format_name ?? "").toLowerCase().split(",");
+  const drawsText = (output.streams ?? []).some(
+    (stream) =>
+      stream.codec_type === "video" && TEXT_ART_CODECS.has(stream.codec_name?.toLowerCase() ?? ""),
+  );
+  if (formats.includes("tty") || drawsText) throw new TextArtMediaError();
+  return output;
+}
 
 async function readFileRange(
   filePath: string,
@@ -855,6 +905,24 @@ export function parseFrameRate(frameRateStr: string | undefined): number {
   return rounded > 0 ? rounded : 0.01;
 }
 
+function displayRotation(stream: FFProbeStream): { rotation?: number } {
+  const turn = Number(
+    stream.side_data_list?.find((data) => data.rotation !== undefined)?.rotation ??
+      stream.tags?.rotate ??
+      0,
+  );
+  return Number.isFinite(turn) && turn % 360 !== 0 ? { rotation: turn } : {};
+}
+
+export function displaySize(
+  metadata: Pick<VideoMetadata, "width" | "height" | "sampleAspectRatio" | "rotation">,
+): { width: number; height: number } {
+  const width = Math.round(metadata.width * (metadata.sampleAspectRatio ?? 1));
+  return Math.abs(metadata.rotation ?? 0) % 180 === 90
+    ? { width: metadata.height, height: width }
+    : { width, height: metadata.height };
+}
+
 export function parseSampleAspectRatio(value: string | undefined): number | undefined {
   const [num, den] = (value ?? "").split(":").map(Number);
   if (!num || !den || !Number.isFinite(num) || !Number.isFinite(den)) return undefined;
@@ -1003,8 +1071,12 @@ export async function extractMediaMetadata(filePath: string): Promise<VideoMetad
       ? await probeDecodedAlphaPlane(filePath, alphaDecoder)
       : undefined;
 
-    const containerDuration = output?.format.duration ? parseFloat(output.format.duration) : 0;
+    let containerDuration = output?.format.duration ? parseFloat(output.format.duration) : 0;
     const streamDuration = videoStream.duration ? parseFloat(videoStream.duration) : 0;
+    // Recorder output (WebM/Matroska written to a pipe) carries no duration header: read it off the packets.
+    if (!(containerDuration > 0) && !(streamDuration > 0) && !isPng) {
+      containerDuration = (await scanPacketDuration(filePath, fps)) ?? 0;
+    }
     const parsedStreamStart = videoStream.start_time ? parseFloat(videoStream.start_time) : 0;
     const streamStart = Number.isFinite(parsedStreamStart) ? parsedStreamStart : 0;
     // `nb_frames` is populated by the container demuxer; a muxer that requires
@@ -1052,6 +1124,7 @@ export async function extractMediaMetadata(filePath: string): Promise<VideoMetad
       colorRange: videoStream.color_range,
       pixelFormat,
       ...(sampleAspectRatio === undefined ? {} : { sampleAspectRatio }),
+      ...displayRotation(videoStream),
       frames,
     };
   })();
@@ -1095,6 +1168,35 @@ export function readStoredFinalFrame(
       ? stored
       : undefined;
   });
+}
+
+const PACKET_TAIL_CHARS = 64 * 1024;
+
+/** The video stream's length from its packets (last end time), for a file whose headers state none. */
+async function scanPacketDuration(filePath: string, fps: number): Promise<number | undefined> {
+  try {
+    const stdout = await runFfprobe(
+      filePath,
+      [
+        ...["-select_streams", "v:0", "-show_entries", "packet=pts_time,duration_time"],
+        ...["-of", "csv=p=0"],
+      ],
+      undefined,
+      { retainTail: true, maxChars: PACKET_TAIL_CHARS },
+    );
+    const lines = stdout.split("\n");
+    // A tail cut at the cap starts partway through a line, and its number would read as a huge time.
+    if (stdout.length >= PACKET_TAIL_CHARS) lines.shift();
+    const frame = fps > 0 ? 1 / fps : 0;
+    const ends = lines
+      .map((line) => line.trim().split(",").map(Number))
+      .filter(([pts]) => Number.isFinite(pts))
+      .map(([pts, duration]) => pts! + (Number.isFinite(duration) ? duration! : frame));
+    return ends.length ? Math.max(...ends) : undefined;
+  } catch {
+    // expected: a file ffprobe cannot scan keeps its "no duration" verdict.
+    return undefined;
+  }
 }
 
 /**
@@ -1289,6 +1391,7 @@ async function probeAudioMetadata(filePath: string, signal?: AbortSignal): Promi
     mediaTimeOffsetSeconds: mediaTimeOffsetSeconds(output),
     audioStreamCount: audioStreams.length,
     audioStream: audioStreamIndex,
+    misstatedByteRate: misstatesPcmByteRate(audioStream),
   };
 }
 

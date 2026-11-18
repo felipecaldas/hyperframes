@@ -1,4 +1,5 @@
 import { execFileSync, spawn as realSpawn, spawnSync, type ChildProcess } from "node:child_process";
+import { MEDIA_INPUT_ARGS } from "./mediaExtensions.js";
 import os from "node:os";
 import { EventEmitter, once } from "node:events";
 import {
@@ -169,7 +170,8 @@ async function loadModule(
     const mocked = { spawn };
     return { ...mocked, default: mocked };
   });
-  vi.doMock("@hyperframes/parsers/ff-binaries", () => ({
+  vi.doMock("@hyperframes/parsers/ff-binaries", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("@hyperframes/parsers/ff-binaries")>()),
     findFfBinary: () => ffmpegPath,
   }));
   vi.doMock("./mediaMetadata.js", () => ({
@@ -241,6 +243,54 @@ describe("resolveProxy on a long source", () => {
     expect(heard.at(-1)).toEqual({ doneSeconds: LONG_SECONDS, totalSeconds: LONG_SECONDS });
     expect(calls.at(-1)!.args).toEqual(expect.arrayContaining(["-f", "concat", "-c", "copy"]));
     expect(copiesIn(cacheDirectory)).toEqual([cachePath.split("/").at(-1)]);
+  });
+
+  it("copies only the first stretch when asked, as a copy of its own", async () => {
+    const { spawn, calls } = createSpawnSpy();
+    const { resolveProxy, getProxyCachePath, proxyWindowSeconds } = await loadModule(
+      spawn,
+      FFMPEG_PATH,
+      false,
+      null,
+      undefined,
+      LONG_SECONDS,
+    );
+    const projectDir = tmpProject();
+    const sourcePath = join(projectDir, "long.mov");
+    writeFileSync(sourcePath, "source-bytes");
+
+    const window = await proxyWindowSeconds(sourcePath, 5);
+    expect(window).toBe(PIECE_SECONDS);
+    const windowed = getProxyCachePath(projectDir, sourcePath, "h264", undefined, window);
+    expect(windowed).not.toBe(getProxyCachePath(projectDir, sourcePath));
+
+    const result = resolveProxy(projectDir, sourcePath, "h264", undefined, {
+      limitSeconds: window,
+    });
+    await flush();
+    succeed(calls[0]!);
+
+    expect(await result).toBe(windowed);
+    expect(calls).toHaveLength(1);
+    expect(
+      calls[0]!.args.slice(calls[0]!.args.indexOf("-t"), calls[0]!.args.indexOf("-t") + 2),
+    ).toEqual(["-t", String(PIECE_SECONDS)]);
+  });
+
+  it("copies the whole source when the stretch saves less than a piece", async () => {
+    const { spawn } = createSpawnSpy();
+    const { proxyWindowSeconds } = await loadModule(
+      spawn,
+      FFMPEG_PATH,
+      false,
+      null,
+      undefined,
+      LONG_SECONDS,
+    );
+    const sourcePath = join(tmpProject(), "long.mov");
+    writeFileSync(sourcePath, "source-bytes");
+
+    expect(await proxyWindowSeconds(sourcePath, LONG_SECONDS - 10)).toBeUndefined();
   });
 
   it("copies alpha pieces side by side, shares the cores out, and counts them together", async () => {
@@ -489,9 +539,10 @@ describe("resolveProxy", () => {
     const vp8 = resolveProxy(projectDir, sourcePath, "vp8");
     await flush();
     const vp8Args = calls[0]!.args;
-    expect(vp8Args.slice(vp8Args.indexOf("-i") - 2, vp8Args.indexOf("-i"))).toEqual([
+    expect(vp8Args.slice(vp8Args.indexOf("-i") - 4, vp8Args.indexOf("-i"))).toEqual([
       "-c:v",
       "libvpx-vp9",
+      ...MEDIA_INPUT_ARGS,
     ]);
     succeed(calls[0]!, "fake-vp8-bytes");
     await vp8;
@@ -546,6 +597,31 @@ describe("resolveProxy", () => {
     expect(result).toBe(cachePath);
     expect(calls).toHaveLength(0);
   });
+
+  it.skipIf(process.platform === "win32")(
+    "makes the copy again when a link stands at its name, and never returns the link's target",
+    async () => {
+      const { spawn, calls } = createSpawnSpy();
+      const { resolveProxy, getProxyCachePath } = await loadModule(spawn, FFMPEG_PATH);
+      const projectDir = tmpProject();
+      const sourcePath = join(projectDir, "video.mov");
+      writeFileSync(sourcePath, "source-bytes");
+      const outside = join(tmpProject(), "id_rsa");
+      writeFileSync(outside, "PRIVATE KEY");
+      const cachePath = getProxyCachePath(projectDir, sourcePath);
+      mkdirSync(dirname(cachePath), { recursive: true });
+      symlinkSync(outside, cachePath);
+
+      const resultPromise = resolveProxy(projectDir, sourcePath);
+      await flush();
+      expect(calls).toHaveLength(1);
+      succeed(calls[0]!);
+      const result = await resultPromise;
+
+      expect(readFileSync(result, "utf8")).toBe("fake-h264-bytes");
+      expect(readFileSync(outside, "utf8")).toBe("PRIVATE KEY");
+    },
+  );
 
   it("tone-maps HDR input before emitting browser-safe BT.709", async () => {
     const { spawn, calls } = createSpawnSpy();
@@ -793,11 +869,11 @@ describe("resolveProxy", () => {
       ]);
 
       const proxyPath = await resolveProxy(projectDir, sourcePath);
-      // Reference: the render tone map's RGB, converted with BT.709. Mean luma is ~53 there;
-      // skipping the tone map gives ~60, a BT.601 conversion ~56.
+      // Reference: the render tone map's RGB, converted with BT.709. Skipping the tone map or
+      // converting with BT.601 each moves mean luma by several levels.
       const reference = meanLuma(
         sourcePath,
-        `${hdrToSdrToneMapFilter({ colorTransfer: "arib-std-b67" }, { colorTransfer: "arib-std-b67" })},format=gbrp,scale=in_range=pc:out_color_matrix=bt709:out_range=tv,format=yuv420p,`,
+        `${hdrToSdrToneMapFilter({ colorTransfer: "arib-std-b67" }, { colorTransfer: "arib-std-b67", keyframeTransfers: ["arib-std-b67"] })},format=gbrp,scale=in_range=pc:out_color_matrix=bt709:out_range=tv,format=yuv420p,`,
       );
       expect(Math.abs(meanLuma(proxyPath) - reference)).toBeLessThan(1);
     },
@@ -1030,6 +1106,34 @@ describe("resolveProxy", () => {
     expect(existsSync(dead)).toBe(false);
     expect(existsSync(live)).toBe(true);
   });
+
+  it.skipIf(process.platform === "win32")(
+    "still makes a copy in a .transcode-cache that links outside the project, but never sweeps it",
+    async () => {
+      const { spawn, calls } = createSpawnSpy();
+      const { resolveProxies } = await loadModule(spawn, FFMPEG_PATH);
+      const projectDir = tmpProject();
+      const sourcePath = join(projectDir, "clip.mov");
+      writeFileSync(sourcePath, "source");
+      const outside = mkdtempSync(join(tmpdir(), "hf-proxy-outside-"));
+      const stale = join(
+        outside,
+        `.tmp-11111111-1111-1111-1111-111111111111-${"a".repeat(64)}.mp4`,
+      );
+      writeFileSync(stale, "someone else's file");
+      const longAgo = new Date(Date.now() - 60 * 60_000);
+      utimesSync(stale, longAgo, longAgo);
+      symlinkSync(outside, join(projectDir, ".transcode-cache"));
+
+      const batch = resolveProxies(projectDir, [{ sourcePath, variant: "h264" }]);
+      await answerUntilIdle(calls, (call) => succeed(call));
+      const [result] = await batch;
+
+      expect(result?.status).toBe("fulfilled");
+      expect(existsSync(stale)).toBe(true);
+      rmSync(outside, { recursive: true, force: true });
+    },
+  );
 
   it("settles each request of a batch on its own when one of them fails", async () => {
     const { spawn, calls } = createSpawnSpy();
@@ -1698,7 +1802,10 @@ describe("resolveProxy", () => {
       const mocked = { spawn };
       return { ...mocked, default: mocked };
     });
-    vi.doMock("@hyperframes/parsers/ff-binaries", () => ({ findFfBinary: ffmpegPath }));
+    vi.doMock("@hyperframes/parsers/ff-binaries", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@hyperframes/parsers/ff-binaries")>()),
+      findFfBinary: ffmpegPath,
+    }));
     vi.doMock("./mediaMetadata.js", () => ({
       probeMediaMetadata: () =>
         new Promise((resolveProbe) => setTimeout(resolveProbe, 5)).then(probe),
@@ -1918,6 +2025,21 @@ describe("resolveProxy", () => {
 describe("resolveStill", () => {
   const canStill = Boolean(realFfmpeg) && Boolean(findFfBinary("ffprobe"));
 
+  it("refuses a playlist named as a video without running ffmpeg", async () => {
+    const { spawn, calls } = createSpawnSpy();
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({ spawn, default: { spawn } }));
+    vi.doMock("@hyperframes/parsers/ff-binaries", () => ({ findFfBinary: () => FFMPEG_PATH }));
+    vi.doUnmock("./mediaMetadata.js");
+    const { resolveStill } = await import("./proxyTranscoder.js");
+    const projectDir = tmpProject();
+    const clip = join(projectDir, "clip.mp4");
+    writeFileSync(clip, "ffconcat version 1.0\n#\u0001\nfile seg.ts\n");
+
+    await expect(resolveStill(projectDir, clip, 1)).rejects.toThrow("not a media file");
+    expect(calls).toHaveLength(0);
+  });
+
   it.skipIf(!canStill)(
     "cuts one JPEG at the asked time and reuses it for the same tenth of a second",
     async () => {
@@ -1940,6 +2062,134 @@ describe("resolveStill", () => {
     },
     60_000,
   );
+
+  it.skipIf(!canStill)(
+    "sweeps the cache when it makes a still, so stills alone cannot grow it without bound",
+    async () => {
+      vi.resetModules();
+      vi.doUnmock("./mediaMetadata.js");
+      const { resolveStill, CACHE_DIR_NAME } = await import("./proxyTranscoder.js");
+      const projectDir = tmpProject();
+      const clip = join(projectDir, "clip.mp4");
+      execFileSync(realFfmpeg!, [
+        ...["-v", "error", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=25:d=2"],
+        ...["-c:v", "libx264", "-pix_fmt", "yuv420p", clip],
+      ]);
+      const cacheDir = join(projectDir, CACHE_DIR_NAME);
+      mkdirSync(cacheDir, { recursive: true });
+      const idle = join(cacheDir, `${"a".repeat(64)}.jpg`);
+      writeFileSync(idle, "old still");
+      const longAgo = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+      utimesSync(idle, longAgo, longAgo);
+
+      const made = await resolveStill(projectDir, clip, 1);
+
+      expect(existsSync(made)).toBe(true);
+      expect(existsSync(idle)).toBe(false);
+    },
+    60_000,
+  );
+
+  async function stillSetup() {
+    const spy = createSpawnSpy();
+    const { resolveStill } = await loadModule(spy.spawn, FFMPEG_PATH);
+    const projectDir = tmpProject();
+    const clip = join(projectDir, "clip.mp4");
+    writeFileSync(clip, "clip");
+    const ask = (signal?: AbortSignal) =>
+      resolveStill(projectDir, clip, 1, undefined, undefined, signal);
+    return { calls: spy.calls, ask };
+  }
+
+  it("ends a still's ffmpeg once the last request waiting on it leaves, and starts afresh after", async () => {
+    const { calls, ask } = await stillSetup();
+    const first = new AbortController();
+    const second = new AbortController();
+    const firstWait = ask(first.signal);
+    const secondWait = ask(second.signal);
+    await flush();
+    expect(calls).toHaveLength(1);
+
+    first.abort();
+    await expect(firstWait).rejects.toBe(first.signal.reason);
+    expect(calls[0]!.options?.signal?.aborted).toBe(false);
+    second.abort();
+    await expect(secondWait).rejects.toBe(second.signal.reason);
+    expect(calls[0]!.options?.signal?.aborted).toBe(true);
+
+    calls[0]!.proc.emit("close", null, "SIGKILL");
+    await flush();
+    const again = ask();
+    await flush();
+    expect(calls).toHaveLength(2);
+    succeed(calls[1]!);
+    await expect(again).resolves.toMatch(/\.jpg$/);
+  });
+
+  it("keeps a still's ffmpeg running while a request without a signal waits on it", async () => {
+    const { calls, ask } = await stillSetup();
+    const kept = ask();
+    const leaving = new AbortController();
+    const left = ask(leaving.signal);
+    await flush();
+    leaving.abort();
+    await expect(left).rejects.toBe(leaving.signal.reason);
+
+    expect(calls[0]!.options?.signal?.aborted).toBe(false);
+    succeed(calls[0]!);
+    await expect(kept).resolves.toMatch(/\.jpg$/);
+    expect(calls).toHaveLength(1);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "kills a still's running ffmpeg when its only request leaves",
+    async () => {
+      let child: ChildProcess | undefined;
+      const neverFinishes = (_command: string, _args: string[], options?: SpawnOptions) => {
+        child = realSpawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], options);
+        return child as unknown as FakeProc;
+      };
+      const { resolveStill } = await loadModule(neverFinishes, FFMPEG_PATH);
+      const projectDir = tmpProject();
+      const clip = join(projectDir, "clip.mp4");
+      writeFileSync(clip, "clip");
+      const leaving = new AbortController();
+      const left = resolveStill(projectDir, clip, 1, undefined, undefined, leaving.signal);
+      await flush();
+      leaving.abort();
+      await expect(left).rejects.toBe(leaving.signal.reason);
+
+      const [, exitSignal] = child!.exitCode === null ? await once(child!, "exit") : [];
+      expect(exitSignal).toBe("SIGKILL");
+    },
+  );
+
+  it("starts no ffmpeg for a still past the end of the source", async () => {
+    const spy = createSpawnSpy();
+    const { resolveStill, StillPastEndError } = await loadModule(
+      spy.spawn,
+      FFMPEG_PATH,
+      false,
+      null,
+      undefined,
+      2,
+    );
+    const projectDir = tmpProject();
+    const clip = join(projectDir, "clip.mp4");
+    writeFileSync(clip, "clip");
+
+    await expect(resolveStill(projectDir, clip, 2.5)).rejects.toBeInstanceOf(StillPastEndError);
+    expect(spy.calls).toHaveLength(0);
+  });
+
+  it("starts no ffmpeg for a request that already left", async () => {
+    const { calls, ask } = await stillSetup();
+    const gone = new AbortController();
+    gone.abort();
+    await expect(ask(gone.signal)).rejects.toBe(gone.signal.reason);
+    await flush();
+    expect(calls).toHaveLength(0);
+  });
 });
 
 describe("sourceFolderKind", () => {

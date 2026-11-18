@@ -35,6 +35,7 @@ import {
 } from "./compositionScoping";
 import {
   namespaceCollidingSvgIds,
+  sceneClipRoots,
   rewriteSvgIdReferencesInCss,
   type SvgIdScope,
 } from "./svgIdNamespacing";
@@ -48,6 +49,7 @@ import {
   extractedCompositionAssets,
 } from "./compositionAssembly";
 import { SCENE_NO_SWAP_ATTR, SCENE_PART_ATTR } from "../sceneParts";
+import { terminalText } from "../terminalText";
 
 // Anything a scene script can leave running, pending or registered outside its timeline, or that
 // throws when run again: only the timeline is torn down when a scene is swapped, so when unsure, refuse.
@@ -224,8 +226,8 @@ export interface InlineSubCompositionsOptions {
 
   /**
    * Identity map produced by `assignBundledRuntimeCompositionIds`.
-   * When provided, authoredCompositionId and runtimeCompositionId are read
-   * from this map instead of from the host element's attributes directly.
+   * When provided, a host's ids are read from this map; a host it lacks (one
+   * inside a scene) is read from its own attributes, as without a map.
    * The bundler uses this; the producer can omit it.
    */
   hostIdentityMap?: Map<
@@ -432,6 +434,7 @@ export function inlineSubCompositions(
   const scopeCssToComposition = createCompositionCssScoper();
 
   const sceneHosts = new Map<string, Element>();
+
   const queue = hosts.map((element) => ({
     element,
     ancestry: [] as string[],
@@ -471,10 +474,10 @@ export function inlineSubCompositions(
     // Determine composition IDs
     let compId: string | null;
     let runtimeCompId: string;
-    if (hostIdentityMap) {
-      const identity = hostIdentityMap.get(hostEl);
-      compId = identity?.authoredCompositionId || null;
-      runtimeCompId = identity?.runtimeCompositionId || compId || "";
+    const identity = hostIdentityMap?.get(hostEl);
+    if (identity) {
+      compId = identity.authoredCompositionId || null;
+      runtimeCompId = identity.runtimeCompositionId || compId || "";
     } else {
       compId = hostEl.getAttribute("data-composition-id") || null;
       runtimeCompId = compId || "";
@@ -524,14 +527,26 @@ export function inlineSubCompositions(
     // document element (full-document sub-comps) AND the inner composition root
     // (template/fragment sub-comps store their schema on the root div, not a
     // synthetic <html>), then let per-instance host values override.
-    if (readVariableDefaults && parseHostVariables && runtimeCompId) {
+    //
+    // An anonymous host has no runtime id of its own. Its wrapper keeps the
+    // authored composition id (restored below), so that id is the scope its
+    // bound media and scripts resolve variables through (runtime/variableScope.ts)
+    // and the key the producer's probe gate reads — a full-document sub-comp's
+    // `<html data-composition-variables>` is dropped by inlining, so the table
+    // is the only place its declared defaults survive to compile time (#7505).
+    // A named mount of the same file shares that scope and its explicit
+    // instance values win, so an anonymous mount only fills the entry while
+    // nothing holds it; a named mount processed later still overwrites it.
+    const variablesCompId = runtimeCompId || scopeCompId;
+    if (readVariableDefaults && parseHostVariables && variablesCompId) {
       const mergedVariables: Record<string, unknown> = {};
       for (const carrier of plan.variableDefaultCarriers) {
         Object.assign(mergedVariables, readVariableDefaults(carrier));
       }
       Object.assign(mergedVariables, parseHostVariables(hostEl));
-      if (Object.keys(mergedVariables).length > 0) {
-        variablesByComp[runtimeCompId] = mergedVariables;
+      const holdsEntry = !runtimeCompId && Object.hasOwn(variablesByComp, variablesCompId);
+      if (Object.keys(mergedVariables).length > 0 && !holdsEntry) {
+        variablesByComp[variablesCompId] = mergedVariables;
       }
       // Compile time is the only place this defect is visible on the sub-comp
       // path: the instance value is baked into `__hfVariablesByComp` right
@@ -539,8 +554,8 @@ export function inlineSubCompositions(
       // runtime's identical guard never runs. Same helper, so the message and
       // the per-process dedupe set are shared with the runtime path and the
       // author sees one warning either way.
-      warnUnknownEnumValues(compDoc.documentElement, mergedVariables, runtimeCompId);
-      warnUnknownEnumValues(innerRoot, mergedVariables, runtimeCompId);
+      warnUnknownEnumValues(compDoc.documentElement, mergedVariables, variablesCompId);
+      warnUnknownEnumValues(innerRoot, mergedVariables, variablesCompId);
     }
 
     // `<head>` <link>/<script src> are hoisted into the ROOT document, so they
@@ -624,7 +639,10 @@ export function inlineSubCompositions(
           return authored.endsWith("/") && !urlLike.endsWith("/") ? `${urlLike}/` : urlLike;
         });
         if (map) importMaps.push(map);
-        else console.warn(`[HyperFrames] ${src}: import map is not valid JSON, so it is skipped.`);
+        else
+          console.warn(
+            terminalText(`[HyperFrames] ${src}: import map is not valid JSON, so it is skipped.`),
+          );
       } else if (type === "module" && !externalSrc) {
         const prelude = scriptCompositionId
           ? scopedModulePrelude(runtimeCompId || scopeCompId || scriptCompositionId, src)
@@ -778,6 +796,8 @@ export function inlineSubCompositions(
   // `<style>` text gets the same substitution its DOM just received. See
   // svgIdNamespacing.ts for why this is a rename, unlike the sibling
   // getElementById/media-id fixes.
+  const hostRoots = svgIdScopes.map(({ root }) => root);
+  const clips = sceneClipRoots(document, hostRoots);
   const svgIdMaps = namespaceCollidingSvgIds(document, [
     ...svgIdScopes.map(({ root, namespace, exclude, styleStart, styleEnd }) => ({
       root,
@@ -789,9 +809,14 @@ export function inlineSubCompositions(
       root: document.documentElement,
       namespace: "",
       referenceTarget: "document",
-      exclude: svgIdScopes.map(({ root }) => root),
+      exclude: [...hostRoots, ...clips],
       cssTexts: rootStyles.map((style) => style.textContent ?? ""),
     },
+    ...clips.map((root, index) => ({
+      root,
+      namespace: `clip-${index}`,
+      exclude: hostRoots.filter((host) => root.contains(host)),
+    })),
   ]);
   svgIdMaps.slice(0, svgIdScopes.length).forEach((idMap, index) => {
     const { styleStart, styleEnd } = svgIdScopes[index]!;

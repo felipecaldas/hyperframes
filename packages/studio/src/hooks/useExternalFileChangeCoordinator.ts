@@ -1,3 +1,4 @@
+import { announceExternalFileChange } from "./fileChangeFanout";
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import {
   mergeFileChangePayloads,
@@ -261,7 +262,7 @@ export function useExternalFileChangeCoordinator({
     return () => {
       cancelled = true;
     };
-  }, [loadConflictSnapshot, projectId, recoveryFilePath, setBlocked]);
+  }, [loadConflictSnapshot, projectId, activeCompPath, recoveryFilePath, setBlocked]);
 
   // What a settled change owes: thumbnails (unless its own write's echo brings them), then reloads.
   const deliverOwed = useCallback(
@@ -492,21 +493,20 @@ export function useExternalFileChangeCoordinator({
   // it is rebuilt often, and each rebuild used to tear down the EventSource and
   // open a new one, which against a dead session is a fresh 404 every time
   // (TAB-798).
-  const changeHandlerRef = useRef(processChange);
-
+  const processChangeRef = useRef(processChange);
+  processChangeRef.current = processChange;
   useEffect(() => {
-    changeHandlerRef.current = processChange;
-  }, [processChange]);
-
-  useEffect(() => {
+    // One decoder for all three transports; the rungs only choose the channel.
     // A local agent run writes the project files itself, so every one of its
     // writes arrives here as an external change. Reloading mid-run would
     // clobber the run's own in-flight edits, so suppress while it is active
     // (and for the short grace window after it finishes) — the agent drawer
     // refreshes the preview once, on completion.
-    const handler = (payload?: unknown) => {
+    const handler = (delivery?: unknown) => {
       if (shouldSuppressAgentRefresh()) return;
-      return changeHandlerRef.current(decodeFileChange(payload));
+      const payload = decodeFileChange(delivery);
+      announceExternalFileChange(payload);
+      processChangeRef.current(payload);
     };
     const adapter = testHotAdapter();
     if (adapter) {
@@ -519,7 +519,7 @@ export function useExternalFileChangeCoordinator({
     }
     const catchUp = () => {
       if (shouldSuppressAgentRefresh()) return;
-      return changeHandlerRef.current({ path: "." });
+      return processChangeRef.current({ path: "." });
     };
     return sseFileChangeChannel(handler, catchUp);
   }, []);

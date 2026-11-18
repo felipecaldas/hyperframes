@@ -3367,6 +3367,34 @@ describe("HyperframesPlayer video mode", () => {
     expect(withControls.duration).toBe(0);
   });
 
+  it.each([null, ""])("unloads a playing video when src is cleared to %s", (src) => {
+    const withControls = createPlayer({ type: "video/mp4", src: FILM, controls: "" });
+    const video = videoOf(withControls);
+    loadMetadata(video);
+    withControls.seek(3);
+    withControls.play();
+
+    if (src === null) withControls.removeAttribute("src");
+    else withControls.setAttribute("src", src);
+
+    expect(video.getAttribute("src")).toBeNull();
+    expect(HTMLMediaElement.prototype.load).toHaveBeenCalledOnce();
+    expect(withControls.ready).toBe(false);
+    expect(withControls.paused).toBe(true);
+    expect(withControls.currentTime).toBe(0);
+    expect(withControls.duration).toBe(0);
+    expect(withControls.shadowRoot?.textContent).toContain("0:00 / 0:00");
+    expect(withControls.shadowRoot?.querySelector('[aria-label="Play"]')).not.toBeNull();
+
+    withControls.setAttribute("src", FILM);
+    loadMetadata(video);
+    withControls.play();
+
+    expect(withControls.ready).toBe(true);
+    expect(withControls.paused).toBe(false);
+    expect(video.getAttribute("src")).toBe(FILM);
+  });
+
   it("shows a playback rate configured before controls are created", () => {
     player = createPlayer({ type: "video/mp4", src: FILM, "playback-rate": "2", controls: "" });
 
@@ -3539,6 +3567,67 @@ describe("HyperframesPlayer click-to-play", () => {
   });
 });
 
+describe("HyperframesPlayer fullscreen", () => {
+  type FullscreenPlayer = HTMLElement & {
+    play: () => void;
+    disableFullscreen: boolean;
+  };
+
+  let player: FullscreenPlayer;
+
+  function fullscreenButton(): HTMLButtonElement {
+    const button = player.shadowRoot?.querySelector<HTMLButtonElement>(".hfp-fullscreen-btn");
+    if (!button) throw new Error("no fullscreen button");
+    return button;
+  }
+
+  beforeEach(async () => {
+    await import("./hyperframes-player.js");
+    Object.defineProperty(document, "fullscreenEnabled", { configurable: true, value: true });
+    player = document.createElement("hyperframes-player") as FullscreenPlayer;
+    player.setAttribute("controls", "");
+    document.body.appendChild(player);
+  });
+
+  afterEach(() => {
+    player.remove();
+    Reflect.deleteProperty(document, "fullscreenEnabled");
+    vi.restoreAllMocks();
+  });
+
+  it("disableFullscreen property toggles the disable-fullscreen attribute", () => {
+    player.disableFullscreen = true;
+    expect(player.hasAttribute("disable-fullscreen")).toBe(true);
+
+    player.disableFullscreen = false;
+    expect(player.hasAttribute("disable-fullscreen")).toBe(false);
+  });
+
+  it("fullscreens the player element, and the click does not play", () => {
+    const requestFullscreen = vi.fn(async () => {});
+    player.requestFullscreen = requestFullscreen;
+    const play = vi.spyOn(player, "play").mockImplementation(() => undefined);
+
+    fullscreenButton().click();
+
+    expect(requestFullscreen).toHaveBeenCalledTimes(1);
+    expect(requestFullscreen.mock.contexts[0]).toBe(player);
+    expect(play).not.toHaveBeenCalled();
+  });
+
+  it("disable-fullscreen hides the button", () => {
+    expect(getComputedStyle(fullscreenButton()).display).not.toBe("none");
+
+    player.remove();
+    player = document.createElement("hyperframes-player") as FullscreenPlayer;
+    player.setAttribute("controls", "");
+    player.setAttribute("disable-fullscreen", "");
+    document.body.appendChild(player);
+
+    expect(getComputedStyle(fullscreenButton()).display).toBe("none");
+  });
+});
+
 describe("HyperframesPlayer retained runtime data", () => {
   interface RuntimeDataPlayer extends HTMLElement {
     iframeElement: HTMLIFrameElement;
@@ -3645,7 +3734,10 @@ describe("HyperframesPlayer retained runtime data", () => {
     expect(player.iframeElement.sandbox.contains("allow-scripts")).toBe(true);
     expect(player.iframeElement.sandbox.contains("allow-same-origin")).toBe(true);
     expect(player.iframeElement.sandbox.contains("allow-top-navigation")).toBe(false);
-    expect(player.iframeElement.referrerPolicy).toBe("no-referrer");
+  });
+
+  it("sends its host page's URL only to a composition on the same origin", () => {
+    expect(player.iframeElement.referrerPolicy).toBe("same-origin");
   });
 
   it("supports an opaque-origin sandbox for hosts that do not need direct iframe DOM access", () => {

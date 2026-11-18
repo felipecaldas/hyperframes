@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { usePlayerStore } from "../player";
 import type { TimelineElement } from "../player";
 import type { DomEditSelection } from "../components/editor/domEditing";
-import { isTypingKeyEvent } from "../utils/typingTarget";
+import { isTypingKeyEvent } from "@hyperframes/core/typing-target";
 import { dispatchLinkShortcut, type LinkShortcutCallbacks } from "./linkShortcuts";
 import { useCaptionStore } from "../captions/store";
 import {

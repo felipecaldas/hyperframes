@@ -2,7 +2,6 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -10,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
+import { createStagingDir } from "@hyperframes/core/atomic-file";
 import { dirname, join, resolve } from "node:path";
 import type { ResolvedProject, StudioApiAdapter } from "../types.js";
 import { introducedErrors, lintProject, type LintFinding } from "../helpers/projectLint.js";
@@ -601,7 +601,7 @@ export class AgentRuntime {
     const thread = this.prepareThread(job);
     const stagingRoot = join(agentStateRoot(), projectKey(job.project.dir), "staging");
     mkdirSync(stagingRoot, { recursive: true });
-    const stagingDir = mkdtempSync(join(stagingRoot, `${job.id}-`));
+    const stagingDir = createStagingDir(stagingRoot, `${job.id}-`);
     let failure: string | null = null;
     let assistantText = "";
     const timeouts = this.createTimeouts(job);

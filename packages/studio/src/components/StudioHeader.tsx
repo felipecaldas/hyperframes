@@ -1,4 +1,5 @@
 import { memo, useContext, useState, type MouseEvent } from "react";
+import { QuickShare } from "./share/QuickShare";
 import { Camera } from "../icons/SystemIcons";
 import { useStudioShellContext } from "../contexts/StudioContext";
 import { usePanelLayoutContext } from "../contexts/PanelLayoutContext";
@@ -23,6 +24,7 @@ interface StudioHeaderProps {
   inspectorButtonActive: boolean;
   inspectorPanelActive: boolean;
   onExport?: () => void;
+  beforeShare?: () => Promise<void>;
 }
 
 /**
@@ -84,6 +86,7 @@ export const StudioHeader = memo(function StudioHeader({
   inspectorButtonActive,
   inspectorPanelActive,
   onExport,
+  beforeShare,
 }: StudioHeaderProps) {
   const showThemeToggle = useContext(ShowThemeToggle);
   const { projectId, renderQueue } = useStudioShellContext();
@@ -216,6 +219,7 @@ export const StudioHeader = memo(function StudioHeader({
         {showThemeToggle && <ThemeToggle />}
         <Dock.WindowMenu />
         <OpenInDesktopButton />
+        <QuickShare beforeShare={beforeShare} />
         <Tooltip
           label={
             ffmpegMissing
