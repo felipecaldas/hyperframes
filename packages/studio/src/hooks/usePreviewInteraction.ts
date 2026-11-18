@@ -3,7 +3,10 @@ import { useCallback, useRef } from "react";
 import { liveTime, usePlayerStore } from "../player";
 import { pauseStudioPreviewPlayback } from "../utils/studioPreviewHelpers";
 import { type DomEditSelection } from "../components/editor/domEditing";
-import { isAtomicCapture } from "../components/editor/domEditingGroups";
+import {
+  selectionDataAttribute,
+  selectionIsAtomicCapture,
+} from "../components/editor/previewSelection";
 import type { ApplyDomSelectionOptions, ResolveDomSelectionOptions } from "./useDomSelection";
 import { trackStudioEvent } from "../utils/studioTelemetry";
 
@@ -74,6 +77,7 @@ export function usePreviewInteraction({
 }: UsePreviewInteractionParams) {
   const cycleRef = useRef<ClickCycleState | null>(null);
   const lastDownRef = useRef<{ t: number; x: number; y: number } | null>(null);
+  const hoverSeqRef = useRef(0);
 
   const pausePreviewPlayback = useCallback(() => {
     const pausedTime = pauseStudioPreviewPlayback(previewIframeRef.current);
@@ -120,7 +124,7 @@ export function usePreviewInteraction({
           cycle.candidates.length > 1 &&
           Math.hypot(e.clientX - cycle.x, e.clientY - cycle.y) < CYCLE_RADIUS_PX &&
           downTs - cycle.at < CYCLE_WINDOW_MS;
-        if (hit && isAtomicCapture(hit.element)) {
+        if (hit && selectionIsAtomicCapture(hit)) {
           e.preventDefault();
           e.stopPropagation();
           cycleRef.current = null;
@@ -135,8 +139,8 @@ export function usePreviewInteraction({
         if (
           hit &&
           !hasStackCycleAtSpot &&
-          !hit.element.hasAttribute("data-composition-src") &&
-          !hit.element.hasAttribute("data-composition-file")
+          selectionDataAttribute(hit, "data-composition-src") === null &&
+          selectionDataAttribute(hit, "data-composition-file") === null
         ) {
           e.preventDefault();
           e.stopPropagation();
@@ -191,7 +195,7 @@ export function usePreviewInteraction({
         preferClipAncestor: options?.preferClipAncestor ?? false,
       });
       // A null result while drilled into a group means the click landed OUTSIDE that
-      // group (resolveGroupCapture → out-of-scope). Drill-in isn't sticky: exit it and
+      // group (selectionTargetIndex: out of scope). Drill-in isn't sticky: exit it and
       // re-resolve at the top level so this click selects whatever's there (or the
       // group as a unit). Without this, a stale drill-in keeps selecting children and
       // the "first click selects the group" expectation breaks.
@@ -238,6 +242,7 @@ export function usePreviewInteraction({
   const handlePreviewCanvasPointerMove = useCallback(
     // fallow-ignore-next-line complexity
     async (e: React.PointerEvent<HTMLDivElement>, options?: { preferClipAncestor?: boolean }) => {
+      const seq = ++hoverSeqRef.current;
       if (captionEditMode || compositionLoading) {
         updateDomEditHoverSelection(null);
         return null;
@@ -247,7 +252,7 @@ export function usePreviewInteraction({
         preferClipAncestor: options?.preferClipAncestor ?? false,
         skipSourceProbe: true,
       });
-      updateDomEditHoverSelection(nextSelection);
+      if (seq === hoverSeqRef.current) updateDomEditHoverSelection(nextSelection);
       return nextSelection;
     },
     [
@@ -259,6 +264,7 @@ export function usePreviewInteraction({
   );
 
   const handlePreviewCanvasPointerLeave = useCallback(() => {
+    hoverSeqRef.current += 1;
     updateDomEditHoverSelection(null);
   }, [updateDomEditHoverSelection]);
 

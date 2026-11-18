@@ -1,4 +1,5 @@
 import { launchManagedBrowser, resolveManagedGpuMode } from "../browser/launch.js";
+import { launchWithPageNetwork } from "../browser/pageNetwork.js";
 // Onion-skin motion screenshot: seek the LIVE timeline at N equal-time steps and
 // project the REAL element at each step, so an agent can SELF-VERIFY motion (the
 // rendered result — every channel: position, rotation, scale, opacity, colour),
@@ -11,7 +12,8 @@ import { launchManagedBrowser, resolveManagedGpuMode } from "../browser/launch.j
 // exactly what it's editing. All geometry + SVG live in ./motionShotLayout.ts
 // (pure, tested); this file only drives the browser and SAMPLES.
 
-import { mkdirSync, statSync, writeFileSync } from "node:fs";
+import { statSync, writeFileSync } from "node:fs";
+import { makeOutputFolder } from "../utils/outputFolder.js";
 import { dirname, resolve } from "node:path";
 import { pageNavigationTimeoutMs } from "../utils/renderArgs.js";
 import { gotoWhenSent } from "../capture/navigateForCapture.js";
@@ -59,7 +61,7 @@ export function ensureShotOutputDir(outPath: string, sourcePath?: string): void 
       `--shot output must not overwrite the composition source: ${sourcePath}. Choose a separate .png path.`,
     );
   }
-  mkdirSync(dirname(outPath), { recursive: true });
+  makeOutputFolder(dirname(outPath));
 }
 
 /** Returned by the in-browser selector resolver: which animated selectors a
@@ -419,11 +421,17 @@ async function openCompositionPage(
   const resolvedGpuMode = await resolveManagedGpuMode(requestedGpuMode, executablePath);
   const requiresWebGpu = compositionRequiresWebGpu(html);
   const { gpuConfig, softwareWebGpu } = resolveLocalWebGpu(resolvedGpuMode, requiresWebGpu);
-  const browser = await launchManagedBrowser(puppeteer.default, {
-    headless: true,
-    executablePath,
-    args: buildChromeArgs({ ...size, captureMode: "screenshot", requiresWebGpu }, gpuConfig),
-  });
+  const browser = await launchWithPageNetwork(url, (network) =>
+    launchManagedBrowser(puppeteer.default, {
+      headless: true,
+      executablePath,
+      userDataDir: network.userDataDir,
+      args: [
+        ...buildChromeArgs({ ...size, captureMode: "screenshot", requiresWebGpu }, gpuConfig),
+        ...network.args,
+      ],
+    }),
+  );
   try {
     const page = await browser.newPage();
     await page.setViewport(size);

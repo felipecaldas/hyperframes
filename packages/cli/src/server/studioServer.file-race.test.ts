@@ -257,6 +257,8 @@ describe("Studio bundle file reads", () => {
     const text = await response.text();
     expect(text).toContain("Studio");
     expect(text).toContain('"VITE_STUDIO_STATIC_TEST":"runtime-value"');
+    // Tabario fork (TAB-1337): local sharing is off unless HYPERFRAMES_LOCAL_SHARE=1.
+    expect(text).not.toContain('<meta name="hyperframes-local-share"');
     expectClosed();
   });
 

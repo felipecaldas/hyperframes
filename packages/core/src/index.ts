@@ -1,5 +1,5 @@
 // Types
-export type { RuntimeTimelineClipIdentity } from "./runtime/types.js";
+export type { PlaybackHeldBy, RuntimeTimelineClipIdentity } from "./runtime/types.js";
 export type {
   ExecutionMode,
   Orientation,
@@ -280,7 +280,12 @@ export { bakeHfColorGradingCube, type BakeHfColorGradingCubeOptions } from "./co
 export {
   firstFrameColourArgs,
   hdrToSdrToneMapFilter,
+  keyframeTransferArgs,
+  parseKeyframeTransfers,
+  readsKeyframeTransfers,
+  toneMapReferenceNits,
   parseFirstFrameColour,
+  type ToneMapFrameColour,
   type ToneMapSourceColour,
 } from "./hdrToneMap";
 export {
@@ -303,6 +308,11 @@ export {
   type PreviewQuality,
   type PreviewSourceFacts,
 } from "./previewProxyBox";
+export type {
+  PausedVideoFrameProvider,
+  PausedVideoFrameRequest,
+  PausedVideoFrame,
+} from "./runtime/pausedVideoFrames";
 
 // Inline scripts
 export {
@@ -345,7 +355,7 @@ export {
   realProjectRoot,
   resolveWithinProject,
 } from "./safePath";
-export { isHyperframesProject, PROJECT_MARKER_FILES } from "./projectRule";
+export { isCompositionFolder, isHyperframesProject, PROJECT_MARKER_FILES } from "./projectRule";
 export type {
   HyperframePickerApi,
   HyperframePickerBoundingBox,
@@ -392,7 +402,12 @@ export {
 // (verify:packed-manifests catches exactly that).
 export { createRuntimeStartTimeResolver } from "./runtime/startResolver.js";
 // Also exposed via the ./runtime/clip-window subpath; re-exported here for the same dist-emit reason.
-export { hasClipStarted, isClipVisibleAt, isInClipWindow } from "./runtime/clipWindow.js";
+export {
+  hasClipStarted,
+  isClipOnScreenAt,
+  isClipVisibleAt,
+  isInClipWindow,
+} from "./runtime/clipWindow.js";
 export { MEDIA_ELEMENT_LEAD_SECONDS, mediaElementTime } from "./runtime/mediaClock.js";
 export {
   normalizePlaybackRate,
@@ -475,3 +490,9 @@ export {
   PAGE_MOTION_BLUR_OFF_GLOBAL,
   acceleratedCanvasTrackerSource,
 } from "./pageMotionBlur.js";
+export {
+  MOTION_BLUR_FINGERPRINT_FIELDS,
+  type MotionBlurFingerprint,
+  type MotionBlurFingerprintField,
+} from "./motionBlurFingerprint.js";
+export { terminalLines, terminalText, terminalTextDeep } from "./terminalText.js";

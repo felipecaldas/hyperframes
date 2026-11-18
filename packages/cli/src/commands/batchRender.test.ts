@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import type { ReferenceBackground } from "@hyperframes/producer";
 import {
   BatchRenderInputError,
   parseBatchRows,
@@ -123,6 +124,106 @@ describe("prepareBatchRender", () => {
       resolve(outDir, "Bob.mp4"),
     ]);
     expect(prepared.manifestPath).toBe(resolve(outDir, "manifest.json"));
+  });
+
+  it("keeps row values that name subfolders inside the --output folder", () => {
+    const batchPath = writeJson("rows.json", '[{"name":"eu/acme"},{"name":"x/../northstar"}]');
+    const outDir = join(tmpDir, "renders");
+    const prepared = prepareBatchRender({
+      batchPath,
+      outputTemplate: join(outDir, "{name}.mp4"),
+      indexPath: writeIndex(),
+      strictVariables: false,
+      quiet: true,
+      json: false,
+    });
+
+    expect(prepared.rows.map((row) => row.outputPath)).toEqual([
+      resolve(outDir, "eu", "acme.mp4"),
+      resolve(outDir, "northstar.mp4"),
+    ]);
+  });
+
+  it.each([
+    { template: join("renders", "{name}.mp4"), name: "../escaped" },
+    { template: join("renders", "v{name}.mp4"), name: "/../../escaped" },
+  ])("refuses a row value that leaves the folder of $template", ({ template, name }) => {
+    const batchPath = writeJson("rows.json", JSON.stringify([{ name }]));
+    const error = expectBatchError(
+      () =>
+        prepareBatchRender({
+          batchPath,
+          outputTemplate: join(tmpDir, template),
+          indexPath: writeIndex(),
+          strictVariables: false,
+          quiet: true,
+          json: false,
+        }),
+      "Batch output outside --output folder",
+    );
+    expect(error.message).toMatch(/Row 0 resolves to/);
+  });
+
+  it.each(["{name}.mp4", join("{name}", "out.mp4")])(
+    "refuses a row value that leaves the working folder when %s starts with a placeholder",
+    (template) => {
+      const batchPath = writeJson("rows.json", JSON.stringify([{ name: "../escaped" }]));
+      const error = expectBatchError(
+        () =>
+          prepareBatchRender({
+            batchPath,
+            outputTemplate: template,
+            indexPath: writeIndex(),
+            strictVariables: false,
+            quiet: true,
+            json: false,
+          }),
+        "Batch output outside --output folder",
+      );
+      expect(error.message).toMatch(/Row 0 resolves to/);
+    },
+  );
+
+  it("keeps a template that starts with a placeholder inside the working folder", () => {
+    const batchPath = writeJson("rows.json", '[{"name":"acme"}]');
+    const prepared = prepareBatchRender({
+      batchPath,
+      outputTemplate: join("{index}", "{name}.mp4"),
+      indexPath: writeIndex(),
+      strictVariables: false,
+      quiet: true,
+      json: false,
+    });
+
+    expect(prepared.rows.map((row) => row.outputPath)).toEqual([resolve("0", "acme.mp4")]);
+  });
+
+  it("keeps a backslash in a row value or file name on every platform", () => {
+    const batchPath = writeJson("rows.json", '[{"name":"a\\\\b"}]');
+    const outDir = join(tmpDir, "renders\\");
+    const prepared = prepareBatchRender({
+      batchPath,
+      outputTemplate: `${outDir}{name}.mp4`,
+      indexPath: writeIndex(),
+      strictVariables: false,
+      quiet: true,
+      json: false,
+    });
+    expect(prepared.rows[0]?.outputPath).toBe(resolve(`${outDir}a\\b.mp4`));
+  });
+
+  it("lets the rows name the whole path when the template is a bare {path}", () => {
+    const elsewhere = join(tmpDir, "elsewhere", "launch.mp4");
+    const batchPath = writeJson("rows.json", JSON.stringify([{ path: elsewhere }]));
+    const prepared = prepareBatchRender({
+      batchPath,
+      outputTemplate: "{path}",
+      indexPath: writeIndex(),
+      strictVariables: false,
+      quiet: true,
+      json: false,
+    });
+    expect(prepared.rows[0]?.outputPath).toBe(resolve(elsewhere));
   });
 
   it("rejects output collisions before rendering", () => {
@@ -264,6 +365,45 @@ describe("runBatchRender", () => {
       error: null,
     });
     expect(readFileSync(prepared.manifestPath, "utf8")).toContain('"status": "completed"');
+  });
+
+  it("copies each row's reference background into the manifest and leaves a failed row null", async () => {
+    const references: ReferenceBackground[] = [
+      { kind: "solid", rgb: [12, 34, 56] },
+      { kind: "none" },
+      { kind: "unsupported_non_solid" },
+      { kind: "unknown" },
+    ];
+    const prepared = prepareBatchRender({
+      batchPath: writeJson(
+        "rows.json",
+        JSON.stringify([...references.map((_, id) => ({ name: `row${id}` })), { name: "bad" }]),
+      ),
+      outputTemplate: join(tmpDir, "renders/{name}.mp4"),
+      indexPath: writeIndex(),
+      strictVariables: false,
+      quiet: true,
+      json: false,
+    });
+
+    const manifest = await runBatchRender({
+      prepared,
+      concurrency: 1,
+      failFast: false,
+      quiet: true,
+      json: false,
+      renderOne: async (row) => {
+        const reference = references[row.index];
+        if (!reference) throw new Error("render failed");
+        return { renderTimeMs: 10, reference_background: reference };
+      },
+    });
+
+    expect(manifest.rows.map((row) => row.reference_background)).toEqual([...references, null]);
+    const written = JSON.parse(readFileSync(prepared.manifestPath, "utf8")) as {
+      rows: Array<{ reference_background: unknown }>;
+    };
+    expect(written.rows.map((row) => row.reference_background)).toEqual([...references, null]);
   });
 
   it("emits exactly one final JSON document when json mode is enabled", async () => {

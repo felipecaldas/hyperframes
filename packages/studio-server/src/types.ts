@@ -26,7 +26,7 @@ export interface RenderJobState {
    * stop an in-flight render; adapters that can't abort may omit it (the
    * route still marks the job cancelled so the SSE stream terminates).
    */
-  cancel?: () => void;
+  cancel?: () => void | Promise<void>;
 }
 
 export interface MediaProcessingJobState {
@@ -176,7 +176,7 @@ export interface StudioApiAdapter {
   /** Bundle a project directory into a single HTML string, forwarding `options` over the host's own. */
   bundle(
     projectDir: string,
-    options?: Pick<BundleOptions, "stampHfIds" | "onRead">,
+    options?: Pick<BundleOptions, "stampHfIds" | "onRead" | "privateFiles">,
   ): Promise<string | null>;
 
   /** Optional: a cached `createProjectSignature(dir)`; preview caching checks builds against it. */
@@ -196,7 +196,10 @@ export interface StudioApiAdapter {
    * adapters provide this; the single-file method remains as a compatibility
    * fallback for third-party adapters compiled against older releases.
    */
-  lintProject?: (projectDir: string) => Promise<ProjectLintResult> | ProjectLintResult;
+  lintProject?: (
+    projectDir: string,
+    signal?: AbortSignal,
+  ) => Promise<ProjectLintResult> | ProjectLintResult;
 
   /** URL to the hyperframe runtime JS (injected into preview HTML). */
   runtimeUrl: string;
@@ -242,6 +245,7 @@ export interface StudioApiAdapter {
     videoFrameFormat?: "auto" | "jpg" | "png";
     hdrMode?: "auto" | "force-hdr" | "force-sdr";
     proresProfile?: "4444" | "hq" | "422" | "lt" | "proxy";
+    chromaSubsampling?: "420" | "444";
     jobId: string;
     /**
      * The triggering browser profile has telemetry disabled (localStorage
@@ -286,6 +290,8 @@ export interface StudioApiAdapter {
     device?: "auto" | "cpu" | "coreml" | "cuda";
     jobId: string;
   }) => MediaProcessingJobState;
+
+  serverOrigin?: () => string | undefined;
 
   /** Optional: generate a thumbnail at the route's explicit output dimensions. */
   generateThumbnail?: (opts: {

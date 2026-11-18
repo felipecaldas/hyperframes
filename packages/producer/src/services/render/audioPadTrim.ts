@@ -20,7 +20,6 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdtempSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   DEFAULT_CONFIG,
@@ -35,9 +34,11 @@ import {
   trackChildProcess,
   type AudioMetadata,
   type RunFfmpegResult,
+  withPublicOnlyProxy,
 } from "@hyperframes/engine";
 import { redactKnownPaths, redactTelemetryString } from "@hyperframes/core";
 import { measureTruePeakDbfs } from "./audioTruePeak.js";
+import { createStagingDir } from "@hyperframes/core/atomic-file";
 
 /**
  * Tolerance used to decide whether an audio file is already short enough to
@@ -81,6 +82,8 @@ export interface PadTrimAudioInput {
   audioPath: string;
   /** Path the helper writes the duration-corrected audio to. */
   outputPath: string;
+  /** The PCM `audioPath` was encoded from: a pad, trim or peak correction encodes it instead of decoding the AAC. */
+  sourcePath?: string;
   signal?: AbortSignal;
   /** Deadline for each ffmpeg process; defaults to the engine's `ffmpegProcessTimeout`. */
   timeoutMs?: number;
@@ -141,10 +144,15 @@ export interface PadTrimAudioPlan {
 // Tabario fork: limit peaks instead of upstream's whole-mix attenuation, which
 // turns the entire mix down by its worst spike. Auto-level would undo the
 // ceiling. Latency compensation keeps the limiter's lookahead from shifting
-// narration; apad/atrim then hold the result at exactly the target duration.
-function aacTruePeakCorrectionFilter(targetDurationSeconds: number, limiterCeilingDb: number) {
+// narration.
+function aacTruePeakLimiter(limiterCeilingDb: number) {
   const limit = Math.max(0.0625, 10 ** (limiterCeilingDb / 20)).toFixed(9);
-  return `alimiter=limit=${limit}:level=false:latency=true,apad,atrim=0:${formatSeconds(targetDurationSeconds)}`;
+  return `alimiter=limit=${limit}:level=false:latency=true`;
+}
+
+// apad/atrim hold the limited result at exactly the target duration.
+function aacTruePeakCorrectionFilter(targetDurationSeconds: number, limiterCeilingDb: number) {
+  return `${aacTruePeakLimiter(limiterCeilingDb)},apad,atrim=0:${formatSeconds(targetDurationSeconds)}`;
 }
 
 /**
@@ -243,7 +251,7 @@ export async function padOrTrimAudioToVideoFrameCount(
   const timeoutMs = input.timeoutMs ?? DEFAULT_CONFIG.ffmpegProcessTimeout;
   const runner =
     input.runFfmpeg ?? ((args: string[]) => defaultRunFfmpeg(args, timeoutMs, input.signal));
-  const encode = input.encodeAac ?? defaultAacEncoder(timeoutMs, input.signal);
+  const encode = input.encodeAac ?? defaultAacEncoder(timeoutMs, input.signal, input.sourcePath);
   // Injected runners usually do not materialize media. Tests that exercise
   // peak correction opt in with a matching probe; production always uses the
   // real post-codec measurement.
@@ -317,7 +325,12 @@ export async function padOrTrimAudioToVideoFrameCount(
       const ffmpegResult =
         step.kind === "copy"
           ? await runner(step.args)
-          : await encode(input.audioPath, input.outputPath, targetDurationSeconds, step.filter);
+          : await encode(
+              input.sourcePath ?? input.audioPath,
+              input.outputPath,
+              targetDurationSeconds,
+              step.filter,
+            );
       if (!ffmpegResult.success) {
         return {
           success: false,
@@ -349,6 +362,7 @@ export async function padOrTrimAudioToVideoFrameCount(
   if (probeTruePeak) {
     const correction = await enforceAacTruePeak({
       audioPath: input.outputPath,
+      sourcePath: input.sourcePath,
       targetDurationSeconds,
       signal: input.signal,
       probeTruePeak,
@@ -390,11 +404,13 @@ export async function constrainAacTruePeak(input: {
   timeoutMs?: number;
   probeTruePeakDbfs?: (audioPath: string, signal?: AbortSignal) => Promise<number>;
   encodeAac?: AacEncoder;
+  rewriteSource?: SourceRewriter;
 }): Promise<{
   success: boolean;
   error?: string;
   failureReason?: "external_interruption";
   loweredDb?: number;
+  sourceStale?: true;
 }> {
   const timeoutMs = input.timeoutMs ?? DEFAULT_CONFIG.ffmpegProcessTimeout;
   return enforceAacTruePeak({
@@ -406,8 +422,23 @@ export async function constrainAacTruePeak(input: {
       input.probeTruePeakDbfs ??
       ((audioPath, signal) => measureTruePeakDbfs(audioPath, { timeoutMs, signal })),
     encode: input.encodeAac ?? defaultAacEncoder(timeoutMs, input.signal, input.sourcePath),
+    rewriteSource:
+      input.rewriteSource ??
+      ((sourcePath, outputPath, filter) =>
+        defaultRunFfmpeg(
+          ["-i", sourcePath, "-af", filter, "-c:a", "pcm_f32le", "-y", outputPath],
+          timeoutMs,
+          input.signal,
+        )),
   });
 }
+
+/** Writes `sourcePath` through `filter` to `outputPath` as float PCM. */
+type SourceRewriter = (
+  sourcePath: string,
+  outputPath: string,
+  filter: string,
+) => Promise<StepResult>;
 
 interface EnforceAacTruePeakInput {
   audioPath: string;
@@ -416,6 +447,28 @@ interface EnforceAacTruePeakInput {
   signal?: AbortSignal;
   probeTruePeak: (audioPath: string, signal?: AbortSignal) => Promise<number>;
   encode: AacEncoder;
+  /** Given with `sourcePath`, a cut is also applied to the PCM so it still encodes to `audioPath`. */
+  rewriteSource?: SourceRewriter;
+}
+
+/** Applies the delivered cut to the PCM. False means the PCM no longer matches the delivered AAC, even if deleting it was refused. */
+async function cutSource(
+  input: EnforceAacTruePeakInput,
+  scratchDir: string,
+  // Tabario fork: the PCM gets the same limiter the delivered AAC was encoded through.
+  filter: string,
+): Promise<boolean> {
+  if (!input.sourcePath || !input.rewriteSource) return true;
+  const cutPath = join(scratchDir, "source.wav");
+  try {
+    const result = await input.rewriteSource(input.sourcePath, cutPath, filter);
+    if (!result.success) throw new Error(result.error);
+    renameWithRetry(cutPath, input.sourcePath, { copyFallback: true });
+    return true;
+  } catch {
+    removeScratch(input.sourcePath);
+    return false;
+  }
 }
 
 async function enforceAacTruePeak(input: EnforceAacTruePeakInput): Promise<{
@@ -423,10 +476,11 @@ async function enforceAacTruePeak(input: EnforceAacTruePeakInput): Promise<{
   error?: string;
   failureReason?: "external_interruption";
   loweredDb?: number;
+  sourceStale?: true;
 }> {
   let scratchDir: string | undefined;
   try {
-    scratchDir = mkdtempSync(join(dirname(input.audioPath), ".true-peak-"));
+    scratchDir = createStagingDir(dirname(input.audioPath), ".true-peak-");
     const correctedPath = join(scratchDir, "audio.m4a");
     const measurements: string[] = [];
     let limiterCeilingDb = AAC_DELIVERY_TRUE_PEAK_DBFS;
@@ -445,14 +499,15 @@ async function enforceAacTruePeak(input: EnforceAacTruePeakInput): Promise<{
       if (pass === 0) initialTruePeakDbfs = truePeakDbfs;
       if (truePeakDbfs <= AAC_DELIVERY_TRUE_PEAK_DBFS) {
         if (measuredPath !== correctedPath) return { success: true };
+        const sourceCut = await cutSource(input, scratchDir, aacTruePeakLimiter(limiterCeilingDb));
         renameWithRetry(correctedPath, input.audioPath, { copyFallback: true });
         // Tabario fork: the limiter only touches peaks and never turns the mix
         // down, so upstream's whole-mix attenuation has no equivalent here. What
         // was lowered is the true peak, from its first measurement to its last.
-        return {
-          success: true,
-          loweredDb: Number((initialTruePeakDbfs - truePeakDbfs).toFixed(2)),
-        };
+        const loweredDb = Number((initialTruePeakDbfs - truePeakDbfs).toFixed(2));
+        return sourceCut
+          ? { success: true, loweredDb }
+          : { success: true, loweredDb, sourceStale: true };
       }
       if (pass === MAX_TRUE_PEAK_CORRECTION_PASSES) break;
 
@@ -465,7 +520,7 @@ async function enforceAacTruePeak(input: EnforceAacTruePeakInput): Promise<{
         limiterCeilingDb += AAC_DELIVERY_TRUE_PEAK_DBFS - truePeakDbfs - TRUE_PEAK_RETRY_MARGIN_DB;
       }
       const result = await input.encode(
-        input.audioPath,
+        input.sourcePath ?? input.audioPath,
         correctedPath,
         input.targetDurationSeconds,
         aacTruePeakCorrectionFilter(input.targetDurationSeconds, limiterCeilingDb),
@@ -648,7 +703,23 @@ export async function runFfprobeJson<T>(args: string[], signal?: AbortSignal): P
   if (!args.includes("--")) {
     throw new Error('[audioPadTrim] ffprobe args must terminate options with "--".');
   }
+  // With a restricted page network, a URL input not declared by the render reaches only public hosts.
+  const proxying = withPublicOnlyProxy(args, [args.indexOf("--") + 1]);
+  const routed = proxying && (await proxying);
+  try {
+    return await spawnFfprobeJson<T>(routed?.args ?? args, routed?.env, signal);
+  } finally {
+    await routed?.close();
+  }
+}
+
+async function spawnFfprobeJson<T>(
+  args: string[],
+  env: NodeJS.ProcessEnv | undefined,
+  signal?: AbortSignal,
+): Promise<T> {
   const proc = spawn(getFfprobeBinary(), args, {
+    ...(env && { env }),
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });

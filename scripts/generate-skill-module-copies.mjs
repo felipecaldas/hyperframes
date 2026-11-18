@@ -9,6 +9,10 @@ export const skillModuleCopies = [
     ["skills/media-use/scripts/lib/media-fetch.mjs"],
   ],
   [
+    "packages/cli/src/media-use/lib/terminal-text.mjs",
+    ["skills/media-use/scripts/lib/terminal-text.mjs"],
+  ],
+  [
     "packages/cli/src/media-use/lib/openverse.mjs",
     ["skills/media-use/audio/scripts/lib/openverse.mjs"],
   ],
@@ -17,6 +21,15 @@ export const skillModuleCopies = [
     [
       "skills/media-use/audio/scripts/lib/main-module.mjs",
       "packages/cli/src/media-use/lib/main-module.mjs",
+    ],
+  ],
+  [
+    "skills/hyperframes/scripts/lib/windows-exe-search.mjs",
+    [
+      "skills/media-use/scripts/lib/windows-exe-search.mjs",
+      "skills/figma/scripts/lib/windows-exe-search.mjs",
+      // The CLI build replaces the published media-use scripts/lib with this folder.
+      "packages/cli/src/media-use/lib/windows-exe-search.mjs",
     ],
   ],
 ];

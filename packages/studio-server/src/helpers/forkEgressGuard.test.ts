@@ -121,6 +121,22 @@ const JUSTIFIED_UNREACHABLE: Record<string, string> = {
     "studio only: an <a href> download link in renders/FfmpegRequiredNotice.tsx, not a subresource — " +
     "no request is made without a user click. Also unreachable in practice: the notice renders only " +
     "when the server reports no FFmpeg, and the compositor image ships it.",
+  // Added on the v0.9.64 merge (TAB-1337). Upstream added QuickShare, a Share
+  // button that publishes the project to hyperframes.dev. These two origins are
+  // a comparison list in QuickShareControls.tsx (isPricingPage), not a request.
+  // The whole share UI renders only when the server injects the
+  // `hyperframes-local-share` meta tag and answers /api/share/bootstrap, and the
+  // fork serves neither unless HYPERFRAMES_LOCAL_SHARE=1
+  // (cli/src/server/shareBoundary.ts localShareEnabled), which the compositor
+  // never sets. Asserted by cli/src/server/shareBoundary.tabario.test.ts and
+  // cli/src/server/studioServer.file-race.test.ts.
+  "hyperframes.dev":
+    "studio only: an origin string compared against a share plan's upgrade link in " +
+    "share/QuickShareControls.tsx, never fetched. The share UI is off unless HYPERFRAMES_LOCAL_SHARE=1 " +
+    "(cli/src/server/shareBoundary.ts), which Tabario never sets.",
+  "dev.hyperframes.dev":
+    "studio only: the staging twin of hyperframes.dev in the same QuickShareControls.tsx comparison " +
+    "list, never fetched, and unreachable for the same reason: share is off unless HYPERFRAMES_LOCAL_SHARE=1.",
 };
 
 function sourceFiles(dir: string): string[] {
